@@ -1,0 +1,170 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Solid colours are stored as SPACE-SEPARATED CHANNELS, not hex, so that
+ * Tailwind's opacity modifiers work on them: `bg-accent/25` compiles to
+ * `rgb(var(--c-accent) / 0.25)`. With a bare hex in the variable, Tailwind
+ * 3 cannot inject an alpha and silently emits NO RULE AT ALL — a selection
+ * highlight that isn't subtle, it's absent. Use rgb(var(--x)) in hand-written
+ * CSS. */
+:root {
+  --c-surface: 246 246 248;
+  --c-surface-muted: 236 236 240;
+  --c-surface-elevated: 255 255 255;
+  --c-ink: 26 26 31;
+  --c-ink-muted: 90 90 102;
+  --c-ink-faint: 154 154 166;
+  --c-accent: 107 86 255;
+  --c-accent-strong: 86 64 240;
+  --c-card-bg: rgba(0, 0, 0, 0.07);
+  --c-card-border: rgba(0, 0, 0, 0.14);
+  --c-rule: rgba(0, 0, 0, 0.07);
+  --c-row-alt: rgba(0, 0, 0, 0.025);
+}
+
+:root.dark,
+.dark {
+  --c-surface: 27 27 32;
+  --c-surface-muted: 33 33 39;
+  --c-surface-elevated: 42 42 49;
+  /* Not 241 241 244: near-white on near-black is the single biggest source
+   * of eye strain in a dense grid, and a table is nothing but dense text. */
+  --c-ink: 220 220 226;
+  --c-ink-muted: 155 155 166;
+  --c-ink-faint: 107 107 118;
+  --c-accent: 127 110 242;
+  --c-accent-strong: 107 86 255;
+  --c-card-bg: rgba(255, 255, 255, 0.035);
+  --c-card-border: rgba(255, 255, 255, 0.07);
+  /* Interior rules sit at roughly a third of the strength of a real edge.
+   * At full strength, a wide table reads as a wall of boxes. */
+  --c-rule: rgba(255, 255, 255, 0.045);
+  --c-row-alt: rgba(255, 255, 255, 0.022);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+/* `hiddenInset` window style on macOS overlays traffic lights on our
+ * content; the title bar marks itself draggable so the user can grab
+ * any empty area. Interactive children must opt out with `.no-drag`. */
+.draggable {
+  -webkit-app-region: drag;
+}
+.no-drag {
+  -webkit-app-region: no-drag;
+}
+
+/* Reusable text input style — theme-aware fill and border. Used by the
+ * sidebar search, the workset sheet, and the editor file filter. */
+.field {
+  background: var(--c-card-bg);
+  border: 1px solid var(--c-card-border);
+  border-radius: 4px;
+  outline: none;
+  color: rgb(var(--c-ink));
+  transition: background 120ms, border-color 120ms;
+}
+.field::placeholder {
+  color: rgb(var(--c-ink-faint));
+}
+.field:focus,
+.field:focus-within {
+  background: rgb(var(--c-surface-elevated));
+  border-color: rgb(var(--c-accent));
+}
+
+.sidebar-row {
+  border: 1px solid transparent;
+  transition: background 120ms, border-color 120ms, color 120ms;
+}
+.sidebar-row-selected {
+  /* A quiet tint plus a leading marker, rather than a saturated block.
+   * The marker carries the "this one" signal; the fill only needs to
+   * separate it from its neighbours. */
+  background: rgb(var(--c-accent) / 0.12);
+  border-color: transparent;
+  box-shadow: inset 2px 0 0 rgb(var(--c-accent));
+}
+
+/* Zebra striping. Across 20 columns of hex ids, the eye loses the row it
+ * is on without it — this is legibility, not decoration. */
+.grid-row-alt {
+  background: var(--c-row-alt);
+}
+.grid-rule {
+  border-color: var(--c-rule);
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(127, 127, 127, 0.25);
+  border-radius: 10px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(127, 127, 127, 0.4);
+  background-clip: padding-box;
+}
+
+body {
+  margin: 0;
+  font-family:
+    -apple-system,
+    BlinkMacSystemFont,
+    'SF Pro Text',
+    system-ui,
+    sans-serif;
+  background-color: rgb(var(--c-surface));
+  color: rgb(var(--c-ink));
+}
+
+/* Indeterminate progress sweep used by the run bar while a query is
+ * in flight. Runs from -100% to 200% so the bar enters from the left,
+ * sweeps fully across, and disappears off the right before looping. */
+@keyframes progress-slide {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(400%);
+  }
+}
+.animate-progress-slide {
+  animation: progress-slide 1.4s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+
+/* Each statement reads as its own block, so a buffer of several never looks
+ * like one long query. A quiet rule down the left marks every statement; the
+ * one the cursor is in gets the accent, which is also the one ⌘↵ will run. */
+.cm-stmt-line {
+  box-shadow: inset 2px 0 0 var(--c-rule);
+}
+.cm-stmt-active {
+  background: rgb(var(--c-accent) / 0.04);
+  box-shadow: inset 2px 0 0 rgb(var(--c-accent) / 0.5);
+}
+
+/* Plain English typed where SQL goes is shown as a question, not as broken
+ * SQL. `!important` beats the syntax highlighter, which is colouring words
+ * it has no business claiming — and this lives here rather than in the
+ * CodeMirror theme object because a style module may drop the flag. */
+.cm-question {
+  color: rgb(var(--c-ink-muted)) !important;
+  font-style: italic !important;
+}
+.cm-question-line {
+  background: rgb(var(--c-accent) / 0.09);
+}
