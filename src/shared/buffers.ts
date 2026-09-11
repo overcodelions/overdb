@@ -71,3 +71,25 @@ export function bufferLabel(sql: string): string {
   const target = m[2]?.replace(/[`"]/g, '');
   return target ? `${verb} ${target}` : verb;
 }
+
+/// Where a span we measured earlier sits NOW.
+///
+/// Anything that sends text to a model and puts the answer back holds
+/// offsets across a round trip that takes seconds, and you are free to keep
+/// typing in the meantime — so by the time the answer lands, `from`/`to`
+/// may name different characters than the ones that were asked about.
+/// Replacing them anyway is how a rewrite eats the statement below it.
+///
+/// The original text is the anchor: still at those offsets, use them; moved
+/// but still present exactly once, follow it; gone or now ambiguous, refuse
+/// — there is no honest place to put the answer and dropping it is better
+/// than guessing.
+export function relocate(
+  text: string,
+  span: { from: number; to: number; was: string },
+): { from: number; to: number } | null {
+  if (text.slice(span.from, span.to) === span.was) return { from: span.from, to: span.to };
+  const at = text.indexOf(span.was);
+  if (at === -1 || at !== text.lastIndexOf(span.was)) return null;
+  return { from: at, to: at + span.was.length };
+}

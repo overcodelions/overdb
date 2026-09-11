@@ -5,6 +5,7 @@ import { PlanRiver } from './PlanRiver';
 import { PlanLedger } from './PlanLedger';
 import { PlanReading, PlanVerdict } from './PlanReading';
 import { resolveStep, tableAliases } from '@shared/aliases';
+import { useStore } from './store';
 
 /// The plan, twice: as a picture, then as the table.
 ///
@@ -118,11 +119,52 @@ export function PlanView({
         </tbody>
       </table>
 
-      <details className="p-3">
-        <summary className="text-[11px] text-ink-faint cursor-pointer">Raw plan</summary>
-        <pre className="mt-2 text-[10px] font-mono whitespace-pre-wrap text-ink-muted">{raw}</pre>
-      </details>
+      <RawPlan raw={raw} />
     </div>
+  );
+}
+
+/// The plan exactly as the server sent it, with a way to get it out.
+///
+/// Everything above this is an interpretation, and the moment anyone wants
+/// a second opinion — a colleague, a ticket, a model — what they need is
+/// the server's own words, not ours. Copying it out of a <pre> by hand
+/// loses the last line as often as not.
+function RawPlan({ raw }: { raw: string }): JSX.Element {
+  const toast = useStore((s) => s.toast);
+  // Pretty-printed when it is JSON, which every engine but SQLite sends.
+  // One line of three thousand characters is not a thing anyone reads, and
+  // the servers do not all indent it themselves.
+  const text = (() => {
+    try {
+      return JSON.stringify(JSON.parse(raw), null, 2);
+    } catch {
+      return raw;
+    }
+  })();
+
+  return (
+    <details className="p-3 group">
+      <summary className="text-[11px] text-ink-faint cursor-pointer flex items-center gap-2">
+        <span>Raw plan</span>
+        <span className="text-ink-faint/60">{text.length.toLocaleString()} characters</span>
+      </summary>
+      <div className="mt-2 relative">
+        <button
+          onClick={() => {
+            void window.overdb.invoke('app:copyText', text);
+            toast('Raw plan copied.');
+          }}
+          title="Copy the plan exactly as the server sent it"
+          className="absolute top-1.5 right-1.5 text-[10px] px-2 py-0.5 rounded border border-card bg-surface text-ink-muted hover:text-ink hover:bg-card"
+        >
+          Copy
+        </button>
+        <pre className="text-[10px] font-mono whitespace-pre-wrap text-ink-muted bg-surface-muted rounded p-2.5 pr-16 max-h-[420px] overflow-auto">
+          {text}
+        </pre>
+      </div>
+    </details>
   );
 }
 

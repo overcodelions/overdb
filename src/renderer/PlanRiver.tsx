@@ -4,7 +4,15 @@ import { chainFlow, type Flow } from '@shared/planFlow';
 import { isDriven } from '@shared/planLoops';
 import { planShape, share } from '@shared/planShape';
 import { resolveStep, tableAliases } from '@shared/aliases';
-import { branchesOf, planTree, type PlanNode } from '@shared/planTree';
+import {
+  branchesOf,
+  descendants,
+  feedersOf,
+  planTree,
+  rowsOf,
+  subqueryNames,
+  type PlanNode,
+} from '@shared/planTree';
 import { middleTruncate } from '@shared/truncate';
 
 /// The main line of the plan as a river.
@@ -143,6 +151,36 @@ export function PlanRiver({
 
   const anyMotion = steps.some((s) => s.flow.dropped > 0 || s.runs > 1);
 
+  /// The work hanging off a step that the main line does not draw.
+  ///
+  /// It was a dashed line and a count pointing at a ledger a screen away,
+  /// and on a real plan it stood for 162,518 of the 191,277 rows — the
+  /// picture was showing fifteen percent of the query. Drawn here as a fan
+  /// under the step it feeds: vertical, so it costs no width, and ranked,
+  /// because which of six independent subqueries is the expensive one is
+  /// the only thing anybody wants from this.
+  ///
+  /// At most one step gets a fan. Two side by side is the two-thousand-
+  /// pixel board this whole view replaced.
+  const fanAt = steps.findIndex((step) => feedersOf(step.node).length > 0);
+  const feeders = fanAt < 0 ? [] : feedersOf(steps[fanAt].node);
+  const feederNames = subqueryNames(feeders, (t) => resolveStep(t, aliases)?.table ?? t);
+  const fan = feeders
+    .map((node, i) => ({ node, rows: rowsOf(node), name: feederNames[i] }))
+    .sort((a, b) => b.rows - a.rows);
+  const fanTotal = fan.reduce((n, f) => n + f.rows, 0);
+  const fanMax = Math.max(1, ...fan.map((f) => f.rows));
+  const everything = rows.reduce(
+    (n, r) => n + (r.actualRows ?? r.rows ?? 0) * Math.max(1, r.loops ?? 1),
+    0,
+  );
+  // Reported once, under the fan, rather than as a marker on every row.
+  const hedged =
+    fanAt >= 0 &&
+    feedersOf(steps[fanAt].node).some(
+      (b) => b.row.dependent === true || descendants(b).some((d) => d.row.dependent === true),
+    );
+
   return (
     <div ref={host} className="px-3 pt-1 pb-2 overflow-x-auto">
       <svg width={width} height={228} viewBox={`0 0 ${width} 228`} fill="none">
@@ -213,6 +251,74 @@ export function PlanRiver({
           </text>
         )}
       </svg>
+
+      {fan.length > 0 && (
+        // Hung off the step it feeds, not floating under the river. The
+        // rule down its left continues the dashed connector the node
+        // drops, so the fan reads as part of that step rather than as a
+        // second table that happens to sit below the picture.
+        <div
+          className="mt-0.5 mb-5 border-l border-accent/30 pl-3"
+          style={{
+            marginLeft: xOf(fanAt) + 6,
+            width: Math.max(320, Math.min(580, width - xOf(fanAt) - 32)),
+          }}
+        >
+          <div className="flex items-baseline gap-2 mb-2">
+            <span className="text-[10px] uppercase tracking-wide text-ink-faint">
+              What feeds it
+            </span>
+            <span className="flex-1" />
+            <span className="text-[10px] text-ink-faint">
+              <span className="tabular-nums text-accent">{fanTotal.toLocaleString()} rows</span>
+              {everything > 0 && <> · {Math.round((fanTotal / everything) * 100)}% of what this query reads</>}
+            </span>
+          </div>
+
+          <div className="flex flex-col gap-[5px]">
+            {fan.slice(0, 8).map((f) => {
+              // "partner · print_media_activation" is two facts: the table
+              // this subquery reads hardest, and the one that tells it
+              // apart from its siblings. The second is the qualifier, and
+              // it reads as one when it is dimmer than the first.
+              const [head, ...rest] = f.name.split(' · ');
+              return (
+                <div key={f.node.index} className="flex items-center gap-2.5 h-[13px]">
+                  <span
+                    className="w-[196px] shrink-0 truncate font-mono text-[10px] text-ink-muted"
+                    title={f.name}
+                  >
+                    {head}
+                    {rest.length > 0 && <span className="text-ink-faint"> · {rest.join(' · ')}</span>}
+                  </span>
+                  <span className="flex-1 min-w-0 h-[6px] rounded-full bg-wash-strong">
+                    <span
+                      className="block h-[6px] rounded-full bg-accent/70"
+                      style={{ width: `${(f.rows / fanMax) * 100}%`, minWidth: 4 }}
+                    />
+                  </span>
+                  <span className="w-[62px] shrink-0 text-right tabular-nums text-[10px] text-ink">
+                    {f.rows.toLocaleString()}
+                  </span>
+                </div>
+              );
+            })}
+            {fan.length > 8 && (
+              <p className="text-[10px] text-ink-faint pt-0.5">
+                + {fan.length - 8} more, itemised below
+              </p>
+            )}
+          </div>
+
+          {hedged && (
+            <p className="mt-2.5 text-[10px] text-ink-faint leading-snug max-w-[64ch]">
+              The server marks these dependent and not cacheable. They are counted here as built
+              once, which is what <span className="font-mono">&lt;materialize&gt;</span> means — if
+              any were rebuilt per row it would cost far more than this.
+            </p>
+          )}
+        </div>
+      )}
 
       {anyMotion && (
         <p className="text-[10.5px] text-ink-faint leading-snug mt-1">
@@ -347,22 +453,24 @@ function Reach({
         strokeOpacity={waist > 18 ? 0.75 : 1}
         className={waist > 8 ? 'trace-flow' : 'trace-flow-thin'}
       />
+      {/* One label, not two. These were separate texts — the survivor
+          count centred on the reach, the fan-out at 60% along it — and on
+          a short stretch they printed over each other into a single
+          unreadable run of glyphs. They are one sentence anyway: this many
+          rows arrive, and each fans out to that many. */}
       <text
         x={(x0 + x1) / 2}
         y={CY - half(Math.max(from, to)) - 8}
         textAnchor="middle"
         className="font-mono"
-        style={{ fontSize: 10, fill: COOL }}
+        style={{ fontSize: 10 }}
       >
-        {estimated ? '≈' : ''}
-        {rows.toLocaleString()}
+        <tspan fill={COOL}>
+          {estimated ? '≈' : ''}
+          {rows.toLocaleString()}
+        </tspan>
+        {widen > 1 && <tspan fill={HOT}> × {widen.toLocaleString()} each</tspan>}
       </text>
-
-      {widen > 1 && (
-        <text x={b + 4} y={CY - half(to) - 8} className="font-mono" style={{ fontSize: 10, fill: HOT }}>
-          ×{widen.toLocaleString()} each
-        </text>
-      )}
       {runs > 1 && (
         // The loop, running backward against everything else on the board.
         <rect
@@ -444,25 +552,39 @@ function Node({
   aliases: Record<string, string>;
 }): JSX.Element {
   const row = step.node.row;
-  const named = resolveStep(row.title, aliases);
+  // A stage — a sort, a temporary table — has no alias to resolve and no
+  // index to name. Running it through the table path printed "no index"
+  // under the word "sort", which reads as a finding and is not one.
+  const stage = row.stage;
+  const named = stage ? null : resolveStep(row.title, aliases);
   // The table leads: an alias means nothing an hour later. The alias trails
   // it so the step can still be found in the table underneath.
   const chars = Math.floor(w / 7.2);
-  const title = middleTruncate(named?.table ?? row.title, chars);
-  const under = [named?.alias, row.key ? `via ${keyLabel(row.key)}` : row.access]
-    .filter(Boolean)
-    .join(' · ');
+  const title = middleTruncate(stage ? row.title : (named?.table ?? row.title), chars);
+  const under = stage
+    ? (row.extra ?? '')
+    : [
+        named?.alias,
+        row.key
+          // Covering is the good news in a plan, and "via IDX_FOO" alone
+          // cannot tell it from an index that costs a row lookup each time.
+          ? `via ${keyLabel(row.key)}${row.covering ? ' · covering' : ''}`
+          : row.access,
+      ]
+        .filter(Boolean)
+        .join(' · ');
+  // A materialized subquery is not a branch — it is ONE thing built from
+  // several steps — and until this it had no mark on the picture at all.
+  // The counts live in the fan under the river; this is only the anchor
+  // that says which step they belong to.
   const branches = branchesOf(step.node);
-  const fed = branches.reduce(
-    (sum, b) =>
-      sum +
-      [b, ...flatten(b)].reduce(
-        (n, node) =>
-          n + (node.row.actualRows ?? node.row.rows ?? 0) * Math.max(1, node.row.loops ?? 1),
-        0,
-      ),
-    0,
-  );
+  const feeders = feedersOf(step.node);
+  const feedNote =
+    branches.length > 0
+      ? branches.length === 1
+        ? '1 subquery feeds this step'
+        : `${branches.length} subqueries feed this step`
+      : `built from ${feeders.length} step${feeders.length === 1 ? '' : 's'}`;
 
   return (
     <g>
@@ -484,8 +606,16 @@ function Node({
         width={w}
         height={NODE_H}
         rx="5"
-        fill={hot ? 'rgb(251 146 60 / 0.16)' : 'rgb(52 211 153 / 0.10)'}
-        stroke={hot ? 'rgb(251 146 60 / 0.55)' : 'rgb(52 211 153 / 0.35)'}
+        fill={
+          hot ? 'rgb(251 146 60 / 0.16)'
+          : stage ? 'rgb(127 110 242 / 0.12)'
+          : 'rgb(52 211 153 / 0.10)'
+        }
+        stroke={
+          hot ? 'rgb(251 146 60 / 0.55)'
+          : stage ? 'rgb(127 110 242 / 0.4)'
+          : 'rgb(52 211 153 / 0.35)'
+        }
       />
 
       <text x={x + w / 2} y={CY - 18} textAnchor="middle" className="fill-ink font-mono" style={{ fontSize: 12 }}>
@@ -503,9 +633,11 @@ function Node({
         className="font-mono"
         style={{ fontSize: 10, fill: step.runs > 1 ? HOT : 'rgb(var(--c-ink-muted))' }}
       >
-        {step.runs > 1
-          ? `${step.per.toLocaleString()} × ${step.runs.toLocaleString()} runs = ${step.flow.read.toLocaleString()}`
-          : `reads ${step.flow.read.toLocaleString()}`}
+        {stage
+          ? `${STAGE_VERB[stage]} ${step.flow.read.toLocaleString()}`
+          : step.runs > 1
+            ? `${step.per.toLocaleString()} × ${step.runs.toLocaleString()} runs = ${step.flow.read.toLocaleString()}`
+            : `reads ${step.flow.read.toLocaleString()}`}
       </text>
       {row.warn && !row.key && (
         <text x={x + w / 2} y={CY + 29} textAnchor="middle" style={{ fontSize: 10, fill: WARN }}>
@@ -513,10 +645,13 @@ function Node({
         </text>
       )}
 
-      {branches.length > 0 && (
+      {feeders.length > 0 && (
         <g>
           <path
-            d={`M${x + w / 2} ${CY + NODE_H / 2} V${FEEDS_Y - 10} H${x + 6}`}
+            // Carried on to the foot of the frame, where the fan's own
+            // left rule picks it up. Stopping at the label left the two
+            // reading as separate things with a gap between them.
+            d={`M${x + w / 2} ${CY + NODE_H / 2} V${FEEDS_Y - 10} H${x + 6} V228`}
             stroke={ACCENT}
             strokeOpacity="0.55"
             strokeWidth="1.6"
@@ -529,12 +664,9 @@ function Node({
             strokeWidth="1.6"
             strokeLinecap="round"
           />
-          <text x={x + 6} y={FEEDS_Y + 4} style={{ fontSize: 10.5, fill: ACCENT }}>
-            {branches.length === 1 ? '1 subquery feeds this step' : `${branches.length} subqueries feed this step`}
-            <tspan style={{ fill: 'rgb(155 155 166)' }}>
-              {' '}
-              — {fed.toLocaleString()} rows, itemised below
-            </tspan>
+          <text x={x + 14} y={FEEDS_Y + 4} style={{ fontSize: 10.5, fill: ACCENT }}>
+            {feedNote}
+            <tspan style={{ fill: 'rgb(155 155 166)' }}> — drawn below</tspan>
           </text>
         </g>
       )}
@@ -542,9 +674,15 @@ function Node({
   );
 }
 
-function flatten(node: PlanNode): PlanNode[] {
-  return node.children.flatMap((c) => [c, ...flatten(c)]);
-}
+/// What each pass actually does to the rows. "reads" is wrong for all of
+/// them — nothing here touches a table.
+const STAGE_VERB: Record<NonNullable<PlanRow['stage']>, string> = {
+  sort: 'sorts',
+  temporary: 'writes',
+  group: 'groups',
+  distinct: 'dedupes',
+  union: 'merges',
+};
 
 function clip(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
