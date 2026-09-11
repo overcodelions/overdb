@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { heat, planShape, share, wasteSentence } from './planShape';
+import { heat, planShape, share, stageSentence, wasteSentence } from './planShape';
 import type { PlanRow } from './plan';
 
 const scan: PlanRow = {
@@ -105,5 +105,67 @@ describe('share', () => {
     // "0.0% survives" reads as a rounding error rather than as the finding
     // it is: one row in thirty thousand.
     expect(share(0.0035)).toBe('1 row in 28,571');
+  });
+});
+
+describe('passes over the rows', () => {
+  const join = (): PlanRow[] => [
+    { depth: 0, title: 'p', access: 'ALL', rows: 66517, filtered: 100 },
+    { depth: 0, title: 'pw', access: 'ref', key: 'K', rows: 10, loops: 66517 },
+    { depth: 0, title: 'temporary table', stage: 'temporary', rows: 665170 },
+    { depth: 0, title: 'sort', stage: 'sort', rows: 665170, warn: 'blocks' },
+  ];
+
+  it('does not count a sort as rows read', () => {
+    // A sort reads no table. Counting it added the join's output to the
+    // headline once per pass — 731,687 rows read reported as 2,062,027.
+    expect(planShape(join(), null).total).toBe(731_687);
+  });
+
+  it('does not let a pass become the heaviest step', () => {
+    expect(planShape(join(), null).heaviest?.title).toBe('pw');
+  });
+
+  it('keeps them where a view can still find them', () => {
+    expect(planShape(join(), null).stages.map((s) => s.row.title)).toEqual([
+      'temporary table',
+      'sort',
+    ]);
+  });
+
+  it('says what has to finish before the first row arrives', () => {
+    const rows = join();
+    rows[2] = { ...rows[2], warn: 'blocks' };
+    expect(stageSentence(planShape(rows, null))).toBe(
+      'Nothing comes back until all 665,170 rows have been through a temporary table and a sort.',
+    );
+  });
+
+  it('stays quiet about a pass small enough not to matter', () => {
+    // Only a pass the parser flagged is worth a sentence; a sort of twelve
+    // rows is not why anything is slow.
+    const rows: PlanRow[] = [
+      { depth: 0, title: 'p', access: 'ALL', rows: 12 },
+      { depth: 0, title: 'sort', stage: 'sort', rows: 12 },
+    ];
+    expect(stageSentence(planShape(rows, null))).toBeNull();
+  });
+});
+
+describe('the ratio divides the headline', () => {
+  it('measures waste against everything the query reads', () => {
+    // Not against the heaviest step. The headline beside the sentence is
+    // the total, so a ratio taken from one step handed the reader two
+    // numbers that would not divide: 61,474 rows read, 7 returned, and a
+    // sentence claiming 4,088 rows per row kept.
+    const rows: PlanRow[] = [
+      { depth: 0, title: 'p', access: 'ref', key: 'K', rows: 28616, filtered: 0.5 },
+      { depth: 1, title: 'workflow_activation', access: 'ALL', rows: 26443 },
+      { depth: 1, title: 'custom_activity_activation', access: 'ALL', rows: 4159 },
+    ];
+    const shape = planShape(rows, 7);
+    expect(shape.total).toBe(59_218);
+    expect(shape.waste).toBeCloseTo(59_218 / 7);
+    expect(wasteSentence(shape)).toContain('8,460');
   });
 });

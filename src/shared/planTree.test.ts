@@ -1,5 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { branchesOf, chainOf, countSteps, planTree } from './planTree';
+import {
+  branchesOf,
+  chainOf,
+  countSteps,
+  feedersOf,
+  planTree,
+  rowsOf,
+  subqueryName,
+  subqueryNames,
+} from './planTree';
 import type { PlanRow } from './plan';
 
 const row = (depth: number, title: string): PlanRow => ({ depth, title });
@@ -96,5 +105,92 @@ describe('branchesOf / chainOf', () => {
     const tree = planTree([row(0, 'a'), row(1, 'b'), row(1, 'c')]);
     expect(chainOf(tree[0]).map((n) => n.row.title)).toEqual(['b', 'c']);
     expect(branchesOf(tree[0])).toEqual([]);
+  });
+});
+
+describe('what feeds a step', () => {
+  const rows: PlanRow[] = [
+    { depth: 0, title: 'partner0_', access: 'ref', key: 'uq', rows: 28616, filtered: 0.5 },
+    { depth: 1, title: '<materialized_subquery>', access: 'eq_ref', rows: 1, branch: true },
+    { depth: 2, title: 'workflowac19_', access: 'ALL', rows: 26443 },
+    { depth: 2, title: 'partner18_', access: 'eq_ref', rows: 1, loops: 26443 },
+    { depth: 1, title: '<materialized_subquery>', access: 'eq_ref', rows: 1, branch: true },
+    { depth: 2, title: 'customacti21_', access: 'ALL', rows: 4159 },
+  ];
+
+  it('names a subquery after the table it reads hardest', () => {
+    // Its own head is `<materialized_subquery>`, which is the same for all
+    // six of them and identifies nothing. The heaviest table inside it is
+    // what anyone calls it, and the one they would go and index.
+    const [first, second] = planTree(rows)[0].children;
+    expect(subqueryName(first)).toBe('workflowac19_');
+    expect(subqueryName(second)).toBe('customacti21_');
+  });
+
+  it('counts every row under a subquery, loops included', () => {
+    const [first] = planTree(rows)[0].children;
+    // 1 for the head, 26,443 for the scan, 26,443 for the driven lookup.
+    expect(rowsOf(first)).toBe(52_887);
+  });
+
+  it('treats the steps building one materialized table as its feeders', () => {
+    // Not branches — one thing built from several steps — and nothing
+    // pointed at them until feedersOf covered both cases.
+    const built: PlanRow[] = [
+      { depth: 0, title: 'act', access: 'eq_ref', rows: 1, loops: 143 },
+      { depth: 1, title: 'e', access: 'ref', rows: 10, materialized: true },
+      { depth: 1, title: 'm', access: 'ref', rows: 467, materialized: true },
+    ];
+    expect(feedersOf(planTree(built)[0]).map((n) => n.row.title)).toEqual(['e', 'm']);
+  });
+
+  it('prefers real branches when a step has both', () => {
+    expect(feedersOf(planTree(rows)[0]).every((n) => n.row.branch === true)).toBe(true);
+  });
+});
+
+describe('naming sibling subqueries apart', () => {
+  // Two of six branches are heaviest in `partner` — each re-scans it,
+  // which IS the finding — but two rows reading "partner 31,477" and
+  // "partner 29,046" look like a rendering fault rather than like the same
+  // table being read twice.
+  const rows: PlanRow[] = [
+    { depth: 0, title: 'partner0_', access: 'ref', rows: 28616, filtered: 0.5 },
+    { depth: 1, title: '<materialized_subquery>', rows: 1, branch: true },
+    { depth: 2, title: 'partner16_', access: 'ref', rows: 28616, filtered: 0.5 },
+    { depth: 2, title: 'printactiv17_', access: 'ref', rows: 19, loops: 143 },
+    { depth: 1, title: '<materialized_subquery>', rows: 1, branch: true },
+    { depth: 2, title: 'partner13_', access: 'ref', rows: 28616, filtered: 0.5 },
+    { depth: 2, title: 'pluginacti14_', access: 'ref', rows: 1, loops: 143 },
+  ];
+  const alias: Record<string, string> = {
+    partner13_: 'partner',
+    partner16_: 'partner',
+    printactiv17_: 'print_media_activation',
+    pluginacti14_: 'panel_widget',
+  };
+  const resolve = (t: string) => alias[t] ?? t;
+
+  it('separates two subqueries that read the same table hardest', () => {
+    expect(subqueryNames(planTree(rows)[0].children, resolve)).toEqual([
+      'partner · print_media_activation',
+      'partner · panel_widget',
+    ]);
+  });
+
+  it('compares names after the aliases are resolved, not before', () => {
+    // `partner13_` and `partner16_` are different strings and the same
+    // table. Unresolved, nothing collides and nothing gets disambiguated —
+    // and the reader sees two rows both saying "partner".
+    expect(subqueryNames(planTree(rows)[0].children)).toEqual(['partner16_', 'partner13_']);
+  });
+
+  it('leaves a name alone when no sibling shares it', () => {
+    const solo: PlanRow[] = [
+      { depth: 0, title: 'p', rows: 10 },
+      { depth: 1, title: '<materialized_subquery>', rows: 1, branch: true },
+      { depth: 2, title: 'workflowac19_', access: 'ALL', rows: 26443 },
+    ];
+    expect(subqueryNames(planTree(solo)[0].children)).toEqual(['workflowac19_']);
   });
 });
