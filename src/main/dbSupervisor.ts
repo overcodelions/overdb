@@ -61,7 +61,10 @@ export function openConnection(connectionId: string, spec: ConnectSpec): Promise
 }
 
 async function doOpen(connectionId: string, spec: ConnectSpec): Promise<unknown> {
-  await closeConnection(connectionId);
+  // Reopening, not closing: the 'open' or 'error' below is the state the
+  // renderer should see. Announcing 'closed' on the way through would put
+  // a hollow dot on screen for the length of a connect.
+  await closeConnection(connectionId, { reopening: true });
   applyChosenSchema(connectionId, spec);
 
   const proc = utilityProcess.fork(hostEntry(), [], { serviceName: `overdb-${connectionId}` });
@@ -365,7 +368,20 @@ export function isOpen(connectionId: string): boolean {
   return hosts.has(connectionId);
 }
 
-export async function closeConnection(connectionId: string): Promise<void> {
+/// Every connection with a live host, for a renderer that has just loaded.
+///
+/// Connection state reaches the window as pushes, and a reload throws away
+/// everything pushed before it while the hosts here go on serving queries.
+/// Without a way to ask, the sidebar drew every dot hollow for connections
+/// it was actively querying.
+export function openConnectionIds(): string[] {
+  return [...hosts.keys()];
+}
+
+export async function closeConnection(
+  connectionId: string,
+  opts?: { reopening?: boolean },
+): Promise<void> {
   const host = hosts.get(connectionId);
   if (!host) return;
   // Unregistered first, so nothing new can be routed to a host that is on
@@ -384,6 +400,12 @@ export async function closeConnection(connectionId: string): Promise<void> {
     /* the host may already be gone */
   }
   host.proc.kill();
+  // The exit handler cannot do this for us: it only reports a host that is
+  // still the registered one, and we just unregistered this one. That guard
+  // is what stops a dead host's late exit from reporting its live
+  // replacement as closed — so an explicit close has to speak for itself,
+  // or the dot stays green on a connection the user just shut.
+  if (!opts?.reopening && !shuttingDown) emitState(connectionId, 'closed');
 }
 
 export async function closeAll(): Promise<void> {

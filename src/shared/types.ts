@@ -589,6 +589,10 @@ export interface IPCInvokeMap {
   };
   'conn:close': (connectionId: string) => void;
   'conn:isOpen': (connectionId: string) => boolean;
+  /// Which connections are open right now, for a window that has just
+  /// loaded. State otherwise only arrives as `conn:state` pushes, and a
+  /// reload has already missed every one of them.
+  'conn:states': () => string[];
   'conn:introspect': (args: { connectionId: string; schemas?: string[] }) => SchemaSnapshot;
   /// What a table filter would actually select, before it is saved.
   ///
