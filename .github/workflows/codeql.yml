@@ -32,7 +32,22 @@ jobs:
           languages: ${{ matrix.language }}
           queries: security-extended
 
+      # The upload is allowed to fail, and the job is not.
+      #
+      # Code scanning results can only be uploaded to a private repository
+      # that has Code Security enabled, which is an Enterprise entitlement
+      # this org does not have on the Team plan. The scan itself runs fine —
+      # the API simply refuses the results at the end of it, so every run
+      # went red for a reason no change to this repository could fix.
+      #
+      # Left in place rather than deleted: the queries still run on every PR
+      # and a genuine analysis failure is still visible in the log, and if
+      # the repository ever goes public or picks up Code Security the alerts
+      # start landing with no change here. The cost of the shape is honest —
+      # `continue-on-error` covers the whole step, so a broken analysis goes
+      # green too, and this file stops being a gate.
       - name: Perform CodeQL Analysis
+        continue-on-error: true
         uses: github/codeql-action/analyze@68bde559dea0fdcac2102bfdf6230c5f70eb485e # v4.35.4
         with:
           category: "/language:${{ matrix.language }}"
