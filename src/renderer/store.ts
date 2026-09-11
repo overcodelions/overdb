@@ -200,6 +200,10 @@ interface State {
   /// and edited here rather than by hand-editing a config file, which is
   /// what "the + button opens a placeholder" amounted to.
   setConnState(connectionId: string, state: 'open' | 'closed' | 'error'): void;
+  /// Replace what the window believes about every connection with what main
+  /// actually has open. Called once on mount: the pushes that built this up
+  /// happened before this renderer existed.
+  seedConnStates(openIds: string[]): void;
   flagWriteBlocked(connectionId: string): void;
   setTxnState(
     connectionId: string,
@@ -825,6 +829,15 @@ export const useStore = create<State>((set, get) => ({
 
   setConnState(connectionId, state) {
     set((st) => ({ connState: { ...st.connState, [connectionId]: state } }));
+  },
+
+  seedConnStates(openIds) {
+    // The seed goes UNDER what is already here, not over it: a push that
+    // lands while the round trip is in flight is newer than the answer, and
+    // a connection that closed during it must not come back green.
+    const seeded: Record<string, 'open' | 'closed' | 'error'> = {};
+    for (const id of openIds) seeded[id] = 'open';
+    set((st) => ({ connState: { ...seeded, ...st.connState } }));
   },
 
   flagWriteBlocked(connectionId) {
