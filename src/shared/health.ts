@@ -269,6 +269,123 @@ export function readings(health: HealthSnapshot): Reading[] {
   return out;
 }
 
+/// The four readings that get a chart, in the order they are drawn.
+///
+/// Not a styling decision. These are the four a server can be in trouble
+/// over in a way a single number hides: a connection count means nothing
+/// without its ceiling, a ratio means nothing without the band it moves
+/// in, and a size means nothing without the split between the rows you
+/// keep and the indexes you pay for. Everything else `readings()` produces
+/// is a count that is either zero or interesting, and a count reads fine
+/// as a count.
+const CHARTED = ['connections', 'cache', 'rollbacks', 'size'] as const;
+
+/// Split the readings into the ones drawn as cards and the ones drawn as a
+/// strip of counts.
+///
+/// Order is preserved within each half, and a charted reading the server
+/// withheld simply does not appear — the caller must not assume four.
+export function splitReadings(rows: Reading[]): { charted: Reading[]; counts: Reading[] } {
+  const charted: Reading[] = [];
+  const counts: Reading[] = [];
+  for (const key of CHARTED) {
+    const row = rows.find((r) => r.key === key);
+    if (row) charted.push(row);
+  }
+  for (const row of rows) {
+    if (!CHARTED.includes(row.key as (typeof CHARTED)[number])) counts.push(row);
+  }
+  return { charted, counts };
+}
+
+/// How the connected sessions divide up, right now.
+///
+/// The four buckets are ordered by how much they should worry you, and
+/// they are exclusive: a session blocked on a lock is counted as blocked
+/// and not also as active, because the interesting fact about it is what
+/// it is waiting for, not that the server calls it running.
+///
+/// `idle` is nearly always the largest, and that is the honest picture of
+/// a connection pool rather than a rendering problem to correct — a pool
+/// whose sessions are mostly busy is a pool that is about to run out.
+export function sessionStates(health: HealthSnapshot): {
+  active: number;
+  idleInTransaction: number;
+  blocked: number;
+  idle: number;
+  total: number;
+  /// Everything that is not plain idle — the number worth putting next to
+  /// the connection count, because it is the one that moves.
+  awake: number;
+} {
+  let active = 0;
+  let idleInTransaction = 0;
+  let blocked = 0;
+  let idle = 0;
+
+  for (const s of health.sessions) {
+    const state = s.state ?? '';
+    if (s.blockedBy.length > 0) blocked++;
+    else if (state.startsWith('idle in transaction')) idleInTransaction++;
+    else if (state === 'idle') idle++;
+    else active++;
+  }
+
+  const total = health.sessions.length;
+  return { active, idleInTransaction, blocked, idle, total, awake: total - idle };
+}
+
+/// What the sessions are waiting on, commonest first.
+///
+/// A count of who is in each state at this instant — NOT time spent, which
+/// neither engine will hand a client without the wait-event summary tables
+/// most managed servers leave off. Said plainly in the pane rather than
+/// implied by a bar, because a bar that looks like a duration and is not
+/// one is the kind of chart that gets somebody paged for the wrong thing.
+///
+/// Sessions the server reports no wait for are omitted rather than
+/// bucketed as "none": they are not waiting, and a row saying so would be
+/// the largest bar on a healthy server.
+export function waitEvents(health: HealthSnapshot, limit = 8): Array<{
+  event: string;
+  count: number;
+  /// Whether this particular wait is one to act on. Lock waits are; a
+  /// daemon sitting on an empty queue is not.
+  blocking: boolean;
+}> {
+  const counts = new Map<string, { count: number; blocking: boolean }>();
+  for (const s of health.sessions) {
+    const event = s.waitEvent?.trim();
+    if (!event) continue;
+    const blocking = s.blockedBy.length > 0 || /lock/i.test(event);
+    const prev = counts.get(event);
+    if (prev) {
+      prev.count++;
+      prev.blocking = prev.blocking || blocking;
+    } else {
+      counts.set(event, { count: 1, blocking });
+    }
+  }
+  return [...counts.entries()]
+    .map(([event, v]) => ({ event, count: v.count, blocking: v.blocking }))
+    .sort((a, b) => b.count - a.count || a.event.localeCompare(b.event))
+    .slice(0, limit);
+}
+
+/// Append a sample to a fixed-length history, oldest first.
+///
+/// The server keeps no history of any of this — every read is a snapshot —
+/// so the only honest series is the one built out of the reads this pane
+/// has already made. That is why every sparkline drawn from it is captioned
+/// with when the pane opened: it is not the last hour, it is however long
+/// you have been looking.
+export function pushSample(series: number[], value: number | null, cap = 120): number[] {
+  if (value === null || !Number.isFinite(value)) return series;
+  const next = series.length >= cap ? series.slice(series.length - cap + 1) : series.slice();
+  next.push(value);
+  return next;
+}
+
 /// Indexes worth removing, and what removing them buys.
 ///
 /// Never phrased as an instruction. An index with zero scans on THIS server

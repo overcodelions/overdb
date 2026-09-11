@@ -5,7 +5,9 @@ import {
   classifyPgProbeError,
   deltaStats,
   isRetryable,
+  movers,
   scanRatio,
+  shares,
   sortStats,
   type StatementStat,
 } from './slowQueries';
@@ -230,5 +232,70 @@ describe('digestTruncated', () => {
 
   it('is false for an ordinary complete digest', () => {
     expect(digestTruncated('SELECT ? FROM `t`')).toBe(false);
+  });
+});
+
+describe('movers', () => {
+  it('ranks by how much the cost moved, not by how large it is', () => {
+    // The statement that has always been expensive is not news.
+    const before = [stat({ digest: 'steady', totalMs: 9000 }), stat({ digest: 'new', totalMs: 10 })];
+    const after = [
+      stat({ digest: 'steady', totalMs: 9010, calls: 2 }),
+      stat({ digest: 'new', totalMs: 800, calls: 2 }),
+    ];
+    expect(movers(before, after).map((m) => m.stat.digest)).toEqual(['new', 'steady']);
+  });
+
+  it('shows an improvement as readily as a regression', () => {
+    // Watching the number go down after adding an index is the whole point
+    // of coming back to this pane.
+    const [top] = movers(
+      [stat({ digest: 'a', totalMs: 5000, calls: 10 })],
+      [stat({ digest: 'a', totalMs: 1000, calls: 12 })],
+    );
+    expect(top.deltaMs).toBe(-4000);
+  });
+
+  it('counts a statement absent from the baseline as entirely new', () => {
+    const [top] = movers([], [stat({ digest: 'a', totalMs: 42 })]);
+    expect(top.deltaMs).toBe(42);
+  });
+
+  it('drops a statement whose counters went backwards', () => {
+    // A restart or a reset is not a statement getting faster, and the call
+    // count is what tells the two apart.
+    expect(movers([stat({ digest: 'a', totalMs: 500, calls: 50 })], [stat({ digest: 'a', totalMs: 4, calls: 1 })])).toEqual(
+      [],
+    );
+  });
+
+  it('says nothing about a statement that did not move', () => {
+    expect(movers([stat({ digest: 'a', totalMs: 10, calls: 3 })], [stat({ digest: 'a', totalMs: 10, calls: 3 })])).toEqual(
+      [],
+    );
+  });
+});
+
+describe('shares', () => {
+  it('divides the visible rows by the visible total', () => {
+    const rows = [stat({ digest: 'a', totalMs: 60 }), stat({ digest: 'b', totalMs: 40 })];
+    expect(shares(rows, 2)).toEqual({ shares: [0.6, 0.4], rest: 0, totalMs: 100 });
+  });
+
+  it('holds back everything below the cut as the remainder', () => {
+    // The number that says whether fixing the top few is worth an
+    // afternoon.
+    const rows = [
+      stat({ digest: 'a', totalMs: 50 }),
+      stat({ digest: 'b', totalMs: 25 }),
+      stat({ digest: 'c', totalMs: 25 }),
+    ];
+    const s = shares(rows, 1);
+    expect(s.shares).toEqual([0.5]);
+    expect(s.rest).toBeCloseTo(0.5);
+  });
+
+  it('does not divide by a total of nothing', () => {
+    expect(shares([stat({ digest: 'a', totalMs: 0 })], 1)).toEqual({ shares: [0], rest: 0, totalMs: 0 });
   });
 });

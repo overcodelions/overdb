@@ -296,6 +296,60 @@ function subtract(now: number | null, then: number | null): number | null {
   return Math.max(0, now - then);
 }
 
+/// The statements whose cost moved most, and in which direction.
+///
+/// Distinct from the sorted list, which answers "what is expensive": this
+/// answers "what CHANGED since I started looking", which is the question
+/// you actually have after deploying something or adding an index. A
+/// statement that has always cost four seconds an hour is not news; one
+/// that cost nothing this morning is.
+///
+/// Ranked by absolute change so an improvement is as visible as a
+/// regression — the point of watching this pane after adding an index is
+/// to see the number go down, and a list that only shows increases can
+/// never show you that it worked.
+export function movers(
+  baseline: StatementStat[],
+  current: StatementStat[],
+  limit = 5,
+): Array<{ stat: StatementStat; deltaMs: number }> {
+  const before = new Map(baseline.map((s) => [s.digest, s]));
+  const out: Array<{ stat: StatementStat; deltaMs: number }> = [];
+
+  for (const now of current) {
+    const then = before.get(now.digest);
+    // A statement absent from the baseline is entirely new in the window,
+    // so all of its cost is the change.
+    const deltaMs = then ? now.totalMs - then.totalMs : now.totalMs;
+    // Counters go down on a restart or a reset, and that is not a
+    // statement getting faster — it is the denominator vanishing. Told
+    // apart by the call count, which only drops for the same reason.
+    if (then && now.calls < then.calls) continue;
+    if (deltaMs === 0) continue;
+    out.push({ stat: now, deltaMs });
+  }
+
+  return out.sort((a, b) => Math.abs(b.deltaMs) - Math.abs(a.deltaMs)).slice(0, limit);
+}
+
+/// Each statement's share of the visible total, plus what is left over.
+///
+/// The denominator is the rows the caller can actually see, never the
+/// server's whole history: a bar drawn against a total that includes rows
+/// nobody is looking at is a proportion of nothing legible. `rest` is the
+/// share held by everything below the cut, which is the number that tells
+/// you whether fixing the top few is worth an afternoon or whether the
+/// cost is spread across two hundred statements and there is no top few.
+export function shares(
+  rows: StatementStat[],
+  visible: number,
+): { shares: number[]; rest: number; totalMs: number } {
+  const totalMs = rows.reduce((a, r) => a + r.totalMs, 0);
+  if (totalMs <= 0) return { shares: rows.slice(0, visible).map(() => 0), rest: 0, totalMs: 0 };
+  const top = rows.slice(0, visible).map((r) => r.totalMs / totalMs);
+  return { shares: top, rest: Math.max(0, 1 - top.reduce((a, s) => a + s, 0)), totalMs };
+}
+
 export function sortStats(stats: StatementStat[], order: SlowQueryOrder): StatementStat[] {
   const key =
     order === 'mean' ? (s: StatementStat) => s.meanMs
