@@ -29,6 +29,21 @@ export function App(): JSX.Element {
   // failures all arrive on the single main:event channel.
   useEffect(() => subscribeToMainEvents(), []);
 
+  // Connection state is pushed, so a window that has just loaded knows
+  // nothing about hosts that have been open since before it existed — a
+  // reload used to leave every status dot hollow on connections it was
+  // still querying. Asked after the subscription is installed, so a push
+  // that lands during the round trip is not the one that gets overwritten.
+  useEffect(() => {
+    let live = true;
+    void window.overdb.invoke('conn:states').then((open) => {
+      if (live) useStore.getState().seedConnStates(open);
+    });
+    return () => {
+      live = false;
+    };
+  }, []);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const mod = e.metaKey || e.ctrlKey;

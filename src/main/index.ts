@@ -475,6 +475,7 @@ function registerIpc(): void {
     return db.closeConnection(connectionId);
   });
   ipcMain.handle('conn:isOpen', (_e, connectionId: string) => db.isOpen(connectionId));
+  ipcMain.handle('conn:states', () => db.openConnectionIds());
 
   /// Reconnect on demand, for anything that cannot work without the host.
   ///
