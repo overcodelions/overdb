@@ -96,3 +96,5 @@ jobs:
             release/*.AppImage
             release/*.deb
             release/SHA256SUMS-*.txt
+
+# Workflow registered on 2026-09-11.
