@@ -8,8 +8,7 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ## [Unreleased]
 
 ### Added
-- Project scaffold: build config, CI/release workflows, and the design in
-  `docs/PLAN.md`.
+- Project scaffold: build config and CI/release workflows.
 - Engine layer (`src/db`) with a `DbAdapter` seam and SQLite, Postgres, and
   MySQL/MariaDB adapters. SQLite runs on the runtime's own `node:sqlite`, so
   there is no native addon to rebuild, unpack, or sign.
