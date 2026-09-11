@@ -3,8 +3,12 @@ name: CI
 on:
   push:
     branches: [master]
+  # Deliberately unfiltered: a `branches` filter here matches the BASE of
+  # the pull request, so a branch opened against anything but master — a
+  # stacked PR on top of work that has not landed yet — ran no checks at
+  # all, silently. The push trigger above is what keeps this to master for
+  # branch pushes; a PR is worth building wherever it is headed.
   pull_request:
-    branches: [master]
 
 concurrency:
   group: ci-${{ github.ref }}
