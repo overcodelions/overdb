@@ -334,6 +334,15 @@ export interface AppSettings {
   /// Which SQL layout Format produces. Genuinely a matter of taste, so it
   /// is a setting rather than a house style — see src/shared/formatSql.ts.
   formatStyle: FormatStyle;
+  /// Whether the health and slow-query panes take the whole window.
+  ///
+  /// They are not answers to the statement you just ran — they are what
+  /// the server is doing and what it remembers — so they do not really
+  /// belong in the results half at all, and squeezed under the editor
+  /// there is no room for either to say anything. On by default for that
+  /// reason; the pane's own control docks it again when you want the
+  /// query back in view.
+  panesFull: boolean;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -347,6 +356,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   aiFastModel: { claude: 'haiku', codex: '', gemini: '' },
   slowQueryMs: 1_000,
   formatStyle: 'default',
+  panesFull: true,
 };
 
 /// One turn of an Ask thread, as persisted.

@@ -4,13 +4,18 @@ import {
   formatBytes,
   formatDuration,
   killSupport,
+  pushSample,
   readings,
   seqScanOffenders,
+  sessionStates,
+  splitReadings,
   unusedIndexSummary,
+  waitEvents,
   type HealthSnapshot,
   type ReadingTone,
   type Session,
 } from '@shared/health';
+import { BarRow, CapacityBar, Sparkline, SplitBar, StateMeter } from './Marks';
 import { useStore } from './store';
 
 /// What this server is doing right now.
@@ -24,6 +29,13 @@ import { useStore } from './store';
 /// somebody's statement. That acts on the server, so it is gated in main
 /// with the same typed-name rule that arming writes uses, and the button
 /// says which of the two verbs it is.
+///
+/// The pane has two densities, and they answer different questions.
+/// Expanded it fills the window and is a dashboard — sessions beside what
+/// they are waiting on, sizes beside the indexes nobody uses. Docked under
+/// the editor it is a glance: the vitals strip and the worst sessions,
+/// which is all there is room for and all you want while you are still
+/// writing the query above it.
 
 const TONE: Record<ReadingTone, string> = {
   good: 'text-good/90',
@@ -34,14 +46,40 @@ const TONE: Record<ReadingTone, string> = {
 
 const REFRESH_OPTIONS = [0, 5, 15, 60] as const;
 
+/// The series drawn on the vitals cards, built entirely on this side.
+///
+/// Neither engine keeps a history of any of this — every read is a
+/// snapshot of the instant — so there is no last hour to ask for. What
+/// there is, is the reads this pane has already made, which is why every
+/// sparkline is captioned with when the pane opened rather than with a
+/// duration. Drawing a smooth twenty-four hours would be inventing data,
+/// and it is the same reason the slow-query pane defaults to "since
+/// opened" instead of showing all-time totals nobody can act on.
+interface Series {
+  connections: number[];
+  cache: number[];
+  rollback: number[];
+  since: number;
+}
+
+const EMPTY_SERIES: Series = { connections: [], cache: [], rollback: [], since: Date.now() };
+
 export function HealthPane({
   connection,
   onOpenSql,
+  full,
+  onToggleFull,
+  onClose,
 }: {
   connection: Connection;
   /// Put a statement in the editor — reading a session's query and then
   /// having to retype it is the gap this closes.
   onOpenSql?(sql: string): void;
+  /// Whether the pane has the whole window or is docked under the editor.
+  full: boolean;
+  onToggleFull(): void;
+  /// Back to the result of whatever you last ran.
+  onClose(): void;
 }): JSX.Element {
   const toast = useStore((s) => s.toast);
   const askConfirm = useStore((s) => s.askConfirm);
@@ -52,6 +90,7 @@ export function HealthPane({
   const [everyN, setEveryN] = useState<number>(15);
   const [showIdle, setShowIdle] = useState(false);
   const [busySession, setBusySession] = useState<string | null>(null);
+  const [series, setSeries] = useState<Series>(EMPTY_SERIES);
   const live = useRef(true);
 
   const refresh = useCallback(async () => {
@@ -60,6 +99,7 @@ export function HealthPane({
       const snapshot = await window.overdb.invoke('perf:health', connection.id);
       if (!live.current) return;
       setHealth(snapshot);
+      setSeries((prev) => sample(prev, snapshot));
       setError(null);
     } catch (err) {
       if (!live.current) return;
@@ -71,6 +111,11 @@ export function HealthPane({
 
   useEffect(() => {
     live.current = true;
+    // Thrown away on every connection change rather than kept per id: a
+    // line that jumps from one server's numbers to another's, with no
+    // break to say so, is the one chart shape that can get somebody paged
+    // about the wrong database.
+    setSeries({ ...EMPTY_SERIES, since: Date.now() });
     void refresh();
     return () => {
       live.current = false;
@@ -90,7 +135,12 @@ export function HealthPane({
 
   const sessions = useMemo(() => {
     const all = health?.sessions ?? [];
-    return showIdle ? all : all.filter((s) => s.state !== 'idle' || s.blockedBy.length > 0);
+    const shown = showIdle ? all : all.filter((s) => s.state !== 'idle' || s.blockedBy.length > 0);
+    // Worst first, and "worst" is not "oldest": a session blocked on a
+    // lock is the reason anybody opened this pane, and one holding an
+    // open transaction is the reason it is blocked. Age only breaks ties
+    // inside a bucket.
+    return [...shown].sort((a, b) => rank(a) - rank(b) || (b.seconds ?? 0) - (a.seconds ?? 0));
   }, [health, showIdle]);
 
   const kill = (session: Session, terminate: boolean) => {
@@ -129,24 +179,33 @@ export function HealthPane({
   };
 
   const rows = health ? readings(health) : [];
+  const { charted, counts } = splitReadings(rows);
+  const states = health ? sessionStates(health) : null;
+  const waits = health ? waitEvents(health) : [];
   const unused = health ? unusedIndexSummary(health) : null;
   const scans = health ? seqScanOffenders(health) : [];
+  const since = new Date(series.since).toLocaleTimeString(undefined, { hour12: false });
 
   return (
     <div className="h-full flex flex-col min-h-0">
       <div className="shrink-0 border-b border-card px-3.5 py-1.5 flex flex-wrap items-center gap-x-3 gap-y-1.5">
-        <span className="text-[11px] text-ink-muted">
+        <span className="text-[11px] text-ink">Health</span>
+        <span className="text-[11px] text-ink-faint min-w-0 truncate">
           {connection.name}
-          {health?.serverVersion && (
-            <span className="text-ink-faint"> · {shortVersion(health.serverVersion)}</span>
-          )}
+          {health?.serverVersion && <> · {shortVersion(health.serverVersion)}</>}
           {health?.uptimeSeconds !== null && health?.uptimeSeconds !== undefined && (
-            <span className="text-ink-faint"> · up {formatDuration(health.uptimeSeconds)}</span>
+            <> · up {formatDuration(health.uptimeSeconds)}</>
           )}
         </span>
 
         <div className="flex-1" />
 
+        {everyN > 0 && (
+          <span className="flex items-center gap-1.5 text-[11px] text-ink-faint">
+            <span className="w-1.5 h-1.5 rounded-full bg-good/80" />
+            live
+          </span>
+        )}
         <label className="flex items-center gap-1.5 text-[11px] text-ink-faint">
           refresh
           <select
@@ -168,6 +227,27 @@ export function HealthPane({
         >
           {loading ? 'Reading…' : 'Read now'}
         </button>
+        <span className="w-px h-3.5 bg-card" />
+        <button
+          onClick={onToggleFull}
+          title={
+            full
+              ? 'Dock it under the editor — the vitals and the worst sessions, with your query still in view'
+              : 'Fill the window — sizes, indexes and what every session is waiting on'
+          }
+          className="text-[11px] px-1.5 py-0.5 rounded text-ink-muted hover:text-ink hover:bg-card"
+        >
+          {full ? '⤡' : '⤢'}
+          <span className="ml-1">{full ? 'Dock' : 'Expand'}</span>
+        </button>
+        <button
+          onClick={onClose}
+          title="Back to your results"
+          aria-label="Close health"
+          className="text-[11px] px-1.5 py-0.5 rounded text-ink-faint hover:text-ink hover:bg-card"
+        >
+          ✕
+        </button>
       </div>
 
       <div className="flex-1 min-h-0 overflow-y-auto">
@@ -175,161 +255,195 @@ export function HealthPane({
           <p className="px-3.5 py-3 text-[11px] text-bad/90">{error}</p>
         ) : health === null ? (
           <p className="px-3.5 py-3 text-[11px] text-ink-faint">Reading the server's statistics…</p>
-        ) : (
-          <>
-            {rows.length > 0 && (
-              <div className="grid grid-cols-[repeat(auto-fill,minmax(180px,1fr))] gap-px bg-card border-b border-card">
-                {rows.map((r) => (
-                  <div key={r.key} className="bg-surface px-3 py-2">
+        ) : full ? (
+          <div className="p-3 flex flex-col gap-3">
+            {charted.length > 0 && (
+              <div className="flex flex-wrap gap-2.5">
+                {charted.map((r) => (
+                  <div
+                    key={r.key}
+                    className="flex-1 basis-[250px] max-w-[400px] bg-card border border-card rounded-md px-3 py-2 flex flex-col"
+                  >
                     <p className="text-[10px] uppercase tracking-wide text-ink-faint">{r.label}</p>
-                    <p className={`text-base tabular-nums ${TONE[r.tone]}`}>{r.value}</p>
+                    <p className={`text-[21px] leading-tight tabular-nums ${TONE[r.tone]}`}>{r.value}</p>
+                    <div className="mt-2">
+                      <Mark reading={r.key} health={health} series={series} tone={TONE[r.tone]} />
+                    </div>
+                    {((r.key === 'cache' && series.cache.length > 1) ||
+                      (r.key === 'rollbacks' && series.rollback.length > 1)) && (
+                      <p className="mt-0.5 text-[9px] text-ink-faint">
+                        since you opened this tab, {since}
+                      </p>
+                    )}
+                    <div className="flex-1" />
                     {/* The sentence is not optional garnish: a number with
                         nothing next to it is a number nobody acts on. */}
-                    <p className="text-[10px] text-ink-faint leading-snug mt-0.5">{r.note}</p>
+                    <p className="mt-1.5 text-[10px] text-ink-faint leading-snug text-pretty">{r.note}</p>
                   </div>
                 ))}
               </div>
             )}
 
-            <Section
-              title={`Sessions (${sessions.length}${health.sessions.length !== sessions.length ? ` of ${health.sessions.length}` : ''})`}
-              right={
-                health.sessions.length > 0 && (
-                  <label className="flex items-center gap-1.5 text-[10px] text-ink-faint">
-                    <input
-                      type="checkbox"
-                      checked={showIdle}
-                      onChange={(e) => setShowIdle(e.target.checked)}
+            {counts.length > 0 && (
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[10px]">
+                {counts.map((r) => (
+                  <span key={r.key} className="flex items-center gap-1.5 min-w-0" title={r.note}>
+                    <span className={`w-[5px] h-[5px] rounded-full bg-current ${TONE[r.tone]}`} />
+                    <span className="uppercase tracking-wide text-ink-faint">{r.label}</span>
+                    <span className={`tabular-nums ${TONE[r.tone]}`}>{r.value}</span>
+                  </span>
+                ))}
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 xl:grid-cols-[1.7fr_1fr] gap-3 items-start">
+              <div className="bg-card border border-card rounded-md min-w-0">
+                <SessionHeader
+                  states={states}
+                  showIdle={showIdle}
+                  onShowIdle={setShowIdle}
+                  hasSessions={health.sessions.length > 0}
+                />
+                <div className="h-[248px] overflow-y-auto mt-1">
+                  {health.sessions.length === 0 ? (
+                    <Empty>
+                      {support.note ?? 'No client sessions, or this server did not let us read them.'}
+                    </Empty>
+                  ) : (
+                    <SessionTable
+                      sessions={sessions}
+                      support={support}
+                      busySession={busySession}
+                      onKill={kill}
+                      onOpenSql={onOpenSql}
                     />
-                    include idle
-                  </label>
-                )
-              }
-            >
-              {health.sessions.length === 0 ? (
-                <Empty>
-                  {support.note ?? 'No client sessions, or this server did not let us read them.'}
-                </Empty>
-              ) : (
-                <table className="w-full text-[11px]">
-                  <thead>
-                    <tr className="text-[10px] uppercase tracking-wide text-ink-faint text-left">
-                      <th className="px-3.5 py-1 font-normal">id</th>
-                      <th className="px-2 py-1 font-normal">who</th>
-                      <th className="px-2 py-1 font-normal">state</th>
-                      <th className="px-2 py-1 font-normal text-right">for</th>
-                      <th className="px-2 py-1 font-normal">statement</th>
-                      <th className="px-2 py-1 font-normal" />
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {sessions.map((s) => (
-                      <SessionRow
-                        key={s.id}
-                        session={s}
-                        support={support}
-                        busy={busySession === s.id}
-                        onKill={kill}
-                        onOpenSql={onOpenSql}
-                      />
-                    ))}
-                  </tbody>
-                </table>
-              )}
-            </Section>
-
-            {health.tables.length > 0 && (
-              <Section title="Biggest tables">
-                <table className="w-full text-[11px]">
-                  <tbody>
-                    {health.tables.slice(0, 15).map((t) => (
-                      <tr key={`${t.schema}.${t.table}`} className="hover:bg-card">
-                        <td className="px-3.5 py-0.5 font-mono text-ink-muted">
-                          {t.schema}.{t.table}
-                        </td>
-                        <td className="px-2 py-0.5 text-right tabular-nums text-ink">
-                          {formatBytes(t.bytes)}
-                        </td>
-                        <td className="px-2 py-0.5 text-right tabular-nums text-ink-faint">
-                          {t.indexBytes === null ? '' : `+${formatBytes(t.indexBytes)} indexes`}
-                        </td>
-                        <td className="px-2 py-0.5 text-right tabular-nums text-ink-faint">
-                          {t.estimatedRows === null ? '' : `~${t.estimatedRows.toLocaleString()} rows`}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </Section>
-            )}
-
-            {unused !== null && (
-              <Section title="Indexes the planner has not used">
-                <p className="px-3.5 pb-1 text-[11px] text-ink-muted leading-relaxed max-w-[80ch]">
-                  {unused}
+                  )}
+                </div>
+                <p className="px-3 py-1.5 text-[10px] text-ink-faint border-t border-rule">
+                  Sorted by what is blocking, then by age.
+                  {everyN > 0 && <> Re-read every {everyN}s.</>}
                 </p>
-                <table className="w-full text-[11px]">
-                  <tbody>
-                    {health.unusedIndexes
-                      .filter((ix) => !ix.unique)
-                      .slice(0, 15)
-                      .map((ix) => (
-                        <tr key={`${ix.schema}.${ix.index}`} className="hover:bg-card">
-                          <td className="px-3.5 py-0.5 font-mono text-ink-muted">{ix.index}</td>
-                          <td className="px-2 py-0.5 font-mono text-ink-faint">
-                            on {ix.schema}.{ix.table}
-                          </td>
-                          <td className="px-2 py-0.5 text-right tabular-nums text-ink-faint">
-                            {ix.bytes === null ? '' : formatBytes(ix.bytes)}
-                          </td>
-                        </tr>
-                      ))}
-                  </tbody>
-                </table>
-              </Section>
-            )}
+              </div>
 
-            {scans.length > 0 && (
-              <Section title="Read hardest">
-                <table className="w-full text-[11px]">
-                  <tbody>
-                    {scans.slice(0, 15).map((s) => (
-                      <tr key={`${s.schema}.${s.table}`} className="hover:bg-card">
-                        <td className="px-3.5 py-0.5 font-mono text-ink-muted">
-                          {s.schema}.{s.table}
-                        </td>
-                        <td className="px-2 py-0.5 text-right tabular-nums text-ink">
-                          {s.sequentialRowsRead.toLocaleString()} rows
-                        </td>
-                        <td className="px-2 py-0.5 text-right tabular-nums text-ink-faint">
-                          over {s.sequentialScans.toLocaleString()} scans
-                        </td>
-                        <td className="px-2 py-0.5 text-right tabular-nums text-ink-faint">
-                          {s.indexScans > 0 ? `${s.indexScans.toLocaleString()} index scans` : ''}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </Section>
-            )}
+              <div className="flex flex-col gap-3 min-w-0">
+                <Card title="What they are waiting on" bodyClass="min-h-[132px]">
+                  {waits.length === 0 ? (
+                    <p className="text-[10px] text-ink-faint">
+                      Nothing is waiting on anything this server will name.
+                    </p>
+                  ) : (
+                    <div className="flex flex-col gap-2">
+                      {waits[0].count === 1
+                        ? waits.map((w) => (
+                            <div
+                              key={w.event}
+                              className={`flex items-baseline gap-2 text-[10px] ${
+                                w.blocking ? 'text-bad/90' : 'text-ink-muted'
+                              }`}
+                            >
+                              <span
+                                className={`w-[5px] h-[5px] rounded-full bg-current ${
+                                  w.blocking ? '' : 'text-accent'
+                                }`}
+                              />
+                              <span className="min-w-0 truncate">{w.event}</span>
+                            </div>
+                          ))
+                        : waits.map((w) => (
+                            <BarRow
+                              key={w.event}
+                              label={w.event}
+                              value={w.count}
+                              ratio={w.count / waits[0].count}
+                              tone={w.blocking ? 'text-bad/90' : 'text-accent'}
+                            />
+                          ))}
+                    </div>
+                  )}
+                  <p className="mt-2 text-[10px] text-ink-faint leading-snug text-pretty">
+                    A count of who is in each state at this instant — not time spent. Neither
+                    engine hands a client that without summary tables most managed servers leave
+                    off.
+                  </p>
+                </Card>
+
+                {health.replication.length > 0 && <Replication health={health} />}
+              </div>
+            </div>
+
+            <div className="flex flex-wrap gap-3 items-start">
+              {health.tables.length > 0 && <Tables health={health} />}
+              {scans.length > 0 && <ReadHardest scans={scans} />}
+              {unused !== null && <UnusedIndexes health={health} summary={unused} />}
+            </div>
 
             {health.notes.length > 0 && (
-              <Section title="What this server would not say">
+              <Card title="What this server would not say">
                 {/* Kept rather than swallowed: "you need pg_stat_statements"
                     is a more useful answer than an empty panel, and a
                     permission error looks exactly like a bug otherwise. */}
                 {health.notes.map((note, i) => (
-                  <p key={i} className="px-3.5 py-0.5 text-[10px] text-ink-faint leading-relaxed">
+                  <p key={i} className="text-[10px] text-ink-faint leading-relaxed">
                     · {note}
                   </p>
                 ))}
-              </Section>
+              </Card>
+            )}
+
+            <p className="text-[10px] text-ink-faint">
+              Read from this server's own statistics views. No table data was queried, and none of
+              it depends on whether writes are armed.
+            </p>
+          </div>
+        ) : (
+          <>
+            {charted.length > 0 && (
+              <div className="grid grid-cols-[repeat(auto-fit,minmax(170px,1fr))] border-b border-card">
+                {charted.map((r) => (
+                  <div key={r.key} className="px-3 py-1.5 border-r border-rule last:border-r-0">
+                    <p className="text-[10px] uppercase tracking-wide text-ink-faint">{r.label}</p>
+                    <p className={`text-[15px] leading-tight tabular-nums ${TONE[r.tone]}`}>{r.value}</p>
+                    <div className="mt-1">
+                      <Mark
+                        reading={r.key}
+                        health={health}
+                        series={series}
+                        tone={TONE[r.tone]}
+                        compact
+                      />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <SessionHeader
+              states={states}
+              showIdle={showIdle}
+              onShowIdle={setShowIdle}
+              hasSessions={health.sessions.length > 0}
+              meter={false}
+            />
+            {health.sessions.length === 0 ? (
+              <Empty>
+                {support.note ?? 'No client sessions, or this server did not let us read them.'}
+              </Empty>
+            ) : (
+              <SessionTable
+                sessions={sessions}
+                support={support}
+                busySession={busySession}
+                onKill={kill}
+                onOpenSql={onOpenSql}
+              />
             )}
 
             <p className="px-3.5 py-2 text-[10px] text-ink-faint">
-              Read from this server's own statistics views. No table data was queried, and none of
-              it depends on whether writes are armed.
+              Worst first.{' '}
+              <button onClick={onToggleFull} className="underline decoration-dotted underline-offset-2 hover:text-ink">
+                Expand
+              </button>{' '}
+              for what they are waiting on, table sizes and the indexes the planner never chose.
             </p>
           </>
         )}
@@ -338,29 +452,408 @@ export function HealthPane({
   );
 }
 
-function Section({
+/// Record one reading of each charted measure.
+///
+/// Split out so the rule is in one place: a measure the server withheld
+/// contributes nothing rather than a zero. A gap in a series is honest; a
+/// zero is a reading nobody took, and on a cache-hit chart it is a reading
+/// that looks like an outage.
+function sample(prev: Series, snapshot: HealthSnapshot): Series {
+  const txns = snapshot.transactions;
+  const totalTxns = txns ? txns.committed + txns.rolledBack : 0;
+  return {
+    since: prev.since,
+    connections: pushSample(prev.connections, snapshot.connections?.used ?? null),
+    cache: pushSample(prev.cache, snapshot.cacheHitRatio),
+    rollback: pushSample(prev.rollback, totalTxns > 0 ? txns!.rolledBack / totalTxns : null),
+  };
+}
+
+/// Which mark belongs under which reading.
+///
+/// A ceiling gets a capacity bar, a ratio gets a series in the band it
+/// actually moves in, and a size gets the split between the rows you keep
+/// and the indexes you pay for on every write.
+function Mark({
+  reading,
+  health,
+  series,
+  tone,
+  compact = false,
+}: {
+  reading: string;
+  health: HealthSnapshot;
+  series: Series;
+  tone: string;
+  compact?: boolean;
+}): JSX.Element | null {
+  const height = compact ? 16 : 28;
+
+  if (reading === 'connections') {
+    const max = health.connections?.max ?? null;
+    if (max === null || max <= 0) {
+      return <Sparkline series={series.connections} tone={tone} height={height} />;
+    }
+    return (
+      <CapacityBar
+        ratio={(health.connections?.used ?? 0) / max}
+        tone={tone}
+        // The same two fractions `readings()` changes tone at. The bar, the
+        // colour and the sentence under it all come from one threshold, so
+        // they cannot drift apart.
+        thresholds={
+          compact
+            ? [{ at: 0.9, label: '', danger: true }]
+            : [
+                { at: 0.7, label: String(Math.round(max * 0.7)) },
+                { at: 0.9, label: `refused at ${Math.round(max * 0.9)}`, danger: true },
+              ]
+        }
+      />
+    );
+  }
+
+  if (reading === 'cache') {
+    // 0..1 would draw every healthy server as the same flat line pinned to
+    // the top, hiding the only movement a cache ratio ever has.
+    const lo = Math.min(0.95, ...(series.cache.length > 0 ? series.cache : [0.95]));
+    return <Sparkline series={series.cache} tone={tone} band={[lo, 1]} height={height} />;
+  }
+
+  if (reading === 'rollbacks') {
+    return <Sparkline series={series.rollback} tone={tone} height={height} />;
+  }
+
+  if (reading === 'size') {
+    const indexBytes = health.tables.reduce((a, t) => a + (t.indexBytes ?? 0), 0);
+    const total = health.databaseBytes ?? 0;
+    if (indexBytes <= 0 || total <= 0) return null;
+    return (
+      <div>
+        <div className="flex gap-0.5 h-[7px]">
+          <div
+            className="bg-accent rounded-l-[3px]"
+            style={{ width: `${Math.max(0, ((total - indexBytes) / total) * 100)}%` }}
+          />
+          <div className="flex-1 bg-accent/40 rounded-r-[3px]" />
+        </div>
+        {!compact && (
+          <div className="mt-1.5 flex flex-wrap gap-x-3 text-[9px] text-ink-faint">
+            <span className="flex items-center gap-1">
+              <span className="w-[5px] h-[5px] rounded-full bg-accent" />
+              {formatBytes(Math.max(0, total - indexBytes))} rows
+            </span>
+            <span className="flex items-center gap-1">
+              <span className="w-[5px] h-[5px] rounded-full bg-accent/40" />
+              {formatBytes(indexBytes)} indexes
+            </span>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  return null;
+}
+
+function SessionHeader({
+  states,
+  showIdle,
+  onShowIdle,
+  hasSessions,
+  meter = true,
+}: {
+  states: ReturnType<typeof sessionStates> | null;
+  showIdle: boolean;
+  onShowIdle(v: boolean): void;
+  hasSessions: boolean;
+  meter?: boolean;
+}): JSX.Element {
+  return (
+    <div className={meter ? 'px-3 pt-2' : 'px-3.5 pt-2 pb-1'}>
+      <div className="flex items-center gap-2">
+        <p className="text-[10px] uppercase tracking-wide text-ink-faint">Sessions</p>
+        {states && (
+          <span className="text-[10px] text-ink-faint">
+            {states.total.toLocaleString()} connected · {states.awake.toLocaleString()} awake
+          </span>
+        )}
+        <div className="flex-1" />
+        {hasSessions && (
+          <label className="flex items-center gap-1.5 text-[10px] text-ink-faint">
+            <input type="checkbox" checked={showIdle} onChange={(e) => onShowIdle(e.target.checked)} />
+            include idle
+          </label>
+        )}
+      </div>
+      {meter && states && states.total > 0 && (
+        <div className="mt-2">
+          <StateMeter
+            total={states.total}
+            segments={[
+              { key: 'active', label: 'active', count: states.active, tone: 'text-good/90' },
+              {
+                key: 'idle-txn',
+                label: 'idle in transaction',
+                count: states.idleInTransaction,
+                tone: 'text-warn/90',
+              },
+              { key: 'blocked', label: 'blocked', count: states.blocked, tone: 'text-bad/90' },
+              { key: 'idle', label: 'idle', count: states.idle, tone: 'text-ink-faint' },
+            ]}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SessionTable({
+  sessions,
+  support,
+  busySession,
+  onKill,
+  onOpenSql,
+}: {
+  sessions: Session[];
+  support: ReturnType<typeof killSupport>;
+  busySession: string | null;
+  onKill(session: Session, terminate: boolean): void;
+  onOpenSql?(sql: string): void;
+}): JSX.Element {
+  return (
+    <table className="w-full text-[11px] table-fixed">
+      <thead className="sticky top-0 z-10">
+        {/* The background is on the cells rather than the row: a sticky
+            <tr> does not paint one in every engine, and a transparent
+            header with rows sliding under it is worse than none. */}
+        <tr className="text-[10px] uppercase tracking-wide text-ink-faint text-left [&>th]:bg-surface-muted">
+          <th className="px-3 py-1 font-normal w-[84px]">id</th>
+          <th className="px-2 py-1 font-normal w-[124px]">who</th>
+          <th className="px-2 py-1 font-normal w-[150px]">state</th>
+          <th className="px-2 py-1 font-normal w-[70px] text-right">for</th>
+          <th className="px-2 py-1 font-normal">statement</th>
+          <th className="px-2 py-1 font-normal w-[96px]" />
+        </tr>
+      </thead>
+      <tbody>
+        {sessions.map((s) => (
+          <SessionRow
+            key={s.id}
+            session={s}
+            support={support}
+            busy={busySession === s.id}
+            onKill={onKill}
+            onOpenSql={onOpenSql}
+          />
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+function Tables({ health }: { health: HealthSnapshot }): JSX.Element {
+  const rows = health.tables.slice(0, 10);
+  const scale = Math.max(...rows.map((t) => t.bytes + (t.indexBytes ?? 0)), 1);
+  // Worth a sentence only when it is true of this database. A table with
+  // more index than row is the shape a table takes after years of one-off
+  // indexes, and it is invisible in a column of totals.
+  const topHeavy = rows.find((t) => (t.indexBytes ?? 0) > t.bytes);
+
+  return (
+    <Card
+      title="Biggest tables"
+      grow="flex-1 basis-[380px]"
+      right={
+        <div className="flex gap-2.5 text-[9px] text-ink-faint">
+          <span className="flex items-center gap-1">
+            <span className="w-[5px] h-[5px] rounded-full bg-accent" />
+            rows
+          </span>
+          <span className="flex items-center gap-1">
+            <span className="w-[5px] h-[5px] rounded-full bg-accent/40" />
+            indexes
+          </span>
+        </div>
+      }
+    >
+      <div className="flex flex-col gap-1.5">
+        {rows.map((t) => (
+          <div key={`${t.schema}.${t.table}`} className="flex items-center gap-2">
+            <span
+              className={`w-[45%] shrink-0 truncate font-mono text-[10px] ${
+                (t.indexBytes ?? 0) > t.bytes ? 'text-warn/90' : 'text-ink-muted'
+              }`}
+              title={`${t.schema}.${t.table}`}
+            >
+              {t.schema}.{t.table}
+            </span>
+            <SplitBar primary={t.bytes} secondary={t.indexBytes} scale={scale} />
+            <span className="shrink-0 w-[54px] text-right tabular-nums text-[10px] text-ink">
+              {formatBytes(t.bytes + (t.indexBytes ?? 0))}
+            </span>
+          </div>
+        ))}
+      </div>
+      {topHeavy && (
+        <p className="mt-2 text-[10px] text-ink-faint leading-snug text-pretty">
+          {topHeavy.table} carries more index than row.
+        </p>
+      )}
+    </Card>
+  );
+}
+
+function ReadHardest({ scans }: { scans: ReturnType<typeof seqScanOffenders> }): JSX.Element {
+  const rows = scans.slice(0, 6);
+  const scale = Math.max(...rows.map((s) => s.sequentialRowsRead), 1);
+  return (
+    <Card
+      title="Read hardest"
+      grow="flex-1 basis-[320px]"
+      right={<span className="text-[9px] text-ink-faint">rows read end to end</span>}
+    >
+      <div className="flex flex-col gap-2">
+        {rows.map((s) => (
+          <BarRow
+            key={`${s.schema}.${s.table}`}
+            label={<span className="font-mono">{s.schema}.{s.table}</span>}
+            value={s.sequentialRowsRead.toLocaleString()}
+            ratio={s.sequentialRowsRead / scale}
+            tone="text-hot"
+            note={
+              <>
+                over {s.sequentialScans.toLocaleString()} scans
+                {s.indexScans > 0 && <> · {s.indexScans.toLocaleString()} index scans</>}
+              </>
+            }
+          />
+        ))}
+      </div>
+      <p className="mt-2 text-[10px] text-ink-faint leading-snug text-pretty">
+        Ranked by rows read, not by scans — reading a small table end to end is often the right
+        plan.
+      </p>
+    </Card>
+  );
+}
+
+function UnusedIndexes({ health, summary }: { health: HealthSnapshot; summary: string }): JSX.Element {
+  const all = health.unusedIndexes.filter((ix) => !ix.unique);
+  const rows = all.slice(0, 6);
+  const scale = Math.max(...rows.map((ix) => ix.bytes ?? 0), 1);
+  /// MySQL's sys.schema_unused_indexes names the indexes and nothing else.
+  /// Rather than a column of dashes, the size column is simply absent.
+  const sized = rows.some((ix) => ix.bytes !== null);
+  return (
+    <Card title="Indexes the planner never chose" grow="flex-1 basis-[320px]">
+      <div className="flex flex-col gap-1.5">
+        {rows.map((ix) => (
+          <div key={`${ix.schema}.${ix.index}`} className="flex items-center gap-2">
+            <span className="flex-1 min-w-0 truncate font-mono text-[10px] text-ink-muted" title={`${ix.index} on ${ix.schema}.${ix.table}`}>
+              {ix.index} <span className="text-ink-faint">on {ix.schema}.{ix.table}</span>
+            </span>
+            {sized && (
+              <>
+                <span className="w-14 shrink-0 h-[5px] rounded-full bg-wash-strong">
+                  <span
+                    className="block h-[5px] rounded-full bg-accent/60"
+                    style={{ width: `${((ix.bytes ?? 0) / scale) * 100}%` }}
+                  />
+                </span>
+                <span className="shrink-0 w-[48px] text-right tabular-nums text-[10px] text-ink-muted">
+                  {formatBytes(ix.bytes ?? 0)}
+                </span>
+              </>
+            )}
+          </div>
+        ))}
+        {all.length > rows.length && (
+          <p className="text-[10px] text-ink-faint">+ {all.length - rows.length} more</p>
+        )}
+      </div>
+      <p className="mt-2 text-[10px] text-ink-faint leading-snug text-pretty">{summary}</p>
+    </Card>
+  );
+}
+
+function Replication({ health }: { health: HealthSnapshot }): JSX.Element {
+  const scale = Math.max(...health.replication.map((r) => r.lagBytes ?? 0), 1);
+  return (
+    <Card
+      title={`Replicas ${health.replication.length}`}
+      right={<span className="text-[9px] text-ink-faint">64 MB is where a read starts reading the past</span>}
+    >
+      <div className="flex flex-col gap-1.5">
+        {health.replication.map((r, i) => (
+          <div key={r.client ?? i} className="flex items-center gap-2">
+            <span className="w-[38%] shrink-0 truncate font-mono text-[10px] text-ink-muted">
+              {r.client ?? 'replica'}
+              {r.state && <span className="text-ink-faint"> · {r.state}</span>}
+            </span>
+            <span className="flex-1 h-[5px] rounded-full bg-wash-strong">
+              <span
+                className={`block h-[5px] rounded-full bg-current ${
+                  (r.lagBytes ?? 0) > 64 * 1024 * 1024 ? 'text-warn/90' : 'text-good/90'
+                }`}
+                style={{ width: `${((r.lagBytes ?? 0) / scale) * 100}%` }}
+              />
+            </span>
+            <span className="shrink-0 w-[52px] text-right tabular-nums text-[10px] text-ink-muted">
+              {r.lagBytes === null ? '—' : formatBytes(r.lagBytes)}
+            </span>
+          </div>
+        ))}
+      </div>
+      <p className="mt-2 text-[10px] text-ink-faint leading-snug text-pretty">
+        Bars are scaled to the worst replica, not to the threshold.
+      </p>
+    </Card>
+  );
+}
+
+function Card({
   title,
   right,
   children,
+  grow = '',
+  bodyClass = '',
 }: {
   title: string;
   right?: React.ReactNode;
   children: React.ReactNode;
+  /// Flex sizing for the wrapping rows. Passed rather than fixed because
+  /// the storage panels share a row whose membership depends on what this
+  /// particular server would answer.
+  grow?: string;
+  /// Usually a floor under a card whose contents change on every read, so
+  /// a shorter list does not drag the rest of the page up.
+  bodyClass?: string;
 }): JSX.Element {
   return (
-    <div className="border-b border-card py-1.5">
-      <div className="px-3.5 py-1 flex items-center gap-2">
+    <div className={`bg-card border border-card rounded-md px-3 py-2 min-w-0 ${grow}`}>
+      <div className="flex items-baseline gap-2 mb-2">
         <p className="text-[10px] uppercase tracking-wide text-ink-faint">{title}</p>
         <div className="flex-1" />
         {right}
       </div>
-      {children}
+      <div className={bodyClass}>{children}</div>
     </div>
   );
 }
 
 function Empty({ children }: { children: React.ReactNode }): JSX.Element {
-  return <p className="px-3.5 py-1 text-[11px] text-ink-faint">{children}</p>;
+  return <p className="px-3.5 py-2 text-[11px] text-ink-faint">{children}</p>;
+}
+
+/// Worst first: blocked, then holding a transaction open, then running,
+/// then everything else. The order the list is read in, not the order the
+/// server happened to return.
+function rank(s: Session): number {
+  if (s.blockedBy.length > 0) return 0;
+  if ((s.state ?? '').startsWith('idle in transaction')) return 1;
+  if (s.state === 'active') return 2;
+  return 3;
 }
 
 function SessionRow({
@@ -377,36 +870,49 @@ function SessionRow({
   onOpenSql?(sql: string): void;
 }): JSX.Element {
   const blocked = session.blockedBy.length > 0;
+  const idleInTxn = (session.state ?? '').startsWith('idle in transaction');
   return (
-    <tr className={`align-top hover:bg-card ${blocked ? 'bg-bad/5' : ''}`}>
-      <td className="px-3.5 py-1 font-mono text-ink-faint tabular-nums">
+    <tr
+      className={`align-top hover:bg-card ${
+        blocked
+          ? 'bg-bad/5 shadow-[inset_2px_0_0_rgb(var(--c-bad))]'
+          : idleInTxn
+            ? 'bg-warn/5 shadow-[inset_2px_0_0_rgb(var(--c-warn))]'
+            : ''
+      }`}
+    >
+      <td className="px-3 py-1 font-mono text-ink-faint tabular-nums truncate">
         {session.id}
-        {session.isSelf && <span className="ml-1 text-accent">·you</span>}
+        {session.isSelf && <span className="ml-1 text-accent">· you</span>}
       </td>
-      <td className="px-2 py-1 text-ink-muted">
+      <td className="px-2 py-1 text-ink-muted truncate">
         {session.user ?? '—'}
         {session.application && <span className="text-ink-faint"> / {session.application}</span>}
         {session.clientAddress && (
-          <span className="text-ink-faint block text-[10px]">{session.clientAddress}</span>
+          <span className="text-ink-faint block text-[10px] truncate">{session.clientAddress}</span>
         )}
       </td>
       <td className="px-2 py-1">
         <span
           className={
-            session.state === 'active'
-              ? 'text-good/90'
-              : (session.state ?? '').startsWith('idle in transaction')
+            blocked
+              ? 'text-bad/90'
+              : idleInTxn
                 ? 'text-warn/90'
-                : 'text-ink-faint'
+                : session.state === 'active'
+                  ? 'text-good/90'
+                  : 'text-ink-faint'
           }
         >
           {session.state ?? '—'}
         </span>
         {session.waitEvent && (
-          <span className="block text-[10px] text-ink-faint">waiting: {session.waitEvent}</span>
+          <span className="block text-[10px] text-ink-faint truncate" title={session.waitEvent}>
+            waiting: {session.waitEvent}
+          </span>
         )}
         {blocked && (
-          <span className="block text-[10px] text-bad/90">
+          <span className="block text-[10px] text-bad/90 truncate">
             blocked by {session.blockedBy.join(', ')}
           </span>
         )}
@@ -414,8 +920,10 @@ function SessionRow({
       <td className="px-2 py-1 text-right tabular-nums text-ink-muted">
         {session.seconds === null ? '—' : formatDuration(session.seconds)}
       </td>
-      <td className="px-2 py-1 text-ink-muted font-mono max-w-[42ch]">
-        <span className="line-clamp-2">{session.query ?? '—'}</span>
+      <td className="px-2 py-1 text-ink-muted font-mono min-w-0">
+        <span className="block truncate" title={session.query ?? undefined}>
+          {session.query ?? '—'}
+        </span>
         {session.query && onOpenSql && (
           <button
             onClick={() => onOpenSql(session.query ?? '')}

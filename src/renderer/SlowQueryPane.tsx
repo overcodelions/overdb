@@ -3,13 +3,16 @@ import { formatSql } from '@shared/formatSql';
 import {
   deltaStats,
   isRetryable,
+  movers,
   scanRatio,
+  shares,
   sortStats,
   type SlowQueryOrder,
   type SlowQuerySupport,
   type SlowQueryUnavailable,
   type StatementStat,
 } from '@shared/slowQueries';
+import { CostScatter, ShareStrip, type CostPoint } from './Marks';
 import { useStore } from './store';
 
 /// What the SERVER thinks is expensive.
@@ -25,6 +28,9 @@ export function SlowQueryPane({
   onOpen,
   onPlan,
   onFaster,
+  full,
+  onToggleFull,
+  onClose,
 }: {
   connectionId: string | null;
   connectionName: string;
@@ -34,6 +40,11 @@ export function SlowQueryPane({
   onPlan(sql: string): void;
   /// Hand it to the tuner.
   onFaster(sql: string): void;
+  /// Whether the pane has the whole window or is docked under the editor.
+  full: boolean;
+  onToggleFull(): void;
+  /// Back to the result of whatever you last ran.
+  onClose(): void;
 }): JSX.Element {
   const toast = useStore((s) => s.toast);
   const askConfirm = useStore((s) => s.askConfirm);
@@ -44,6 +55,15 @@ export function SlowQueryPane({
   const [order, setOrder] = useState<SlowQueryOrder>('total');
   const [expanded, setExpanded] = useState<string | null>(null);
   const [auto, setAuto] = useState(false);
+  /// Collapsible, and remembered. The list is still the pane — somebody
+  /// who came here to read statements should be able to put the charts
+  /// away and have them stay away.
+  const [charts, setCharts] = useState(true);
+  /// Which statement the pointer is over, in either direction. The plot
+  /// and the list are two views of one set of rows, and a bubble you
+  /// cannot find in the list is a bubble that told you nothing.
+  const [hover, setHover] = useState<string | null>(null);
+  const rowEls = useRef(new Map<string, HTMLDivElement>());
   /// 'since' is the default because a server up for forty days reports
   /// totals against an unknown denominator: "4.2 s" cannot tell you whether
   /// the index you just added helped. The baseline below makes the same
@@ -122,6 +142,30 @@ export function SlowQueryPane({
   // server: these rows are the top N, and a bar drawn against a total that
   // includes rows nobody can see would be a proportion of nothing legible.
   const totalMs = rows.reduce((a, r) => a + r.totalMs, 0);
+  const strip = shares(rows, 8);
+  /// Always measured against the baseline, whichever window the list is
+  /// showing: "what moved" only means anything relative to a starting
+  /// point, and the all-time view has none of its own.
+  const moved = baseline.current ? movers(baseline.current, stats ?? [], 4) : [];
+  const worstMove = Math.max(...moved.map((m) => Math.abs(m.deltaMs)), 1);
+  /// Every statement with measurable time, not just the ones on screen —
+  /// the whole point of the plot is the shape of the population, and a
+  /// scatter of the top eight is a bar chart with extra steps.
+  const points: CostPoint[] = rows.slice(0, 200).map((r, i) => {
+    const ratio = scanRatio(r);
+    return {
+      key: r.digest,
+      calls: r.calls,
+      meanMs: r.meanMs,
+      totalMs: r.totalMs,
+      flagged: (ratio !== null && ratio >= 100) || (r.noIndexUsed ?? 0) > 0,
+      // Three labels. Naming every point is how a scatter stops being
+      // readable, and the rest carry their name on hover and in the list.
+      // Only where the label names a table. "select" on its own is three
+      // characters of noise over a crowded plot.
+      label: i < 3 && !r.redacted && shortLabel(r.sql).includes(' ') ? shortLabel(r.sql) : undefined,
+    };
+  });
   // Recomputed from the rows on every read rather than trusted from the
   // probe: the first redacted statement may not have existed when the pane
   // opened, and the banner should appear when it does.
@@ -132,6 +176,7 @@ export function SlowQueryPane({
   return (
     <div className="h-full flex flex-col min-h-0">
       <div className="shrink-0 flex items-center gap-2 px-3 py-1.5 border-b border-card">
+        {full && <span className="text-[11px] text-ink shrink-0">Slow queries</span>}
         <Segmented<SlowQueryOrder>
           value={order}
           onChange={setOrder}
@@ -202,12 +247,179 @@ export function SlowQueryPane({
             Reset
           </button>
         )}
+        <span className="w-px h-3.5 bg-card" />
+        {full && (
+          <button
+            onClick={() => setCharts((v) => !v)}
+            title={charts ? 'Hide the charts and give the list the room' : 'Show where the time went'}
+            className="text-[10px] text-ink-faint hover:text-ink"
+          >
+            {charts ? 'Hide charts' : 'Charts'}
+          </button>
+        )}
+        <button
+          onClick={onToggleFull}
+          title={
+            full
+              ? 'Dock it under the editor — the list alone, with your query still in view'
+              : 'Fill the window — where the time went, and how each statement hurts'
+          }
+          className="text-[10px] px-1.5 py-0.5 rounded text-ink-muted hover:text-ink hover:bg-card"
+        >
+          {full ? '⤡' : '⤢'}
+          <span className="ml-1">{full ? 'Dock' : 'Expand'}</span>
+        </button>
+        <button
+          onClick={onClose}
+          title="Back to your results"
+          aria-label="Close slow queries"
+          className="text-[10px] px-1.5 py-0.5 rounded text-ink-faint hover:text-ink hover:bg-card"
+        >
+          ✕
+        </button>
       </div>
 
       {redacted && <RedactedBanner />}
       {error && (
         <div className="shrink-0 px-3 py-1.5 text-[11px] text-bad-strong/90 border-b border-card">
           {error}
+        </div>
+      )}
+
+      {full && charts && rows.length > 0 && (
+        <div className="shrink-0 border-b border-card px-3 py-2.5 flex flex-col gap-2.5">
+          <div>
+            <div className="flex items-baseline gap-2">
+              <p className="text-[10px] uppercase tracking-wide text-ink-faint">Where the time went</p>
+              <p className="text-[10px] text-ink-faint">
+                {ms(strip.totalMs)} of server time across{' '}
+                {count(rows.reduce((a, r) => a + r.calls, 0))} calls
+                {window_ === 'since' && baselineAt && (
+                  <>
+                    , since{' '}
+                    {new Date(baselineAt).toLocaleTimeString(undefined, { hour12: false })}
+                  </>
+                )}
+              </p>
+            </div>
+            <div className="mt-2">
+              <ShareStrip shares={strip.shares} rest={strip.rest} />
+            </div>
+            {/* The number that decides the afternoon. A top eight holding
+                sixty percent is worth working on; a top eight holding four
+                means the cost is spread across two hundred statements and
+                there is no top eight. */}
+            {strip.rest > 0 && (
+              <p className="mt-1.5 text-[10px] text-ink-faint">
+                The remaining {(rows.length - strip.shares.length).toLocaleString()} statements
+                together: {(strip.rest * 100).toFixed(0)}%
+              </p>
+            )}
+          </div>
+
+          <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,640px)_1fr] gap-2.5 items-start">
+            <div className="bg-card border border-card rounded-md px-2.5 py-2 min-w-0">
+              <div className="flex items-baseline gap-2 flex-wrap">
+                <p className="text-[10px] uppercase tracking-wide text-ink-faint">
+                  How each one hurts
+                </p>
+                <div className="flex-1" />
+                <span className="flex items-center gap-1.5 text-[9px] text-ink-faint">
+                  <span className="w-[7px] h-[7px] rounded-full bg-accent/60" />
+                  area is total time
+                </span>
+                <span className="flex items-center gap-1.5 text-[9px] text-ink-faint">
+                  <span className="w-[7px] h-[7px] rounded-full bg-warn/60" />
+                  reads 100+ rows per row returned
+                </span>
+              </div>
+              <CostScatter
+                points={points}
+                // The picked one outranks the hovered one: a click is a
+                // decision and the pointer moves on.
+                highlight={expanded ?? hover}
+                onHover={setHover}
+                onPick={(digest) => {
+                  setExpanded(digest);
+                  // Opening a row two hundred statements down the list and
+                  // leaving it offscreen is the same as doing nothing.
+                  rowEls.current
+                    .get(digest)
+                    ?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+                }}
+              />
+            </div>
+
+            <div className="bg-card border border-card rounded-md px-2.5 py-2 min-w-0 flex flex-col">
+              <div className="flex items-baseline gap-2">
+                <p className="text-[10px] uppercase tracking-wide text-ink-faint">Biggest movers</p>
+                <div className="flex-1" />
+                <span className="text-[9px] text-ink-faint">change in total time</span>
+              </div>
+              {moved.length === 0 ? (
+                <p className="mt-2 text-[10px] text-ink-faint">
+                  Nothing has moved since this pane opened.
+                </p>
+              ) : (
+                <div className="mt-2.5 flex flex-col gap-2">
+                  {moved.map((m) => (
+                    <div key={m.stat.digest} className="flex items-center gap-2">
+                      <span className="flex-1 min-w-0 truncate text-[10px] text-ink-muted" title={m.stat.sql}>
+                        {m.stat.redacted ? 'hidden — run by another user' : shortLabel(m.stat.sql)}
+                      </span>
+                      {/* A zero in the middle rather than bars from the
+                          left, because the sign is the point: watching the
+                          number go down after adding an index is why
+                          anybody comes back to this pane. */}
+                      <span className="w-[96px] shrink-0 flex h-1.5">
+                        <span className="w-1/2 flex justify-end">
+                          {m.deltaMs < 0 && (
+                            <span
+                              className="h-1.5 rounded-l-full bg-good/80"
+                              style={{ width: `${(Math.abs(m.deltaMs) / worstMove) * 100}%`, minWidth: 4 }}
+                            />
+                          )}
+                        </span>
+                        <span className="w-1/2">
+                          {m.deltaMs > 0 && (
+                            <span
+                              className="block h-1.5 rounded-r-full bg-hot/80"
+                              style={{ width: `${(m.deltaMs / worstMove) * 100}%`, minWidth: 4 }}
+                            />
+                          )}
+                        </span>
+                      </span>
+                      <span
+                        className={`w-[62px] shrink-0 text-right tabular-nums text-[10px] ${
+                          m.deltaMs > 0 ? 'text-hot' : 'text-good/90'
+                        }`}
+                      >
+                        {m.deltaMs > 0 ? '+' : '−'}
+                        {ms(Math.abs(m.deltaMs))}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div className="flex-1" />
+              <p className="mt-2 text-[10px] text-ink-faint leading-snug text-pretty">
+                Worked out here, against the snapshot taken when you opened this pane. Nothing on
+                the server was reset.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* The four numbers used to be unlabelled, with only a title
+          attribute to say which was which — which is a label you have to
+          already know the answer to find. */}
+      {rows.length > 0 && (
+        <div className="shrink-0 flex items-baseline gap-3 px-3 py-1 border-b border-rule text-[10px] uppercase tracking-wide text-ink-faint">
+          <span className="shrink-0 w-20 text-right">total</span>
+          <span className="shrink-0 w-16 text-right">calls</span>
+          <span className="shrink-0 w-20 text-right">each</span>
+          <span className="flex-1">statement</span>
         </div>
       )}
 
@@ -224,6 +436,12 @@ export function SlowQueryPane({
               key={s.digest}
               connectionId={connectionId}
               stat={s}
+              innerRef={(el) => {
+                if (el) rowEls.current.set(s.digest, el);
+                else rowEls.current.delete(s.digest);
+              }}
+              highlight={hover === s.digest}
+              onHover={setHover}
               textLimit={support?.supported ? support.textLimit : null}
               share={totalMs > 0 ? s.totalMs / totalMs : 0}
               open={expanded === s.digest}
@@ -249,9 +467,17 @@ function Row({
   onOpen,
   onPlan,
   onFaster,
+  innerRef,
+  highlight,
+  onHover,
 }: {
   connectionId: string;
   stat: StatementStat;
+  /// Registered so a click on the plot can scroll this row into view.
+  innerRef(el: HTMLDivElement | null): void;
+  /// The pointer is over this statement's bubble.
+  highlight: boolean;
+  onHover(digest: string | null): void;
   /// The server's cap on stored statement text, for explaining a truncated
   /// row. Null where the engine has no single variable to point at.
   textLimit: { parameter: string; bytes: number } | null;
@@ -283,7 +509,16 @@ function Row({
   }, [open, example, connectionId, stat.digest, stat.redacted, stat.truncated]);
 
   return (
-    <div className="border-b border-rule last:border-0">
+    <div
+      ref={innerRef}
+      onMouseEnter={() => onHover(stat.digest)}
+      onMouseLeave={() => onHover(null)}
+      className={`border-b border-rule last:border-0 ${
+        // Matches the ring the plot puts round the same statement. Two
+        // views of one row have to agree about which row it is.
+        highlight ? 'bg-accent/10 shadow-[inset_2px_0_0_rgb(var(--c-accent))]' : ''
+      } ${open ? 'bg-wash' : ''}`}
+    >
       <button
         onClick={onToggle}
         className="w-full text-left px-3 py-1.5 hover:bg-card/40 group"
@@ -359,7 +594,11 @@ function Row({
             </p>
           )}
           <div className="mt-1.5 flex items-center gap-3 text-[10px]">
-            <Action label="Edit" title="Put it in the editor, unrun" onClick={() => onOpen(stat.sql)} />
+            <Action
+              label="Edit"
+              title="Open it in a new editor tab, unrun — your current query stays where it is"
+              onClick={() => onOpen(stat.sql)}
+            />
             {/* Both hidden on a truncated statement rather than disabled
                 with an excuse. EXPLAIN on half a statement is a syntax
                 error, and asking a model to speed up a fragment gets you
@@ -585,6 +824,16 @@ function ms(v: number): string {
   if (v >= 1_000) return `${(v / 1_000).toFixed(2)} s`;
   if (v >= 10) return `${Math.round(v)} ms`;
   return `${v.toFixed(2)} ms`;
+}
+
+/// A few words naming a statement, for a plot point or a movers row.
+///
+/// Not a summary and not the SQL: enough to recognise which row of the
+/// list below it is, which is all a label on a chart has room to be.
+export function shortLabel(sql: string): string {
+  const verb = /^\s*(\w+)/.exec(sql)?.[1]?.toLowerCase() ?? '';
+  const table = /\b(?:from|into|update|join)\s+["`[]?([\w.]+)/i.exec(sql)?.[1];
+  return table ? `${verb} ${table}` : verb || 'statement';
 }
 
 function count(v: number): string {

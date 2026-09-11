@@ -24,12 +24,22 @@ export interface PlanShape {
   measured: boolean;
   /// Rows the statement actually returned, when it has been run.
   returned: number | null;
-  /// Rows read per row kept. Null when either half is unknown, or when
-  /// nothing was returned — dividing by zero would print Infinity and mean
-  /// nothing.
+  /// Rows read per row kept, across the WHOLE query. Null when either half
+  /// is unknown, or when nothing was returned — dividing by zero would
+  /// print Infinity and mean nothing.
+  ///
+  /// Against `total`, not against the heaviest step. The headline beside
+  /// this sentence is the total, so a ratio taken from one step gave a
+  /// reader two numbers that would not divide: 61,474 rows to read, 7
+  /// returned, and a sentence claiming 4,088 rows per row kept.
   waste: number | null;
   /// Steps that read anything, heaviest first, for the bars.
   steps: Array<{ row: PlanRow; read: number }>;
+  /// The passes over the rows once reading is done — a temporary table, a
+  /// sort. Separate from `steps` because they are not reads, and in the
+  /// order the server performs them rather than heaviest first: they are a
+  /// sequence, and ranking them by size would describe the wrong thing.
+  stages: Array<{ row: PlanRow; rows: number }>;
 }
 
 /// What a step actually reads: rows per scan times the number of scans.
@@ -39,6 +49,11 @@ export interface PlanShape {
 /// multiplier made the cheapest-looking step in a bad join the one doing
 /// nearly all the work.
 function readOf(row: PlanRow): number | null {
+  // A sort or a temporary table reads no rows FROM A TABLE — it passes
+  // over rows that have already been read. Counting them here would add
+  // the join's output to the headline once per pass: the plan behind this
+  // comment reads 731,687 rows and would have claimed 2,062,027.
+  if (row.stage !== undefined) return null;
   const per = row.actualRows ?? row.rows;
   if (per === undefined) return null;
   return per * Math.max(1, row.loops ?? 1);
@@ -53,10 +68,16 @@ export function planShape(rows: PlanRow[], returned: number | null): PlanShape {
   const heaviest = steps[0] ?? null;
   const read = heaviest?.read ?? null;
   const measured = heaviest?.row.actualRows !== undefined;
-  const waste = read !== null && returned !== null && returned > 0 ? read / returned : null;
+  const total = steps.length ? steps.reduce((n, s) => n + s.read, 0) : null;
+  const waste = total !== null && returned !== null && returned > 0 ? total / returned : null;
+
+  const stages = rows
+    .filter((row) => row.stage !== undefined)
+    .map((row) => ({ row, rows: row.actualRows ?? row.rows ?? 0 }));
 
   return {
-    total: steps.length ? steps.reduce((n, s) => n + s.read, 0) : null,
+    stages,
+    total,
     heaviest: heaviest?.row ?? null,
     read,
     measured,
@@ -72,12 +93,34 @@ export function planShape(rows: PlanRow[], returned: number | null): PlanShape {
 /// rows read" is already on the bar, and a caption that repeats the bar is a
 /// caption nobody reads twice.
 export function wasteSentence(shape: PlanShape): string | null {
-  if (shape.waste === null || shape.read === null) return null;
+  if (shape.waste === null || shape.total === null) return null;
   if (shape.waste < 2) {
     return 'Almost every row it reads is a row you keep — this query is not doing wasted work.';
   }
   const per = shape.waste >= 10 ? Math.round(shape.waste).toLocaleString() : shape.waste.toFixed(1);
   return `It reads ${per} rows for every row it keeps. That ratio, not the row count, is what makes a query slow.`;
+}
+
+/// What has to finish before the first row can come back.
+///
+/// A different question from `wasteSentence`, and a different fix. That one
+/// is about rows read and thrown away; this is about latency. A query that
+/// reads exactly the rows it keeps can still sit there for a minute if all
+/// of them go through a temporary table and a sort on the way out — and
+/// until those steps were parsed at all, such a query drew as though it
+/// were free.
+export function stageSentence(shape: PlanShape): string | null {
+  const blocking = shape.stages.filter((s) => s.row.warn !== undefined);
+  if (blocking.length === 0) return null;
+  const rows = Math.max(...blocking.map((s) => s.rows));
+  // `shape.stages` is already in the order the server performs them, which
+  // is what this sentence is about.
+  const names = [...new Set(blocking.map((s) => s.row.title))];
+  const list =
+    names.length === 1
+      ? `a ${names[0]}`
+      : `a ${names.slice(0, -1).join(', a ')} and a ${names[names.length - 1]}`;
+  return `Nothing comes back until all ${rows.toLocaleString()} rows have been through ${list}.`;
 }
 
 /// How hot this step runs, 0 to 1 — a scan of the whole table with almost

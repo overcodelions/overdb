@@ -1,6 +1,6 @@
 import type { PlanRow } from '@shared/plan';
 import { planFindings } from '@shared/planFindings';
-import { planShape, wasteSentence } from '@shared/planShape';
+import { planShape, stageSentence, wasteSentence } from '@shared/planShape';
 
 /// The numbers the whole view is about, before any of the drawing.
 ///
@@ -18,6 +18,9 @@ export function PlanVerdict({
   const shape = planShape(rows, result?.rowCount ?? null);
   if (shape.total === null) return null;
   const sentence = wasteSentence(shape);
+  // Said beside the ratio rather than instead of it: they are two different
+  // reasons a query is slow, and a query can have both.
+  const blocking = stageSentence(shape);
 
   return (
     <div className="mx-3 mt-2 flex items-stretch rounded-md border border-card bg-card overflow-hidden">
@@ -28,10 +31,11 @@ export function PlanVerdict({
       {result?.durationMs != null && (
         <Cell value={`${result.durationMs.toLocaleString()} ms`} label="elapsed" tone="text-ink" />
       )}
-      <div className="flex items-center px-4 py-2.5 flex-1 min-w-0">
+      <div className="flex flex-col justify-center gap-0.5 px-4 py-2.5 flex-1 min-w-0">
         <span className="text-[11.5px] text-ink-muted leading-snug">
           {sentence ?? 'Run the statement to see how many of those rows come back.'}
         </span>
+        {blocking && <span className="text-[11.5px] text-warn/90 leading-snug">{blocking}</span>}
       </div>
     </div>
   );
@@ -97,6 +101,23 @@ export function PlanReading({
         </div>
       )}
 
+      {onTune && (
+        // Directly under the findings, not at the foot of the column: the
+        // box above is what is wrong, this is the only thing on the view you
+        // can do about it, and a reader who has just read four amber lines is
+        // asking this question already. Deliberately still a question, not
+        // "Optimise" — what comes back is a candidate to plan and read, and a
+        // button promising a faster query would promise something nothing
+        // here has measured.
+        <button
+          onClick={onTune}
+          disabled={tuning}
+          className="w-full rounded-md border border-accent/60 bg-accent/20 px-3 py-2.5 text-left text-[12px] text-ink hover:bg-accent/30 hover:border-accent/80 disabled:opacity-50"
+        >
+          {tuning ? 'Thinking…' : 'Ask what to try instead →'}
+        </button>
+      )}
+
       {shape.heaviest && (
         <div className="rounded-md border border-card bg-card px-4 py-3 flex flex-col gap-2">
           <span className="text-[10px] uppercase tracking-[0.04em] text-ink-faint">
@@ -111,19 +132,6 @@ export function PlanReading({
             )}
           </span>
         </div>
-      )}
-
-      {onTune && (
-        // Deliberately a question, not "Optimise": what comes back is a
-        // candidate to plan and read, and a button promising a faster query
-        // would be promising something nothing here has measured.
-        <button
-          onClick={onTune}
-          disabled={tuning}
-          className="rounded-md border border-accent/50 bg-accent/[0.14] px-3 py-2 text-left text-[11.5px] text-ink hover:bg-accent/20 disabled:opacity-50"
-        >
-          {tuning ? 'Thinking…' : 'Ask what to try instead →'}
-        </button>
       )}
     </div>
   );

@@ -971,21 +971,15 @@ export class MysqlAdapter implements DbAdapter {
     });
 
     await attempt('table sizes', async () => {
-      const rows = (await exec(
-        conn,
-        `select TABLE_SCHEMA as sch, TABLE_NAME as tbl,
-                DATA_LENGTH as bytes, INDEX_LENGTH as index_bytes, TABLE_ROWS as rows
-           from information_schema.TABLES
-          where TABLE_SCHEMA = database() and TABLE_TYPE = 'BASE TABLE'
-          order by (coalesce(DATA_LENGTH,0) + coalesce(INDEX_LENGTH,0)) desc
-          limit 50`,
-      )) as Array<Record<string, string | number | null>>;
+      const rows = (await exec(conn, MYSQL_TABLE_SIZE_SQL)) as Array<
+        Record<string, string | number | null>
+      >;
       out.tables = rows.map((row) => ({
         schema: String(row.sch),
         table: String(row.tbl),
         bytes: num(row.bytes) ?? 0,
         indexBytes: num(row.index_bytes),
-        estimatedRows: num(row.rows),
+        estimatedRows: num(row.est_rows),
       }));
       if (out.tables.length > 0) {
         notes.push(
@@ -1017,15 +1011,9 @@ export class MysqlAdapter implements DbAdapter {
     });
 
     await attempt('scan counts', async () => {
-      const rows = (await exec(
-        conn,
-        `select object_schema as sch, object_name as tbl,
-                count_read as reads, rows_read as rows_read
-           from performance_schema.table_io_waits_summary_by_table
-          where object_schema = database() and rows_read > 0
-          order by rows_read desc
-          limit 50`,
-      )) as Array<Record<string, string | number | null>>;
+      const rows = (await exec(conn, MYSQL_TABLE_READS_SQL)) as Array<
+        Record<string, string | number | null>
+      >;
       // MySQL does not separate sequential from indexed access at the table
       // level the way pg_stat_user_tables does. What it has is rows read
       // per table, which answers the same question — "what is being read
@@ -1034,7 +1022,7 @@ export class MysqlAdapter implements DbAdapter {
       out.sequentialScans = rows.map((row) => ({
         schema: String(row.sch),
         table: String(row.tbl),
-        sequentialScans: num(row.reads) ?? 0,
+        sequentialScans: num(row.read_count) ?? 0,
         sequentialRowsRead: num(row.rows_read) ?? 0,
         indexScans: 0,
         estimatedRows: null,
@@ -1091,14 +1079,42 @@ export class MysqlAdapter implements DbAdapter {
       .catch(() => false);
   }
 
+  /// The socket-level death of this session, if it died — from the
+  /// connection's 'error' event when that fired, and from the driver's own
+  /// state when it did not.
+  ///
+  /// It often does not. mysql2 hands a socket error to the in-flight
+  /// command's callback and bubbles it to the connection only when no
+  /// command was there to take it (see _notifyError), so a session that
+  /// dies under a query leaves `fatal` clear while the connection is
+  /// thoroughly closed — addCommand has already been swapped for the one
+  /// that refuses. Checking the flags is what makes the next call say the
+  /// connection was lost instead of repeating mysql2's "Can't add new
+  /// command when connection is in closed state", which reads like a bug in
+  /// the app rather than a session that needs replacing.
+  private lost(): Error | null {
+    if (this.fatal) return this.fatal;
+    const conn = this.conn as unknown as {
+      _closing?: boolean;
+      _fatalError?: Error;
+      _protocolError?: Error;
+      stream?: { destroyed?: boolean };
+    } | null;
+    if (!conn) return null;
+    const err = conn._fatalError ?? conn._protocolError;
+    if (err) return err;
+    if (conn._closing || conn.stream?.destroyed) {
+      return new Error('the server closed the connection');
+    }
+    return null;
+  }
+
   private require(): MysqlConnection {
     // The dead-socket case first: `this.conn` is still an object after the
-    // server hung up, so without this the driver's own complaint ("Can't
-    // add new command when connection is in closed state") is what reached
-    // the user, which reads like a bug in the app rather than a connection
-    // that needs reopening.
-    if (this.fatal) {
-      throw new Error(`the mysql connection was lost (${this.fatal.message}) — reconnect to continue`);
+    // server hung up.
+    const lost = this.lost();
+    if (lost) {
+      throw new Error(`the mysql connection was lost (${lost.message}) — reconnect to continue`);
     }
     if (!this.conn) throw new Error('mysql adapter is not connected');
     return this.conn;
@@ -1107,6 +1123,34 @@ export class MysqlAdapter implements DbAdapter {
 
 /// TRUNCATE needs the DROP privilege, on `*.*` or on performance_schema
 /// specifically. Anything narrower does not reach the digest table.
+/// The two health reads whose aliases MySQL will not accept.
+///
+/// Exported so a test can hold them to the rule, because the failure mode
+/// is invisible from here: `attempt()` turns a broken statement into a
+/// line in "what this server would not say", so a reserved word in an
+/// alias does not crash anything — it silently removes a whole panel from
+/// the pane and leaves a parser error where the explanation should be.
+/// Both of these shipped that way.
+///
+/// `ROWS` became reserved in 8.0.2 with window functions, and `READS` has
+/// been reserved since 5.x (READS SQL DATA). Renamed rather than
+/// backquoted: a quoted reserved word is a trap the next person has to
+/// re-learn, and `est_rows` says more than `rows` did anyway — InnoDB's
+/// number is an estimate, not a count.
+export const MYSQL_TABLE_SIZE_SQL = `select TABLE_SCHEMA as sch, TABLE_NAME as tbl,
+       DATA_LENGTH as bytes, INDEX_LENGTH as index_bytes, TABLE_ROWS as est_rows
+  from information_schema.TABLES
+ where TABLE_SCHEMA = database() and TABLE_TYPE = 'BASE TABLE'
+ order by (coalesce(DATA_LENGTH,0) + coalesce(INDEX_LENGTH,0)) desc
+ limit 50`;
+
+export const MYSQL_TABLE_READS_SQL = `select object_schema as sch, object_name as tbl,
+       count_read as read_count, rows_read as rows_read
+  from performance_schema.table_io_waits_summary_by_table
+ where object_schema = database() and rows_read > 0
+ order by rows_read desc
+ limit 50`;
+
 export function mysqlCanTruncateDigests(grants: string[]): boolean {
   return grants.some((g) => {
     const m = /^GRANT\s+(.+?)\s+ON\s+(\S+)\s+TO\b/i.exec(g.trim());

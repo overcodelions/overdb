@@ -83,14 +83,48 @@ export function PlanLedger({
   // Subqueries, heaviest first. The order they are evaluated in is not
   // something the plan reports and not something anyone can act on; which
   // of them costs the most is both.
-  const groups = trunk.flatMap((parent, pi) =>
-    branchesOf(parent).map((branch, bi) => {
+  const groups = trunk.flatMap((parent, pi) => {
+    const branches = branchesOf(parent);
+    // A materialized subquery is not a set of alternatives — it is ONE
+    // thing built from several steps — so it is one group, not one per
+    // step. It had no group at all until now: neither the river nor this
+    // list had anywhere to put it, and on a real plan that hid 32,715 of
+    // the 61,474 rows the headline was counting.
+    if (branches.length === 0) {
+      const built = chainOf(parent);
+      if (built.length === 0) return [];
+      const items = built.flatMap((c) => branchItems(c));
+      return [
+        {
+          key: `${pi}:built`,
+          parent,
+          ordinal: 1,
+          of: 1,
+          built: true,
+          items,
+          // Flat, deliberately. The arms of a union are not a pipeline, and
+          // running a chain through them would claim a drop between two
+          // steps that never fed each other — on this plan, 22,284 rows
+          // "going no further" between two independent union arms.
+          flow: items.map((it) => ({
+            read: it.read,
+            out: it.read,
+            dropped: 0,
+            estimated: true,
+            widen: 1,
+          })),
+          total: items.reduce((n, it) => n + it.read, 0),
+        },
+      ];
+    }
+    return branches.map((branch, bi) => {
       const items = branchItems(branch);
       return {
         key: `${pi}:${bi}`,
         parent,
         ordinal: bi + 1,
-        of: branchesOf(parent).length,
+        of: branches.length,
+        built: false,
         items,
         // A subquery's own steps drop rows between one another, but what
         // the LAST of them hands to the query above is not something the
@@ -108,8 +142,8 @@ export function PlanLedger({
         ),
         total: items.reduce((n, it) => n + it.read, 0),
       };
-    }),
-  );
+    });
+  });
   groups.sort((a, b) => b.total - a.total);
 
   // Default: the heaviest one open. A view that opens everything is the
@@ -153,10 +187,18 @@ export function PlanLedger({
 
       {groups.length > 0 && (
         <Divider
-          label={`${groups.length} ${groups.length === 1 ? 'subquery feeds' : 'subqueries feed'} ${
-            resolveStep(groups[0].parent.row.title, aliases)?.table ?? groups[0].parent.row.title
-          }`}
-          note="independent of each other · evaluated one at a time"
+          label={
+            groups[0].built
+              ? `${resolveStep(groups[0].parent.row.title, aliases)?.table ?? groups[0].parent.row.title} is built from ${groups[0].items.length} steps`
+              : `${groups.length} ${groups.length === 1 ? 'subquery feeds' : 'subqueries feed'} ${
+                  resolveStep(groups[0].parent.row.title, aliases)?.table ?? groups[0].parent.row.title
+                }`
+          }
+          note={
+            groups[0].built
+              ? 'built once, then probed · the plan does not say what each arm contributes'
+              : 'independent of each other · evaluated one at a time'
+          }
           accent
         />
       )}
@@ -252,8 +294,12 @@ function Line({
   aliases: Record<string, string>;
 }): JSX.Element {
   const row = node.row;
-  const named = resolveStep(row.title, aliases);
-  const scan = row.warn !== undefined && !row.key;
+  // A pass over the rows — a sort, a temporary table — is not a table read.
+  // Run through the table path it printed "no index used" under the word
+  // "sort", which reads as a finding about a missing index and is not one.
+  const stage = row.stage;
+  const named = stage ? null : resolveStep(row.title, aliases);
+  const scan = !stage && row.warn !== undefined && !row.key;
   const hot = read > max / 2 || scan;
   // A drop worth naming, on the same threshold the rest of the view uses:
   // throwing away forty rows is not why anything is slow.
@@ -263,7 +309,11 @@ function Line({
     <div className="flex flex-col">
       <div
         className="grid gap-3 items-center px-2.5 py-1.5 rounded mt-[3px]"
-        style={{ ...COLUMNS, background: hot ? 'rgb(251 146 60 / 0.08)' : undefined }}
+        style={{
+          ...COLUMNS,
+          background:
+            hot ? 'rgb(251 146 60 / 0.08)' : stage ? 'rgb(127 110 242 / 0.06)' : undefined,
+        }}
       >
         <span
           className="flex flex-col gap-[2px] min-w-0"
@@ -276,10 +326,21 @@ function Line({
           <span className="font-mono text-[12px] text-ink truncate" title={named?.table ?? row.title}>
             {named?.table ?? row.title}
           </span>
-          <span className={`text-[10.5px] truncate ${scan ? 'text-warn/90' : 'text-ink-faint'}`}>
-            {[named?.alias, row.key ? `via ${keyLabel(row.key)}` : row.access]
-              .filter(Boolean)
-              .join(' · ') || '—'}
+          <span
+            className={`text-[10.5px] truncate ${
+              scan || (stage && row.warn) ? 'text-warn/90' : 'text-ink-faint'
+            }`}
+          >
+            {stage
+              ? (row.extra ?? 'a pass over the rows')
+              : [
+                  named?.alias,
+                  row.key
+                    ? `via ${keyLabel(row.key)}${row.covering ? ' · covering' : ''}`
+                    : row.access,
+                ]
+                  .filter(Boolean)
+                  .join(' · ') || '—'}
             {scan && ' — no index used'}
           </span>
         </span>
@@ -290,7 +351,11 @@ function Line({
             runs > 1 ? 'text-warn/90' : 'text-ink-faint'
           }`}
         >
-          {runs > 1 ? `${per.toLocaleString()} × ${runs.toLocaleString()} runs` : `${per.toLocaleString()} × 1`}
+          {stage
+            ? `${per.toLocaleString()} rows`
+            : runs > 1
+              ? `${per.toLocaleString()} × ${runs.toLocaleString()} runs`
+              : `${per.toLocaleString()} × 1`}
         </span>
 
         <Bar value={read / max} tone={hot ? 'hot' : 'cool'} />

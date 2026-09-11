@@ -4,7 +4,11 @@ import {
   formatBytes,
   formatDuration,
   killSupport,
+  pushSample,
   readings,
+  sessionStates,
+  splitReadings,
+  waitEvents,
   seqScanOffenders,
   unusedIndexSummary,
   type HealthSnapshot,
@@ -174,5 +178,125 @@ describe('killSupport', () => {
   it('offers both verbs where both exist', () => {
     expect(killSupport('postgres')).toMatchObject({ cancel: true, terminate: true, note: null });
     expect(killSupport('mysql')).toMatchObject({ cancel: true, terminate: true });
+  });
+});
+
+describe('splitReadings', () => {
+  it('charts the four that need a denominator and counts the rest', () => {
+    const rows = readings(
+      health({
+        connections: { used: 10, max: 100 },
+        cacheHitRatio: 0.99,
+        databaseBytes: 1024,
+        transactions: { committed: 100, rolledBack: 1 },
+        sessions: [session()],
+      }),
+    );
+    const { charted, counts } = splitReadings(rows);
+    expect(charted.map((r) => r.key)).toEqual(['connections', 'cache', 'rollbacks', 'size']);
+    // Everything readings() produced is still somewhere — the split must
+    // not be a place for a measure to go missing.
+    expect([...charted, ...counts].length).toBe(rows.length);
+    expect(counts.some((r) => r.key === 'idle-in-txn')).toBe(true);
+  });
+
+  it('does not invent a card for a measure the server withheld', () => {
+    const { charted } = splitReadings(readings(health({ cacheHitRatio: 0.99 })));
+    expect(charted.map((r) => r.key)).toEqual(['cache']);
+  });
+});
+
+describe('sessionStates', () => {
+  it('counts a blocked session as blocked rather than as active', () => {
+    // The interesting fact about it is what it is waiting for, not that
+    // the server still calls it running.
+    const s = sessionStates(
+      health({ sessions: [session({ state: 'active', blockedBy: ['7'] }), session({ state: 'active' })] }),
+    );
+    expect(s).toMatchObject({ blocked: 1, active: 1, idle: 0, awake: 2, total: 2 });
+  });
+
+  it('separates idle from idle in transaction', () => {
+    const s = sessionStates(
+      health({
+        sessions: [
+          session({ state: 'idle' }),
+          session({ state: 'idle in transaction' }),
+          session({ state: 'idle in transaction (aborted)' }),
+        ],
+      }),
+    );
+    expect(s).toMatchObject({ idle: 1, idleInTransaction: 2, active: 0, awake: 2 });
+  });
+
+  it('treats a state the server did not report as awake, not as idle', () => {
+    // Guessing "idle" would shrink the number people watch.
+    expect(sessionStates(health({ sessions: [session({ state: null })] }))).toMatchObject({
+      active: 1,
+      idle: 0,
+    });
+  });
+});
+
+describe('waitEvents', () => {
+  it('ranks by how many sessions are in each state', () => {
+    const rows = waitEvents(
+      health({
+        sessions: [
+          session({ waitEvent: 'sending data' }),
+          session({ waitEvent: 'sending data' }),
+          session({ waitEvent: 'statistics' }),
+        ],
+      }),
+    );
+    expect(rows).toEqual([
+      { event: 'sending data', count: 2, blocking: false },
+      { event: 'statistics', count: 1, blocking: false },
+    ]);
+  });
+
+  it('omits sessions the server reports no wait for', () => {
+    // "none" would be the largest bar on a healthy server, and it is not a
+    // wait.
+    expect(waitEvents(health({ sessions: [session({ waitEvent: null }), session({ waitEvent: '  ' })] }))).toEqual(
+      [],
+    );
+  });
+
+  it('marks a lock wait as one to act on', () => {
+    const [row] = waitEvents(health({ sessions: [session({ waitEvent: 'waiting for table metadata lock' })] }));
+    expect(row.blocking).toBe(true);
+  });
+
+  it('marks a wait as blocking when any session in it is blocked', () => {
+    const [row] = waitEvents(
+      health({
+        sessions: [
+          session({ waitEvent: 'io: DataFileRead' }),
+          session({ waitEvent: 'io: DataFileRead', blockedBy: ['9'] }),
+        ],
+      }),
+    );
+    expect(row).toEqual({ event: 'io: DataFileRead', count: 2, blocking: true });
+  });
+});
+
+describe('pushSample', () => {
+  it('keeps the newest samples and drops the oldest', () => {
+    let series: number[] = [];
+    for (const v of [1, 2, 3, 4]) series = pushSample(series, v, 3);
+    expect(series).toEqual([2, 3, 4]);
+  });
+
+  it('records nothing for a measure the server withheld', () => {
+    // A gap in the series is honest; a zero is a reading nobody took.
+    expect(pushSample([1, 2], null)).toEqual([1, 2]);
+    expect(pushSample([1, 2], Number.NaN)).toEqual([1, 2]);
+  });
+
+  it('does not mutate the series it was given', () => {
+    const before = [1, 2];
+    expect(pushSample(before, 3)).toEqual([1, 2, 3]);
+    expect(before).toEqual([1, 2]);
   });
 });

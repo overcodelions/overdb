@@ -12,6 +12,15 @@
 import type { DynamoAccess } from './dynamo';
 import type { Engine } from './engines';
 
+/// Work the server does to the rows AFTER the tables have been read.
+///
+/// Kept apart from the table steps because it answers a different
+/// question. A table step says where rows came from; these say what has to
+/// finish before a single row can be returned — which, for any query with
+/// a GROUP BY or an ORDER BY the indexes cannot serve, is usually most of
+/// the wall clock.
+export type PlanStage = 'sort' | 'temporary' | 'group' | 'distinct' | 'union';
+
 export interface PlanRow {
   depth: number;
   /// The step: a table name, or a node type like "Seq Scan".
@@ -54,6 +63,27 @@ export interface PlanRow {
   /// ("sort key …", a suggestion), and a reader that splits prose on `and`
   /// presents half a sentence as a predicate.
   condition?: string;
+  /// Set on a step that is not a table read but a pass over the rows: a
+  /// sort, a temporary table, a grouping. Undefined on table steps.
+  stage?: PlanStage;
+  /// The pass has to finish before the first row can be returned, because
+  /// it went through a temporary table or a sort. A grouping an index
+  /// already answered streams, and does not.
+  blocks?: boolean;
+  /// The server marked this subquery dependent AND not cacheable.
+  ///
+  /// Reported rather than acted on. Everything here counts a materialized
+  /// subquery as built once, which is what `<materialize>` means and what
+  /// the `<primary_index_lookup>` beside it confirms — but these two flags
+  /// are the plan's own hedge on that, and on a plan driven by 143 rows
+  /// the difference between built-once and rebuilt-per-row is two orders
+  /// of magnitude. Better said than silently assumed.
+  dependent?: boolean;
+  /// The index answered the step on its own — the table rows were never
+  /// touched. MySQL's `using_index`. Worth saying out loud because it is
+  /// the good news in a plan, and a reader who only sees "via IDX_FOO" has
+  /// no way to tell a covering index from one that costs a lookup per row.
+  covering?: boolean;
   /// Set when this step is worth looking at, with the reason.
   warn?: string;
 }
@@ -61,6 +91,14 @@ export interface PlanRow {
 const FULL_SCAN = new Set(['ALL', 'index', 'Seq Scan']);
 
 function warnFor(row: Omit<PlanRow, 'warn'>): string | undefined {
+  // A pass over the rows blocks: nothing at all comes back until it
+  // finishes, however cheap each row is. The thresholds are where MySQL's
+  // own buffers stop coping — a sort past sort_buffer_size becomes a merge
+  // on disk, and a temporary table past tmp_table_size becomes a table on
+  // disk — so they are the point at which this stops being bookkeeping.
+  if (row.stage !== undefined && row.blocks !== false && (row.rows ?? 0) > 10_000) {
+    return `Nothing is returned until all ${row.rows?.toLocaleString()} rows have been through it.`;
+  }
   if (row.access && FULL_SCAN.has(row.access) && !row.key) {
     return row.access === 'index' ? 'Full index scan — every entry read.' : 'Full table scan — no index used.';
   }
@@ -83,13 +121,37 @@ function push(out: PlanRow[], row: Omit<PlanRow, 'warn'>): void {
 }
 
 /// MySQL / MariaDB `EXPLAIN FORMAT=JSON`.
-function parseMysql(node: unknown, depth: number, out: PlanRow[]): void {
-  if (!node || typeof node !== 'object') return;
+///
+/// Returns the rows the subtree PRODUCES, so an operation stacked on top
+/// of it — a temporary table, a sort — can say how much it is moving.
+/// Nothing else in the plan carries that number: a table node's `rows` is
+/// per scan, and what a join hands upward is the product across the whole
+/// nested loop.
+function parseMysql(node: unknown, depth: number, out: PlanRow[]): number | undefined {
+  if (!node || typeof node !== 'object') return undefined;
   const obj = node as Record<string, unknown>;
 
-  if (obj.query_block) {
-    parseMysql(obj.query_block, depth, out);
-    return;
+  if (obj.query_block) return parseMysql(obj.query_block, depth, out);
+
+  // The work AFTER the join, which used to be dropped entirely.
+  //
+  // The catch-all at the bottom descended into these containers without
+  // emitting a step, so a query whose real cost was materialising 665,170
+  // rows and sorting them drew as two table scans and a result — the
+  // expensive half of the plan missing, with nothing to say it had been
+  // left out. MariaDB nests them (`filesort` wrapping `temporary_table`);
+  // MySQL 8 names them `ordering_operation` / `grouping_operation` and
+  // carries booleans. Both mean the same work.
+  //
+  // Emitted AFTER the child, because that is the order they run in: the
+  // JSON nests them outside-in, and the join happens first.
+  const stage = mysqlStage(obj);
+  if (stage) {
+    const produced = parseMysql(stage.child, depth, out);
+    for (const step of stage.steps) {
+      push(out, { depth, rows: produced, ...step });
+    }
+    return produced;
   }
   // A join is a nested_loop array, and the array order is the join order:
   // each element is driven once per row produced by everything before it.
@@ -98,29 +160,37 @@ function parseMysql(node: unknown, depth: number, out: PlanRow[]): void {
   // MariaDB spells the same thing `block-nl-join`, wrapping ONE table that
   // is driven by everything above it. Without this the loop multiplier was
   // computed on MySQL and silently skipped on MariaDB.
-  if (obj['block-nl-join']) {
-    parseMysql(obj['block-nl-join'], depth, out);
-    return;
-  }
+  if (obj['block-nl-join']) return parseMysql(obj['block-nl-join'], depth, out);
   if (Array.isArray(obj.nested_loop)) {
     let runs = 1;
     for (const child of obj.nested_loop) {
       const before = out.length;
-      parseMysql(child, depth, out);
+      // Rows PRODUCED, not rows read: the next table is driven once per row
+      // that survives this one's condition, which is what `filtered` says.
+      //
+      // Taken from the recursion's own answer rather than from the last row
+      // it happened to push. Those differ the moment a join element carries
+      // a subquery — the last row pushed is then the SUBQUERY's, and the
+      // multiplier became that table's row count instead of the join
+      // element's. On a real plan here it turned a join producing 143 rows
+      // into one producing 594,737, and every step after it inherited the
+      // error.
+      const produced = parseMysql(child, depth, out);
       if (runs > 1) {
         for (let i = before; i < out.length; i++) {
+          // A materialized subquery is built ONCE and probed many times.
+          // It is marked as such precisely so it does not inherit the
+          // driving step's repeat count — and then this loop handed it
+          // that count anyway, reporting a table read once as read 143
+          // times.
+          if (out[i].materialized) continue;
           out[i] = { ...out[i], loops: (out[i].loops ?? 1) * runs };
         }
       }
-      // Rows PRODUCED, not rows read: the next table is driven once per row
-      // that survives this one's condition, which is what `filtered` says.
-      const produced = out[out.length - 1];
-      if (produced?.rows !== undefined) {
-        const surviving = produced.rows * ((produced.filtered ?? 100) / 100);
-        runs *= Math.max(1, Math.round(surviving));
-      }
+      if (produced !== undefined) runs *= Math.max(1, Math.round(produced));
     }
-    return;
+    // The product across the whole loop: what the join hands upward.
+    return out.length > 0 ? runs : undefined;
   }
   if (obj.table) {
     const t = obj.table as Record<string, unknown>;
@@ -133,6 +203,10 @@ function parseMysql(node: unknown, depth: number, out: PlanRow[]): void {
       filtered: numberish(t.filtered),
       extra: t.attached_condition ? String(t.attached_condition) : undefined,
       condition: t.attached_condition ? String(t.attached_condition) : undefined,
+      // The one piece of good news a plan carries, and it was being
+      // thrown away: the index answered this step by itself and the table
+      // was never opened.
+      covering: t.using_index === true ? true : undefined,
     });
     // A materialized subquery or derived table hangs off the table node.
     // Its rows are read ONCE and reused — the opposite of a loop, and just
@@ -143,7 +217,16 @@ function parseMysql(node: unknown, depth: number, out: PlanRow[]): void {
       const before = out.length;
       parseMysql(t[key], depth + 1, out);
       if (key === 'materialized_from_subquery') {
-        for (let i = before; i < out.length; i++) out[i] = { ...out[i], materialized: true };
+        const m = t[key] as Record<string, unknown>;
+        const hedged = m.dependent === true && m.cacheable === false;
+        for (let i = before; i < out.length; i++) {
+          out[i] = { ...out[i], materialized: true };
+        }
+        if (hedged && out.length > before) {
+          // On the head of the subquery only. Six identical markers down a
+          // list is a pattern the eye stops reading.
+          out[before] = { ...out[before], dependent: true };
+        }
       }
       // Depth alone cannot tell a chain from a fan, and the difference is
       // the whole reading of the plan: the steps INSIDE one subquery are a
@@ -157,17 +240,96 @@ function parseMysql(node: unknown, depth: number, out: PlanRow[]): void {
         }
       }
     }
-    return;
+    const rows = numberish(t.rows ?? t.rows_examined_per_scan);
+    return rows === undefined
+      ? undefined
+      : Math.max(1, Math.round(rows * ((numberish(t.filtered) ?? 100) / 100)));
   }
   if (obj.message) {
     push(out, { depth, title: String(obj.message) });
-    return;
+    return undefined;
   }
-  // Anything else (union_result, ordering_operation, duplicates_removal…)
-  // is a container: descend without inventing a row for it.
+  // Anything left is a container we have no step for: descend without
+  // inventing one, and carry up whatever the deepest thing produced.
+  let produced: number | undefined;
   for (const value of Object.values(obj)) {
-    if (value && typeof value === 'object') parseMysql(value, depth, out);
+    if (value && typeof value === 'object') produced = parseMysql(value, depth, out) ?? produced;
   }
+  return produced;
+}
+
+/// The post-join operation this node describes, if it is one: what to
+/// descend into, and the step or steps to emit once that is done.
+///
+/// One node can be two steps. MySQL's `grouping_operation` says in two
+/// booleans that it both built a temporary table and sorted it, and those
+/// are separately expensive — collapsing them into "group" would hide the
+/// half that is usually the problem.
+function mysqlStage(
+  obj: Record<string, unknown>,
+): { child: unknown; steps: Array<Omit<PlanRow, 'warn' | 'depth' | 'rows'>> } | null {
+  // MariaDB: nested containers, with the sort key spelled out.
+  if (obj.filesort && typeof obj.filesort === 'object') {
+    const f = obj.filesort as Record<string, unknown>;
+    return { child: f, steps: [sortStep(f.sort_key)] };
+  }
+  if (obj.temporary_table && typeof obj.temporary_table === 'object') {
+    return { child: obj.temporary_table, steps: [TEMP_STEP] };
+  }
+
+  // MySQL 8: one named operation carrying booleans for how it was done.
+  //
+  // ONE step, not one per boolean. A DISTINCT done through a temporary
+  // table is a single operation described two ways, and drawing it as
+  // "temporary table" followed by "distinct" put two nodes in the river
+  // for one pass — which reads as the rows being written out and then
+  // deduped separately. How it was done belongs in the step, not beside
+  // it.
+  for (const [key, step] of Object.entries(NAMED_OPERATIONS)) {
+    const child = obj[key];
+    if (!child || typeof child !== 'object') continue;
+    const c = child as Record<string, unknown>;
+    const temp = c.using_temporary_table === true;
+    const sorted = c.using_filesort === true;
+    // An operation that needed neither is one an index already answered,
+    // which is not work worth a step of its own.
+    if (!temp && !sorted) return { child, steps: [] };
+    if (key === 'ordering_operation' && !temp) {
+      return { child, steps: [sortStep(c.sort_key)] };
+    }
+    const how = [temp ? 'in a temporary table' : null, sorted ? 'then sorted' : null]
+      .filter(Boolean)
+      .join(', ');
+    return {
+      child,
+      steps: [{ ...step, extra: `${step.extra}, ${how}`, blocks: temp || sorted }],
+    };
+  }
+  return null;
+}
+
+const NAMED_OPERATIONS: Record<string, Omit<PlanRow, 'warn' | 'depth' | 'rows'>> = {
+  ordering_operation: { title: 'sort', stage: 'sort', extra: 'ordered before returning' },
+  grouping_operation: { title: 'group', stage: 'group', extra: 'rows collapsed into groups' },
+  duplicates_removal: { title: 'distinct', stage: 'distinct', extra: 'duplicate rows removed' },
+};
+
+const TEMP_STEP = {
+  title: 'temporary table',
+  stage: 'temporary' as const,
+  extra: 'written out before anything is returned',
+  blocks: true,
+};
+
+function sortStep(sortKey: unknown): Omit<PlanRow, 'warn' | 'depth' | 'rows'> {
+  const by = sortKey === undefined || sortKey === null ? undefined : String(sortKey);
+  return {
+    title: 'sort',
+    stage: 'sort',
+    extra: by ? `by ${by}` : 'ordered before returning',
+    condition: by,
+    blocks: true,
+  };
 }
 
 /// Postgres `EXPLAIN (FORMAT JSON)`, optionally with ANALYZE.

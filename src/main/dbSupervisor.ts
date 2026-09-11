@@ -7,6 +7,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { ConnectSpec } from '../db/adapter';
 import type { HostRequest, HostRequestBody, HostResponse } from '../dbhost/protocol';
+import { isLostSession } from '../db/lostSession';
 
 type Emit = (event: HostResponse) => void;
 
@@ -193,10 +194,62 @@ export function probe(
   });
 }
 
+/// Ops that may be re-issued verbatim against a replacement session.
+///
+/// Everything here is a read the app makes on its own behalf, so running
+/// it twice costs nothing. `run` is deliberately absent: the statement is
+/// the user's and may be a write, and a silent second attempt at one is
+/// worse than any error message. `txn` is absent too — a reconnect ends
+/// the transaction, and pretending otherwise would leave the user typing
+/// into a session that no longer holds their work.
+const HEALABLE = new Set([
+  'ping',
+  'introspect',
+  'listSchemas',
+  'listTables',
+  'currentSchema',
+  'useSchema',
+  'slowQuerySupport',
+  'slowQueries',
+  'slowQueryExample',
+  'health',
+]);
+
+function healable(req: HostRequestBody): boolean {
+  // EXPLAIN ANALYZE runs the statement. Only the planning form is a read.
+  if (req.op === 'explain') return !req.analyze;
+  return HEALABLE.has(req.op);
+}
+
 export function request(
   connectionId: string,
   req: HostRequestBody,
 ): Promise<unknown> {
+  return send(connectionId, req).catch(async (err: Error) => {
+    // A session dies for reasons that have nothing to do with the request
+    // — a MySQL wait_timeout, a server restart, a laptop that slept — and
+    // the host process survives it, so `isOpen` goes on saying true and
+    // main's ensureOpen sees nothing to fix. The result was the driver's
+    // own "Can't add new command when connection is in closed state"
+    // arriving in the log once per background poll, forever, for a
+    // connection the user could have fixed by reconnecting if anything had
+    // told them to. Replace the session and ask again, once.
+    if (!healable(req) || !isLostSession(err.message)) throw err;
+    // Not while quitting, and not for a connection the user closed: the
+    // host is gone from the map the moment either happens, and reopening
+    // here would resurrect it behind their back.
+    const host = hosts.get(connectionId);
+    if (!host || shuttingDown) throw err;
+    const ping = (await openConnection(connectionId, host.spec).catch(() => null)) as {
+      ok?: boolean;
+    } | null;
+    // The server is still down. The original error is the honest one.
+    if (!ping?.ok) throw err;
+    return send(connectionId, req);
+  });
+}
+
+function send(connectionId: string, req: HostRequestBody): Promise<unknown> {
   const host = hosts.get(connectionId);
   if (!host) return Promise.reject(new Error('connection is not open'));
   const id = randomUUID();

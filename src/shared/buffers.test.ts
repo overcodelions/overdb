@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { bufferKey, bufferLabel, buffersFor, nextBufferKey, ownsBuffer } from './buffers';
+import {
+  bufferKey,
+  bufferLabel,
+  buffersFor,
+  nextBufferKey,
+  ownsBuffer,
+  relocate,
+} from './buffers';
 
 const C = 'a1b2c3d4-0000-4000-8000-000000000001';
 const OTHER = 'a1b2c3d4-0000-4000-8000-000000000002';
@@ -57,5 +64,36 @@ describe('bufferLabel', () => {
   it('says so when there is nothing in it', () => {
     expect(bufferLabel('   ')).toBe('Empty');
     expect(bufferLabel('-- just a note\n')).toBe('Empty');
+  });
+});
+
+describe('relocate', () => {
+  const text = 'select 1;\nselect 2;\n';
+
+  it('keeps the offsets when the text has not moved', () => {
+    expect(relocate(text, { from: 10, to: 19, was: 'select 2;' })).toEqual({ from: 10, to: 19 });
+  });
+
+  it('follows the text when an edit above it shifted everything down', () => {
+    // Typing a comment on line one is enough to make every offset below it
+    // wrong, and a translation in flight was measured before you typed it.
+    const edited = '-- note\n' + text;
+    expect(relocate(edited, { from: 10, to: 19, was: 'select 2;' })).toEqual({
+      from: 18,
+      to: 27,
+    });
+  });
+
+  it('refuses when the text it was asked about is gone', () => {
+    expect(relocate('select 3;', { from: 0, to: 9, was: 'select 2;' })).toBeNull();
+  });
+
+  it('refuses when the text moved and now appears more than once', () => {
+    // Two candidates means no way to tell which one was asked about, and
+    // replacing either is a coin flip with someone's editor. The offsets
+    // themselves still win when they hold — a duplicate elsewhere in the
+    // buffer is not a reason to distrust a span that never moved.
+    const twice = '-- note\n' + text + 'select 2;';
+    expect(relocate(twice, { from: 10, to: 19, was: 'select 2;' })).toBeNull();
   });
 });

@@ -56,7 +56,7 @@ import {
   shapeFromTableInfo,
 } from '@shared/dynamo';
 import { ensureTerminated, formatSql } from '@shared/formatSql';
-import { bufferLabel, buffersFor } from '@shared/buffers';
+import { bufferLabel, buffersFor, relocate } from '@shared/buffers';
 import { suggestionBlock } from '@shared/suggestion';
 import { ResultGrid } from './ResultGrid';
 import { ChartView } from './ChartView';
@@ -129,22 +129,26 @@ export function QueryPane(): JSX.Element {
   /// plan to actually be there.
   const [focusPlan, setFocusPlan] = useState(0);
   const [cursor, setCursor] = useState({ from: 0, to: 0 });
-  const [translating, setTranslating] = useState(false);
+  /// The tabs with a translation in flight, by buffer key — not one flag for
+  /// the pane. An answer takes seconds, and switching connection or tab
+  /// while you wait is the normal thing to do; the request belongs to the
+  /// tab that made it, so the spinner stays there and so does the SQL.
+  const [translatingKeys, setTranslatingKeys] = useState<string[]>([]);
   /// What the model said when it could NOT produce SQL. Almost always the
   /// most useful sentence in the exchange — "there is no panel_widget in
   /// acme_cms" tells you exactly what to fix — and it used to be thrown
   /// away behind a generic "Could not turn that into SQL."
   const [translateNote, setTranslateNote] = useState<string | null>(null);
-  // A ref as well as state: `setTranslating` doesn't take effect until the
-  // next render, so two quick ⌘↵ presses both passed the state check and
+  // A ref as well as state: `setTranslatingKeys` doesn't take effect until
+  // the next render, so two quick ⌘↵ presses both passed the state check and
   // translated twice — the second one replacing a range the first had
   // already moved. The ref closes that window synchronously.
-  const translatingRef = useRef(false);
-  /// A rewrite of one statement in flight. Separate from `translating`
-  /// because they replace different things — a question becomes SQL, a
-  /// statement becomes a different statement — and the editor's box has to
-  /// know which one it is waiting for.
-  const [refining, setRefining] = useState(false);
+  const translatingRef = useRef(new Set<string>());
+  /// A rewrite of one statement in flight, by buffer key. Separate from the
+  /// translations because they replace different things — a question becomes
+  /// SQL, a statement becomes a different statement — and the editor's box
+  /// has to know which one it is waiting for.
+  const [refiningKeys, setRefiningKeys] = useState<string[]>([]);
   /// Which CLIs are actually on this machine, or null while we are still
   /// asking. Translation is the one feature here that depends on a program
   /// overdb does not ship, so "is there any" is state the UI reads rather
@@ -332,6 +336,20 @@ export function QueryPane(): JSX.Element {
     if (bufferKey) setBuffer(bufferKey, text);
   };
 
+  /// Whether THIS tab is the one waiting. A request running in a tab you
+  /// have left is still running; it just isn't what you are looking at.
+  const translating = !!bufferKey && translatingKeys.includes(bufferKey);
+  const refining = !!bufferKey && refiningKeys.includes(bufferKey);
+
+  /// The buffer the editor is actually showing, readable from a callback
+  /// that started in a different one. `bufferKey` in a closure is whatever
+  /// was on screen when the request went out, which is precisely the thing
+  /// an answer must not trust.
+  const shownBuffer = useRef(bufferKey);
+  useEffect(() => {
+    shownBuffer.current = bufferKey;
+  }, [bufferKey]);
+
   const schema = useStore((s) => (conn ? s.schemas[conn.id] : undefined));
   const schemaList = useStore((s) => (conn ? s.schemaList[conn.id] : undefined));
   const activeSchema = useStore((s) => (conn ? s.activeSchema[conn.id] : undefined));
@@ -339,6 +357,7 @@ export function QueryPane(): JSX.Element {
   const slowQueryMs = useStore((s) => s.settings.slowQueryMs);
   const formatStyle = useStore((s) => s.settings.formatStyle);
   const editorHeight = useStore((s) => s.settings.editorHeight);
+  const panesFull = useStore((s) => s.settings.panesFull);
   const saveSettings = useStore((s) => s.saveSettings);
   const setSheet = useStore((s) => s.setSheet);
   const askConfirm = useStore((s) => s.askConfirm);
@@ -460,7 +479,61 @@ export function QueryPane(): JSX.Element {
   };
   const switchSchema = useStore((s) => s.switchSchema);
   const { tabs, active, running, run, cancel, setActive, sortBy, filterBy, runEdit } = useQuery();
+
+  /// Whether a standing pane has the whole main column.
+  ///
+  /// Only health and slow queries: they are the two that were redesigned
+  /// to use the room, and each renders its own control to give it back.
+  /// The diagram, history and log keep the docked layout, which is what
+  /// they were drawn for — an expanded pane with no way out is worse than
+  /// a cramped one.
+  const paneFull =
+    panesFull && (active === HEALTH_TAB || active === SLOW_TAB);
+  const toggleFull = () => saveSettings({ panesFull: !panesFull });
+  /// Back to the answer you last ran, which is tab 0 when there is one.
+  const closePane = () => setActive(tabs.length > 0 ? 0 : LOG_TAB);
+
+  /// Put a statement somewhere it can be edited, and make sure it can be
+  /// SEEN.
+  ///
+  /// Two separate reasons this is not `appendSuggestion`. A statement
+  /// pulled out of the server's own history is not a continuation of what
+  /// you were writing — it is somebody else's query, normalized, with `?`
+  /// where the values were — so it gets a tab of its own rather than being
+  /// welded onto the end of yours, and the query you already had stays
+  /// there to compare against.
+  ///
+  /// And a pane filling the window hides the editor the statement just
+  /// landed in, which made the button read as having done nothing at all.
+  /// Going somewhere is part of the action, not a side effect of it.
+  const editStatement = (text: string, note: string) => {
+    openSuggestion(text, note);
+    if (paneFull) closePane();
+  };
   const current: ResultTab | undefined = tabs[active];
+
+  /// The result of the statement the PLAN is about.
+  ///
+  /// Not `current`. While the plan is showing, `active` is the plan's own
+  /// index of -1, so `tabs[active]` was undefined every single time — and
+  /// the plan reported "not run" even immediately after running the very
+  /// statement it was describing. That took the waste ratio, the returned
+  /// count and the closing comparison on the river out of the one view
+  /// built around them.
+  ///
+  /// Matched on the statement text because both sides keep it unbound: the
+  /// tab from `splitStatements`, the plan from what was handed to EXPLAIN.
+  /// A plan opened for something never run — a statement out of the
+  /// slow-query pane — matches nothing and still says "not run", which
+  /// there is correct.
+  const plannedResult = useMemo(() => {
+    // `sql` is absent on a plan that failed to parse, and a plan with no
+    // statement behind it can never be matched to a result.
+    if (!bufferPlan?.sql) return null;
+    const want = bufferPlan.sql.trim();
+    const tab = tabs.find((t) => t.status === 'done' && t.sql.trim() === want);
+    return tab ? { rowCount: tab.rowCount, durationMs: tab.durationMs } : null;
+  }, [bufferPlan, tabs]);
 
   /// Table or chart, for whichever result is in front.
   ///
@@ -688,6 +761,56 @@ export function QueryPane(): JSX.Element {
     return stmt ? { from: stmt.start, to: replaceEnd(sql, stmt.end) } : { from: 0, to: sql.length };
   };
 
+  /// Everything a model-written answer needs to find its way back: the tab
+  /// that asked, the span it was asked about, and the text that was in that
+  /// span. Captured BEFORE the request goes out, because none of it is
+  /// guaranteed to still be in front of you when the answer arrives.
+  type Target = { key: string; from: number; to: number; was: string };
+
+  const targetFor = (range: { from: number; to: number }): Target | null =>
+    bufferKey ? { key: bufferKey, ...range, was: sql.slice(range.from, range.to) } : null;
+
+  /// Put a model's answer back where it was asked for.
+  ///
+  /// A translation takes seconds, and during those seconds you are free to
+  /// open another tab or another connection entirely — which used to drop
+  /// the SQL into whatever was on screen when it landed, over a range
+  /// measured against a different document. So the tab that asked is the tab
+  /// that gets it:
+  ///
+  ///  - still looking at it: through the editor, so it joins the undo
+  ///    history and leaves the cursor on what arrived;
+  ///  - moved on: written straight into that buffer, and the toast says
+  ///    which tab to go and read.
+  ///
+  /// Either way the span is re-found by its text rather than trusted by
+  /// offset — see `relocate`. If it has gone, so has the question the answer
+  /// was to, and dropping it beats overwriting whatever took its place.
+  const deliver = (target: Target, replacement: string, note: string): void => {
+    const buffers = useStore.getState().buffers;
+    const text = buffers[target.key];
+    if (text === undefined) {
+      toast('That tab was closed — the answer had nowhere to go.', 'error');
+      return;
+    }
+    const at = relocate(text, target);
+    if (!at) {
+      toast('That statement has changed since you asked — nothing was replaced.', 'error');
+      return;
+    }
+    if (shownBuffer.current === target.key) {
+      setInject((p) => ({ text: replacement, nonce: p.nonce + 1, mode: 'replace', range: at }));
+      toast(note);
+      return;
+    }
+    const next = text.slice(0, at.from) + replacement + text.slice(at.to);
+    setBuffer(target.key, next);
+    // Named by the tab's label rather than "the other tab": with several
+    // connections open, which one you walked away from is exactly the thing
+    // you have stopped remembering by the time this arrives.
+    toast(`${note} — in the ${bufferLabel(next)} tab you started it from.`);
+  };
+
   /// The statement in flight, or the one Run is about to send. Drives the
   /// progress bar's colour.
   const runningSeverity = useMemo((): Severity => {
@@ -708,13 +831,15 @@ export function QueryPane(): JSX.Element {
   /// of you. Running it is still your keystroke; nothing here executes what
   /// a model wrote.
   const translate = async (rawQuestion: string) => {
-    if (!conn || translatingRef.current) return;
+    if (!conn || !bufferKey || translatingRef.current.has(bufferKey)) return;
     // Twenty statements' worth of muscle memory puts a semicolon on the end
     // of the question too. It terminates a statement; it is not part of what
     // was asked, so it never reaches the model or the comment we leave.
     const question = stripTrailingSemicolons(rawQuestion);
     if (!question) return;
-    translatingRef.current = true;
+    const target = targetFor(targetRange());
+    if (!target) return;
+    translatingRef.current.add(target.key);
     // Asked again here rather than trusted from mount: a CLI installed
     // while overdb was open should work on the next ⌘↵, not the next launch.
     const detected = await window.overdb.invoke('ai:detect');
@@ -731,11 +856,10 @@ export function QueryPane(): JSX.Element {
       // you had read which three names to look for.
       setTranslateNote(NO_AI_NOTE);
       toast('No AI CLI found — that text was left alone.', 'error');
-      translatingRef.current = false;
+      translatingRef.current.delete(target.key);
       return;
     }
-    const range = targetRange();
-    setTranslating(true);
+    setTranslatingKeys((keys) => [...keys, target.key]);
     setTranslateNote(null);
     try {
       const result = await window.overdb.invoke('ai:ask', {
@@ -758,12 +882,11 @@ export function QueryPane(): JSX.Element {
       const replacement =
         `-- ${question.replace(/\s+/g, ' ').trim()}\n` +
         `${ensureTerminated(formatSql(result.sql, formatStyle))}\n`;
-      setInject((p) => ({ text: replacement, nonce: p.nonce + 1, mode: 'replace', range }));
+      deliver(target, replacement, 'Translated — read it, then ⌘↵ to run.');
       setTranslateNote(null);
-      toast('Translated — read it, then ⌘↵ to run.');
     } finally {
-      translatingRef.current = false;
-      setTranslating(false);
+      translatingRef.current.delete(target.key);
+      setTranslatingKeys((keys) => keys.filter((k) => k !== target.key));
     }
   };
 
@@ -810,7 +933,9 @@ export function QueryPane(): JSX.Element {
     statement: { sql: string; from: number; to: number },
     instruction: string,
   ) => {
-    if (!conn || refining) return;
+    if (!conn || !bufferKey || refiningKeys.includes(bufferKey)) return;
+    const target = targetFor({ from: statement.from, to: replaceEnd(sql, statement.to) });
+    if (!target) return;
     const detected = await window.overdb.invoke('ai:detect');
     setAiTools(detected);
     const preferred = useStore.getState().settings.aiTool;
@@ -823,7 +948,7 @@ export function QueryPane(): JSX.Element {
       toast('No AI CLI found — nothing was changed.', 'error');
       return;
     }
-    setRefining(true);
+    setRefiningKeys((keys) => [...keys, target.key]);
     try {
       const result = await window.overdb.invoke('ai:ask', {
         connectionId: conn.id, tool, mode: 'refine', question: instruction,
@@ -838,16 +963,10 @@ export function QueryPane(): JSX.Element {
         [...leadingComments(statement.sql), `-- then: ${instruction.replace(/\s+/g, ' ').trim()}`]
           .join('\n') +
         `\n${ensureTerminated(formatSql(result.sql, formatStyle))}\n`;
-      setInject((p) => ({
-        text: replacement,
-        nonce: p.nonce + 1,
-        mode: 'replace',
-        range: { from: statement.from, to: replaceEnd(sql, statement.to) },
-      }));
+      deliver(target, replacement, 'Rewritten — read it, then ⌘↵ to run.');
       setTranslateNote(null);
-      toast('Rewritten — read it, then ⌘↵ to run.');
     } finally {
-      setRefining(false);
+      setRefiningKeys((keys) => keys.filter((k) => k !== target.key));
     }
   };
 
@@ -1183,6 +1302,7 @@ export function QueryPane(): JSX.Element {
       {/* Above the editor rather than beside the results, because these are
           things you WRITE in — putting them next to the answers would read
           as another way of looking at one. */}
+      {!paneFull && (
       <div className="flex items-stretch shrink-0 border-b border-card bg-surface-muted overflow-x-auto">
         {bufferKeys.map((key) => (
           <div
@@ -1242,7 +1362,9 @@ export function QueryPane(): JSX.Element {
           +
         </button>
       </div>
+      )}
 
+      {!paneFull && (
       <div style={{ height: editorHeight }} className="min-h-[96px] shrink-0 relative">
         <SqlEditor
           key={bufferKey}
@@ -1326,6 +1448,7 @@ export function QueryPane(): JSX.Element {
           />
         )}
       </div>
+      )}
 
       {openParam && (
         <ParamPopover
@@ -1336,6 +1459,7 @@ export function QueryPane(): JSX.Element {
         />
       )}
 
+      {!paneFull && (
       <Resizer
         axis="y"
         label="Editor height"
@@ -1347,11 +1471,13 @@ export function QueryPane(): JSX.Element {
         fallback={280}
         onChange={(h) => saveSettings({ editorHeight: h })}
       />
+      )}
 
       {/* Always present, not only for a batch. Without it the results half
           of the window is an unframed expanse of background with a sentence
           floating in it, and there is nothing to tell you it is a region at
           all — let alone which of several answers you are looking at. */}
+      {!paneFull && (
       <div className="flex items-stretch gap-px shrink-0 border-y border-card bg-surface-muted overflow-x-auto">
           {tabs.map((t, i) => (
             <button
@@ -1384,6 +1510,7 @@ export function QueryPane(): JSX.Element {
           )}
           <div className="flex-1" />
       </div>
+      )}
 
       <div className="flex-1 min-h-0 bg-surface">
         {translating ? (
@@ -1401,7 +1528,10 @@ export function QueryPane(): JSX.Element {
         ) : active === HEALTH_TAB ? (
           <HealthPane
             connection={conn}
-            onOpenSql={(text) => appendSuggestion(text, 'From a session')}
+            onOpenSql={(text) => editStatement(text, 'From a session')}
+            full={paneFull}
+            onToggleFull={toggleFull}
+            onClose={closePane}
           />
         ) : active === ERD_TAB ? (
           <ErdView
@@ -1423,7 +1553,10 @@ export function QueryPane(): JSX.Element {
           <SlowQueryPane
             connectionId={conn.id}
             connectionName={conn.name}
-            onOpen={(text) => appendSuggestion(text, 'From slow queries')}
+            full={paneFull}
+            onToggleFull={toggleFull}
+            onClose={closePane}
+            onOpen={(text) => editStatement(text, 'From slow queries')}
             onPlan={(text) => void showPlan(text)}
             // Straight into the tuner that already exists. Finding the
             // expensive statement and improving it are the same errand, and
@@ -1510,11 +1643,7 @@ export function QueryPane(): JSX.Element {
             raw={bufferPlan.raw}
             // The plan alone cannot say what was wasted: that needs what the
             // statement actually returned, which only the result knows.
-            result={
-              current?.status === 'done'
-                ? { rowCount: current.rowCount, durationMs: current.durationMs }
-                : null
-            }
+            result={plannedResult}
             sql={bufferPlan.sql}
             compare={bufferPlan.compare}
             onDropCompare={() => setPlan((p) => (p ? { ...p, compare: undefined } : p))}
