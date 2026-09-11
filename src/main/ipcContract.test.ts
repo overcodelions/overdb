@@ -18,39 +18,16 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { ipcInvokeMapKeys } from './ipcInvokeMapKeys';
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
 
-function ipcInvokeMapKeys(): Set<string> {
-  const src = fs.readFileSync(path.join(REPO_ROOT, 'src', 'shared', 'types.ts'), 'utf-8');
-  const start = src.indexOf('export interface IPCInvokeMap');
-  if (start < 0) throw new Error('IPCInvokeMap interface not found in types.ts');
-  const braceOpen = src.indexOf('{', start);
-  // Find the matching closing brace by counting depth.
-  let depth = 0;
-  let end = -1;
-  for (let i = braceOpen; i < src.length; i++) {
-    const ch = src[i];
-    if (ch === '{') depth += 1;
-    else if (ch === '}') {
-      depth -= 1;
-      if (depth === 0) {
-        end = i;
-        break;
-      }
-    }
-  }
-  if (end < 0) throw new Error('IPCInvokeMap interface body has unbalanced braces');
-  const body = src.slice(braceOpen + 1, end);
-  // Match keys at the start of any line: optional whitespace, a quoted
-  // string, then a colon. This skips block comments and field-typedef
-  // continuation lines (which start with non-quote chars).
-  const re = /^\s*['"]([^'"]+)['"]\s*:/gm;
-  const keys = new Set<string>();
-  for (const m of body.matchAll(re)) {
-    keys.add(m[1]);
-  }
-  return keys;
+/// Every registration, IN ORDER and with repeats — the set-based reader
+/// below cannot see a channel registered twice.
+function ipcHandleList(): string[] {
+  const src = fs.readFileSync(path.join(REPO_ROOT, 'src', 'main', 'index.ts'), 'utf-8');
+  const re = /ipcMain\.handle\(\s*['"]([^'"]+)['"]/g;
+  return [...src.matchAll(re)].map((m) => m[1]);
 }
 
 function ipcHandleChannels(): Set<string> {
@@ -82,6 +59,22 @@ describe('IPC contract', () => {
     expect(
       orphan,
       `ipcMain.handle registers these channels but they're not declared in IPCInvokeMap (renderer cannot invoke them through the typed wrapper):\n  - ${orphan.join('\n  - ')}`,
+    ).toEqual([]);
+  });
+
+  it('registers each channel exactly once', () => {
+    // Electron throws "Attempted to register a second handler" on the second
+    // registration, which happens during startup — so the app comes up with
+    // every handler AFTER the duplicate missing, and the renderer's calls
+    // hang instead of failing. Cheap to prevent, expensive to diagnose.
+    const seen = new Map<string, number>();
+    for (const channel of ipcHandleList()) {
+      seen.set(channel, (seen.get(channel) ?? 0) + 1);
+    }
+    const duplicated = [...seen.entries()].filter(([, n]) => n > 1).map(([c, n]) => `${c} (${n}x)`);
+    expect(
+      duplicated,
+      `These IPC channels are registered more than once, which crashes startup:\n  - ${duplicated.join('\n  - ')}`,
     ).toEqual([]);
   });
 

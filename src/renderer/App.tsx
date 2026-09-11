@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
+import { BottomRail } from './BottomRail';
 import { CommandPalette } from './CommandPalette';
 import { ConfirmHost } from './ConfirmHost';
 import { QueryPane } from './QueryPane';
+import { Resizer } from './Resizer';
 import { Sidebar } from './Sidebar';
 import { SheetHost } from './Sheets';
 import { TitleBar } from './TitleBar';
@@ -36,6 +38,14 @@ export function App(): JSX.Element {
       } else if (mod && e.key === '\\') {
         e.preventDefault();
         useStore.getState().toggleSidebar();
+      } else if (mod && e.key.toLowerCase() === 't') {
+        // A clean slate on the connection you are looking at. Only when one
+        // is selected — there is nothing to open a tab on otherwise.
+        const sel = useStore.getState().selection;
+        if (sel?.kind === 'connection') {
+          e.preventDefault();
+          useStore.getState().newBuffer(sel.id);
+        }
       }
     };
     window.addEventListener('keydown', onKey);
@@ -51,6 +61,7 @@ export function App(): JSX.Element {
           {!ready ? null : selection ? <QueryPane /> : <Welcome />}
         </div>
       </div>
+      <BottomRail />
       <SheetHost />
       <CommandPalette />
       <ConfirmHost />
@@ -61,7 +72,7 @@ export function App(): JSX.Element {
               key={t.id}
               className={`px-3 py-2 rounded border text-xs shadow-lg ${
                 t.tone === 'error'
-                  ? 'bg-red-950 border-red-800 text-red-200'
+                  ? 'bg-bad/10 border-bad/40 text-bad-strong'
                   : 'bg-surface-elevated border-card text-ink'
               }`}
             >
@@ -80,35 +91,20 @@ export function App(): JSX.Element {
 function SidebarWithResize(): JSX.Element {
   const width = useStore((s) => s.settings.sidebarWidth);
   const saveSettings = useStore((s) => s.saveSettings);
-  const [dragging, setDragging] = useState(false);
-  const widthRef = useRef(width);
-  widthRef.current = width;
-
-  useEffect(() => {
-    if (!dragging) return;
-    const onMove = (e: MouseEvent) => {
-      const next = Math.min(480, Math.max(180, e.clientX));
-      if (next !== widthRef.current) saveSettings({ sidebarWidth: next });
-    };
-    const onUp = () => setDragging(false);
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
-    return () => {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-    };
-  }, [dragging, saveSettings]);
 
   return (
     <>
       <div style={{ width }} className="shrink-0 min-w-0">
         <Sidebar />
       </div>
-      <div
-        onMouseDown={() => setDragging(true)}
-        className="w-1 cursor-col-resize shrink-0 hover:bg-accent/40 active:bg-accent/60"
-        role="separator"
-        aria-orientation="vertical"
+      <Resizer
+        axis="x"
+        label="Sidebar width"
+        value={width}
+        min={180}
+        max={480}
+        fallback={260}
+        onChange={(w) => saveSettings({ sidebarWidth: w })}
       />
     </>
   );

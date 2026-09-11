@@ -20,10 +20,19 @@ export interface ExportOptions {
   table?: string;
 }
 
+/// The renderer is sandboxed with no Node globals, so this module — which
+/// runs there — must not touch Buffer.
+function b64ToHex(b64: string): string {
+  const bin = atob(b64);
+  let hex = '';
+  for (let i = 0; i < bin.length; i++) hex += bin.charCodeAt(i).toString(16).padStart(2, '0');
+  return hex;
+}
+
 function plain(value: Cell, nullAs: string): string {
   if (value === null) return nullAs;
   if (typeof value === 'object' && '__bin' in value) {
-    return `0x${Buffer.from(value.b64, 'base64').toString('hex')}`;
+    return `0x${b64ToHex(value.b64)}`;
   }
   return String(value);
 }
@@ -40,7 +49,7 @@ function csvField(text: string, delimiter: string): string {
 function sqlLiteral(value: Cell, column: ColumnMeta): string {
   if (value === null) return 'NULL';
   if (typeof value === 'object' && '__bin' in value) {
-    return `X'${Buffer.from(value.b64, 'base64').toString('hex')}'`;
+    return `X'${b64ToHex(value.b64)}'`;
   }
   if (typeof value === 'boolean') return value ? 'TRUE' : 'FALSE';
   const numeric =

@@ -7,6 +7,15 @@ import { scanJetBrains, scanJetBrainsProjects, type ImportCandidate } from './je
 import { readPgpass } from './pgpass';
 import { scanEnvironment } from './envUrl';
 
+/// Passwords found during a scan, main-side only, keyed by sourceId.
+/// The renderer receives `hasPassword` and never the value; `import:commit`
+/// resolves it here and writes it straight to the keychain.
+const scanned = new Map<string, string>();
+
+export function takeScannedPassword(sourceId: string): string | undefined {
+  return scanned.get(sourceId);
+}
+
 export interface ImportScan {
   /// Grouped by where they came from, because "17 connections" from four
   /// IDEs is a different proposition to 17 from one.
@@ -19,6 +28,7 @@ export interface ImportScan {
 }
 
 export function scanAll(projectRoot?: string): ImportScan {
+  scanned.clear();
   const sources: ImportScan['sources'] = [];
 
   const jetbrains = scanJetBrains();
@@ -57,8 +67,8 @@ export function scanAll(projectRoot?: string): ImportScan {
         // A wildcard host is a rule, not a connection; there is nothing to
         // connect to and guessing a hostname would be worse than skipping.
         .filter((e) => !e.wildcard.host)
-        .map((e, i) => ({
-          sourceId: `pgpass:${i}:${e.host}:${e.database}`,
+        .map((e, i) => { const sourceId = `pgpass:${i}:${e.host}:${e.database}`; if (e.password) scanned.set(sourceId, e.password); return ({
+          sourceId,
           name: `${e.database === '*' ? 'postgres' : e.database}@${e.host}`,
           origin: '.pgpass',
           engine: 'postgres' as const,
@@ -66,10 +76,11 @@ export function scanAll(projectRoot?: string): ImportScan {
           env: /prod/i.test(e.host) ? ('prod' as const) : /stag/i.test(e.host) ? ('staging' as const) : e.host === 'localhost' ? ('local' as const) : ('other' as const),
           host: e.host,
           port: e.port ?? 5432,
+          ssl: (e.host === 'localhost' || e.host === '127.0.0.1' || e.host === '::1') ? undefined : ('verify-full' as const),
           database: e.wildcard.database ? undefined : e.database,
           user: e.wildcard.user ? undefined : e.user,
-          password: e.password,
-        })),
+          hasPassword: !!e.password,
+        }); }),
     });
   }
 
@@ -88,6 +99,7 @@ export function scanAll(projectRoot?: string): ImportScan {
         env: 'other' as const,
         host: e.host,
         port: e.port,
+        ssl: (e.host === 'localhost' || e.host === '127.0.0.1' || e.host === '::1') ? undefined : ('verify-full' as const),
         database: e.database,
         user: e.user,
         note: e.hasPassword

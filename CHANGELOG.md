@@ -102,7 +102,7 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   edge made a wide table read as a wall of boxes.
 
 ### Known gaps
-- Env-set fan-out, schema drift, and the AI layer are not built. Writes are
+- Env-set fan-out and schema drift are not built. Writes are
   not possible at all yet: every connection is read-only.
 - The MySQL adapter is exercised against MariaDB 10.8; real MySQL 8 is
   untested. The two diverge on performance-schema views, which will matter

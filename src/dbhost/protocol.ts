@@ -10,14 +10,22 @@ import type { Cell, ColumnMeta } from '../shared/types';
 export type HostRequest =
   | { id: string; op: 'connect'; spec: ConnectSpec }
   | { id: string; op: 'ping' }
-  | { id: string; op: 'introspect'; schemas?: string[] }
+  | { id: string; op: 'introspect'; schemas?: string[]; tables?: string[] }
   | { id: string; op: 'listSchemas' }
-  | { id: string; op: 'listTables' }
+  | { id: string; op: 'listTables'; unfiltered?: boolean }
   | { id: string; op: 'useSchema'; name: string }
-  | { id: string; op: 'run'; runId: string; sql: string; params?: unknown[]; maxRows: number; chunkRows: number }
+  | { id: string; op: 'currentSchema' }
+  | { id: string; op: 'run'; runId: string; sql: string; params?: unknown[]; maxRows: number; chunkRows: number; write?: boolean }
+  | { id: string; op: 'txn'; action: 'begin' | 'commit' | 'rollback' | 'state' }
   | { id: string; op: 'ack'; runId: string; seq: number }
   | { id: string; op: 'cancel'; runId: string }
-  | { id: string; op: 'explain'; sql: string; analyze: boolean }
+  | { id: string; op: 'explain'; sql: string; analyze: boolean; params?: unknown[] }
+  | { id: string; op: 'slowQuerySupport' }
+  | { id: string; op: 'slowQueries'; limit: number }
+  | { id: string; op: 'slowQueryExample'; digest: string }
+  | { id: string; op: 'resetSlowQueries' }
+  | { id: string; op: 'health' }
+  | { id: string; op: 'killSession'; sessionId: string; terminate: boolean }
   | { id: string; op: 'close' };
 
 export type HostResponse =
@@ -26,7 +34,7 @@ export type HostResponse =
   | { kind: 'reply'; id: string; ok: false; error: string }
   /// Out-of-band result stream, keyed by runId rather than request id.
   | { kind: 'chunk'; runId: string; seq: number; columns?: ColumnMeta[]; rows: Cell[][] }
-  | { kind: 'done'; runId: string; rowCount: number; truncated: boolean; durationMs: number }
+  | { kind: 'done'; runId: string; rowCount: number; affectedRows?: number | null; truncated: boolean; durationMs: number }
   | { kind: 'failed'; runId: string; message: string };
 
 export interface PingValue {

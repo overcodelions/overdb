@@ -35,7 +35,7 @@ export class ErrorBoundary extends React.Component<
           process — your connections and env sets are persisted on disk,
           so nothing is lost. Any in-flight query is cancelled.
         </p>
-        <pre className="text-xs font-mono whitespace-pre-wrap p-3 rounded border border-card bg-card text-red-300">
+        <pre className="text-xs font-mono whitespace-pre-wrap p-3 rounded border border-card bg-card text-bad-strong">
           {this.state.error.name}: {this.state.error.message}
           {this.state.error.stack ? '\n\n' + this.state.error.stack : ''}
         </pre>

@@ -18,25 +18,48 @@ import type { SchemaSnapshot, TableInfo } from '../shared/types';
 /// the model room to think.
 const BUDGET_BYTES = 24 * 1024;
 
-export function compactTable(schema: string, table: TableInfo, qualify: boolean): string {
-  const name = qualify ? `${schema}.${table.name}` : table.name;
+export function compactTable(
+  schema: string,
+  table: TableInfo,
+  qualify: boolean,
+  opts: { indexes?: boolean; quoteName?: boolean } = {},
+): string {
+  // A DynamoDB table may be called `LOCAL.event-log-v2`. Written bare in the
+  // prompt it reads as a schema qualifier, and the model then writes
+  // FROM "LOCAL"."event-log-v2" — which PartiQL takes as an INDEX reference
+  // and rejects. The quotes are the whole difference, so they are here.
+  const name = qualify ? `${schema}.${table.name}` : opts.quoteName ? `"${table.name}"` : table.name;
   const cols = table.columns.map((c) => `${c.name} ${c.typeName}`).join(', ');
   const pk = table.primaryKey.length ? ` PK(${table.primaryKey.join(',')})` : '';
   const fks = table.foreignKeys
     .map((f) => ` FK(${f.columns.join(',')}->${f.refTable}.${f.refColumns.join(',')})`)
     .join('');
-  return `${name}(${cols})${pk}${fks}`;
+  // Indexes are noise in a relational prompt and the entire answer in a
+  // DynamoDB one, where choosing the right index IS the query.
+  const idx = opts.indexes
+    ? table.indexes.map((i) => ` INDEX ${i.name}(${i.columns.join(',')})`).join('')
+    : '';
+  return `${name}(${cols})${pk}${fks}${idx}`;
 }
 
 /// snake_case, camelCase and dotted names all split into comparable words.
+///
+/// Singular forms are added alongside plurals on both sides. People ask for
+/// "my latest events" and the table is `event_log`; a set-intersection score
+/// with no stemming at all calls that a miss, and a miss here reads to the
+/// user as "the AI can't see my database".
 export function tokenize(text: string): Set<string> {
-  return new Set(
-    text
-      .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
-      .split(/[^A-Za-z0-9]+/)
-      .map((w) => w.toLowerCase())
-      .filter((w) => w.length > 2),
-  );
+  const out = new Set<string>();
+  for (const w of text
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .split(/[^A-Za-z0-9]+/)
+    .map((x) => x.toLowerCase())
+    .filter((x) => x.length > 2)) {
+    out.add(w);
+    if (w.length > 4 && w.endsWith('ies')) out.add(`${w.slice(0, -3)}y`);
+    else if (w.length > 3 && w.endsWith('s') && !w.endsWith('ss')) out.add(w.slice(0, -1));
+  }
+  return out;
 }
 
 function scoreTable(question: Set<string>, table: TableInfo): number {
@@ -59,10 +82,35 @@ export interface SchemaContext {
 /// the database, and an unbounded seed set crowds out the joins.
 const MAX_SEEDS = 12;
 
+/// Table names in schemas we did NOT introspect. Names only — one cheap
+/// catalog query already produces them for cross-schema completion.
+export interface ElsewhereTable {
+  schema: string;
+  table: string;
+}
+
+/// At most this many "it might be over there" hints. The point is to let
+/// the model say `acme.panel_widget` instead of "no such table"; a long
+/// list would just spend budget the real schema needs.
+const MAX_ELSEWHERE = 20;
+
 export function buildSchemaContext(
   snapshot: SchemaSnapshot | undefined,
   question: string,
-  opts: { activeSchema?: string; editorText?: string } = {},
+  opts: {
+    activeSchema?: string;
+    editorText?: string;
+    elsewhere?: ElsewhereTable[];
+    /// Qualified `schema.table`, or a bare table name. These go in whether
+    /// or not they score, ahead of everything the scorer chose, and they are
+    /// the user's override on a selection that is otherwise a guess.
+    pinned?: string[];
+    /// Include each table's indexes. Off by default — they are noise in a
+    /// prompt about what to SELECT — and essential in a prompt about why
+    /// something is slow, where an answer that proposes an index the table
+    /// already has reads as the feature not knowing the database.
+    indexes?: boolean;
+  } = {},
 ): SchemaContext {
   if (!snapshot) return { text: '', included: [], totalTables: 0 };
 
@@ -82,10 +130,21 @@ export function buildSchemaContext(
   const key = (schema: string, table: string) => `${schema}.${table}`;
   const byName = new Map(usable.map((t) => [t.table.name, t]));
 
+  // Pins first, and they are not scored. Once you have told us which table
+  // you mean, the scorer has nothing left to decide — and a pin that could
+  // still lose to a keyword match would not be an override at all.
+  const wantPinned = new Set((opts.pinned ?? []).map((p) => p.toLowerCase()));
+  const pins = usable.filter(
+    (t) =>
+      wantPinned.has(`${t.schema}.${t.table.name}`.toLowerCase()) ||
+      wantPinned.has(t.table.name.toLowerCase()),
+  );
+
   const seeds = scored.slice(0, MAX_SEEDS);
   // Nothing matched — give the model something rather than nothing, so it
-  // can at least ask a sensible follow-up.
-  const fallback = seeds.length === 0 ? usable.slice(0, MAX_SEEDS) : [];
+  // can at least ask a sensible follow-up. Pins count as a match: if you
+  // named the table yourself, an arbitrary first-twelve is noise.
+  const fallback = seeds.length === 0 && pins.length === 0 ? usable.slice(0, MAX_SEEDS) : [];
 
   const ordered: Array<{ schema: string; table: TableInfo }> = [];
   const seen = new Set<string>();
@@ -101,7 +160,7 @@ export function buildSchemaContext(
   // budget truncated exactly the join targets the question needed — which is
   // how "the client table isn't in the schema I was given" happens while
   // `client` sits right there in the database, one FK from `panel_widget`.
-  for (const seed of [...seeds, ...fallback]) {
+  for (const seed of [...pins, ...seeds, ...fallback]) {
     add(seed);
     for (const fk of seed.table.foreignKeys) {
       const target = byName.get(fk.refTable);
@@ -114,25 +173,86 @@ export function buildSchemaContext(
   // Anything else that scored, in rank order, to fill the remaining budget.
   for (const entry of scored.slice(MAX_SEEDS)) add(entry);
 
+  // Qualify as soon as more than one schema is in play. Bare names across
+  // two schemas are ambiguous to the model in exactly the way they are
+  // ambiguous to the server.
   const qualify = snapshot.schemas.length > 1;
   const lines: string[] = [];
   const included: string[] = [];
   let bytes = 0;
   for (const entry of ordered) {
-    const line = compactTable(entry.schema, entry.table, qualify);
+    const line = compactTable(entry.schema, entry.table, qualify, {
+      indexes: opts.indexes || snapshot.engine === 'dynamodb',
+      quoteName: snapshot.engine === 'dynamodb',
+    });
     if (bytes + line.length > BUDGET_BYTES) break;
     bytes += line.length + 1;
     lines.push(line);
     included.push(qualify ? `${entry.schema}.${entry.table.name}` : entry.table.name);
   }
 
+  // Tables that match the question but whose shape is not in the context.
+  // Without this the model's only honest answer to "the panel widgets" while
+  // connected to a schema without that table is "there isn't one" — when it
+  // is sitting in the next database over, and naming it is the whole answer.
+  //
+  // The test is per TABLE, not per schema. Filtering by schema name assumed
+  // a schema is introspected all-or-nothing, which is false wherever a
+  // describe budget bites: DynamoDB puts every table in one pseudo-schema
+  // (the region) and describes the first 60 of them, so a schema-level test
+  // silently discarded the names of the other 168 — and the model then says
+  // "I don't see an events table" about a table that is right there.
+  const covered = new Set(usable.map((t) => key(t.schema, t.table.name).toLowerCase()));
+  // A pinned table whose shape we could not load still gets named. Saying
+  // "this table exists and here is its name" beats dropping it, which would
+  // make the pin look ignored.
+  const pinnedHint = (schema: string, table: string): boolean =>
+    wantPinned.has(key(schema, table).toLowerCase()) || wantPinned.has(table.toLowerCase());
+  const hints = (opts.elsewhere ?? [])
+    .filter((e) => !covered.has(key(e.schema, e.table).toLowerCase()))
+    .map((e) => ({
+      ...e,
+      pinned: pinnedHint(e.schema, e.table),
+      score: [...tokenize(e.table)].filter((w) => words.has(w)).length,
+    }))
+    .filter((e) => e.score > 0 || e.pinned)
+    .sort(
+      (a, b) =>
+        Number(b.pinned) - Number(a.pinned) || b.score - a.score || a.table.length - b.table.length,
+    )
+    .slice(0, MAX_ELSEWHERE);
+
+  // DynamoDB's pseudo-schema is the REGION, and a region is not a qualifier
+  // you can write: `FROM "us-east-1"."orders"` means the index `orders` on a
+  // table called `us-east-1`, which is a lookup that fails. So these are
+  // listed bare on that engine, with the instruction that matches.
+  const dynamo = snapshot.engine === 'dynamodb';
+  const elsewhereBlock = hints.length
+    ? `\n-- also on this connection and matching the request, shape not loaded${
+        dynamo ? ' — name directly in FROM:' : ' — qualify to use:'
+      }\n` +
+      hints.map((h) => `-- ${dynamo ? `"${h.table}"` : `${h.schema}.${h.table}`}`).join('\n')
+    : '';
+
+  // Count every table we know exists, not just the ones with a loaded
+  // shape. "12 of 60" while the connection holds 228 tables is a number the
+  // model repeats back to the user as if it were the size of their database.
+  const totalTables = new Set([
+    ...all.map((t) => key(t.schema, t.table.name).toLowerCase()),
+    ...(opts.elsewhere ?? []).map((e) => key(e.schema, e.table).toLowerCase()),
+  ]).size;
+
   const header = [
     `-- engine: ${snapshot.engine} ${snapshot.serverVersion}`,
     opts.activeSchema ? `-- active schema: ${opts.activeSchema}` : null,
-    `-- context: ${included.length} of ${usable.length} tables`,
+    `-- context: ${included.length} of ${totalTables} tables`,
   ]
     .filter(Boolean)
     .join('\n');
 
-  return { text: `${header}\n${lines.join('\n')}`, included, totalTables: usable.length };
+  return {
+    text: `${header}\n${lines.join('\n')}${elsewhereBlock}`,
+    included,
+    totalTables,
+  };
 }

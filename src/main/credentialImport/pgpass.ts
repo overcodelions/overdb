@@ -73,16 +73,21 @@ export type PgpassResult =
   | { ok: true; entries: PgpassEntry[]; path: string }
   | { ok: false; reason: string };
 
-export function readPgpass(file = path.join(os.homedir(), '.pgpass')): PgpassResult {
+export function readPgpass(
+  file = process.platform === 'win32'
+    ? path.join(process.env.APPDATA ?? os.homedir(), 'postgresql', 'pgpass.conf')
+    : path.join(os.homedir(), '.pgpass'),
+): PgpassResult {
   let stat: fs.Stats;
   try {
     stat = fs.statSync(file);
   } catch {
     return { ok: false, reason: 'No ~/.pgpass found.' };
   }
-  // 0600 exactly, as libpq requires.
+  // 0600 exactly, as libpq requires. Node reports 0o666 on Windows
+  // regardless of ACLs, so the mode gate does not apply there.
   const mode = stat.mode & 0o777;
-  if (mode & 0o077) {
+  if (process.platform !== 'win32' && (mode & 0o077)) {
     return {
       ok: false,
       reason: `~/.pgpass is mode ${mode.toString(8)} — libpq ignores it unless it is 0600. Fix with: chmod 600 ~/.pgpass`,

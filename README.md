@@ -17,18 +17,30 @@ The two concepts are **orthogonal** — the same connection lives in both at onc
 
 ### Four principles
 
-1. **Environments, not connections.** Fan a query out across an env set and get a per-connection outcome for each — never an abort on the first failure. Diff results. Detect schema drift against a baseline.
-2. **Overlay, not ownership.** Read-only by default. A connection marked `prod` requires an explicit *arm write* before anything mutating runs, and arming is one statement, 60 seconds, never persisted. Read-only is enforced by the **server** (`BEGIN READ ONLY`, `START TRANSACTION READ ONLY`, SQLite's `readOnly` flag), not by parsing your SQL.
+1. **Environments, not connections.** Fan a query out across an env set and get a per-connection outcome for each — never an abort on the first failure. Diff results. Detect schema drift against a baseline. *(Not built yet — see the CHANGELOG.)*
+2. **Overlay, not ownership.** Read-only by default. A connection marked `prod` requires an explicit *arm write* before anything mutating runs, and arming is one statement, 60 seconds, never persisted. Read-only is enforced by the **server** (`BEGIN READ ONLY`, `START TRANSACTION READ ONLY`, SQLite's `readOnly` flag), not by parsing your SQL. *(Arming is not yet enabled; every connection is read-only today.)*
 3. **AI in the loop, on your own auth.** Ask questions in prose. NL→SQL, schema Q&A, explain-this-plan, performance advice — piped to whichever of `claude` / `codex` / `gemini` you already have installed, using your existing login. No API key, no subscription. Only identifiers, types, and plan statistics ever enter a prompt — **never your rows**. AI-proposed SQL is never executed; it lands in the editor for you to read and run.
-4. **Performance you can act on.** Not a prettier plan tree. Estimate-vs-actual as the primary signal, cross-environment plan divergence ("prod seq-scans where staging index-scans, and here's the missing index"), and regression tracking off `pg_stat_statements`.
+4. **Performance you can act on.** Not a prettier plan tree. Estimate-vs-actual as the primary signal, cross-environment plan divergence ("prod seq-scans where staging index-scans, and here's the missing index"), and what the server itself says it spends its time on.
+
+## What's in it
+
+Beyond the editor, the virtualized grid and the fan-out:
+
+- **Schema drift.** Compare every member of an env set against its baseline, catalog to catalog, without running a statement. Findings are ranked *breaking* / *notable* / *quiet* — a missing column and a differently-spelled `varchar` are not the same news, and reported at the same volume the second kind buries the first. Proposed DDL to close the gap comes back as text; nothing destructive is ever generated as a runnable statement, and there is no Run button.
+- **ER diagram.** The foreign-key graph, discovered from the constraints the server holds and never inferred from a column name. Opens focused on one table and its neighbourhood, because a 900-table diagram teaches nothing. Exports to SVG or PNG.
+- **Charts.** Any result set as a line, bar, area or scatter plot. The axis and series are proposed from the column types rather than configured, a null is drawn as a gap and never as a zero, and a chart of a capped result says so.
+- **Live health.** Sessions with what they're blocked on, connection headroom, cache hit ratio, rollback rate, table sizes, indexes the planner has never chosen. Every reading is nullable: what a server refused to tell us is listed as such rather than rendered as a zero. Cancelling someone's statement is the one action here, and it asks you to type the connection's name on `prod`.
+- **ORM placeholders.** Paste a statement straight out of an ORM log — `WHERE client_name = ?`, `:clientName`, `#{clientName}` — and fill the holes in a bar under the editor rather than editing the SQL. Values are *bound*, never pasted into the statement, and they are remembered: each one has a default, an optional per-environment answer and an optional per-connection one, so the same query binds `hp` on staging and something else on prod. Run it on an env set and every member binds its own. A positional `?` is labelled from the column beside it, which is also what lets it share a saved value with the `:clientName` spelling of the same parameter.
+- **History and saved queries.** Every statement you run, kept across restarts and rolled up per statement with a run count, searchable by text, connection or outcome. Name one and it becomes a saved query.
+- **Slow queries.** What the *server* spends its time on across every client, from `pg_stat_statements` / `performance_schema` — with a since-you-opened-this-pane window, so you can watch a deploy land.
 
 ## Engines
 
-Postgres, MySQL, SQLite. Deliberately not warehouses or document stores — three engines done properly beats ten done shallowly.
+Postgres, MySQL, SQLite, and DynamoDB. Deliberately not warehouses or document stores in general — a few engines done properly beats ten done shallowly. Postgres-compatible servers (Aurora, Redshift, CockroachDB, Timescale) are detected as *variants* and behave differently where they genuinely differ.
 
 ## Status
 
-Pre-v0.1, building in the open. See [docs/PLAN.md](docs/PLAN.md) for the full design and milestones.
+Pre-v0.1, building in the open. See the CHANGELOG for what is built and what is not.
 
 ## Stack
 

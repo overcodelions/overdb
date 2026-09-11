@@ -28,9 +28,13 @@ import type {
   QueryHandle,
   QueryResult,
   SchemaSnapshot,
+  StreamOptions,
   TableInfo,
 } from '../adapter';
 import type { Cell, CellKind, ColumnMeta } from '../../shared/types';
+import { emptyHealth, type HealthSnapshot } from '../../shared/health';
+import type { Variant } from '../../shared/engines';
+import type { SlowQuerySupport, StatementStat } from '../../shared/slowQueries';
 
 /// SQLite's declared types are free text (`VARCHAR(80)`, `INT8`), so we
 /// classify by the same affinity rules SQLite itself uses rather than by
@@ -87,6 +91,10 @@ function columnsOf(stmt: StatementSync): ColumnMeta[] {
 
 export class SqliteAdapter implements DbAdapter {
   private db: DatabaseSync | null = null;
+  /// Opened lazily, and only ever by an armed write. See writable().
+  private writeDb: DatabaseSync | null = null;
+  /// True between beginTransaction() and commit()/rollback().
+  private txnOpen = false;
   private spec: ConnectSpec | null = null;
 
   async connect(spec: ConnectSpec): Promise<void> {
@@ -97,10 +105,10 @@ export class SqliteAdapter implements DbAdapter {
     this.db = new DatabaseSync(spec.file, { readOnly: spec.readOnly });
   }
 
-  async ping(): Promise<{ ok: true; serverVersion: string } | { ok: false; error: string }> {
+  async ping(): Promise<{ ok: true; serverVersion: string; variant: Variant } | { ok: false; error: string }> {
     try {
       const row = this.require().prepare('select sqlite_version() as v').get() as { v: string };
-      return { ok: true, serverVersion: row.v };
+      return { ok: true, serverVersion: row.v, variant: 'sqlite' };
     } catch (err) {
       return { ok: false, error: String(err) };
     }
@@ -113,8 +121,12 @@ export class SqliteAdapter implements DbAdapter {
     return { columns: handle.columns, rows, rowCount: rows.length, truncated: !done };
   }
 
-  async stream(sql: string, params: unknown[] = []): Promise<QueryHandle> {
-    const stmt = this.require().prepare(sql);
+  async stream(
+    sql: string,
+    params: unknown[] = [],
+    opts: StreamOptions = {},
+  ): Promise<QueryHandle> {
+    const stmt = (opts.write ? this.writable() : this.require()).prepare(sql);
     stmt.setReturnArrays(true);
     stmt.setReadBigInts(true);
     const columns = columnsOf(stmt);
@@ -154,13 +166,105 @@ export class SqliteAdapter implements DbAdapter {
     return false;
   }
 
-  async explain(sql: string, _analyze: boolean): Promise<{ format: 'json' | 'text'; plan: string }> {
+  async explain(
+    sql: string,
+    _analyze: boolean,
+    params?: unknown[],
+  ): Promise<{ format: 'json' | 'text'; plan: string }> {
     const stmt = this.require().prepare(`explain query plan ${sql}`);
-    const rows = stmt.all() as Array<Record<string, unknown>>;
+    const rows = stmt.all(...((params ?? []) as never[])) as Array<Record<string, unknown>>;
     return { format: 'text', plan: rows.map((r) => String(r.detail ?? '')).join('\n') };
   }
 
-  async introspect(_opts: { schemas?: string[] }): Promise<SchemaSnapshot> {
+  /// SQLite is a library, not a server. There is nobody keeping a history
+  /// of what every client ran, because there is no "every client" — each
+  /// process opens the file itself. Timing statements here would mean
+  /// timing them in this adapter, which is what `settings.slowQueryMs`
+  /// already does for the statements you ran.
+  async slowQuerySupport(): Promise<SlowQuerySupport> {
+    return {
+      supported: false,
+      reason: {
+        code: 'unsupported',
+        detail:
+          'SQLite runs inside this process rather than on a server, so nothing accumulates a history of what has been run against the file.',
+        engine: 'sqlite',
+      },
+    };
+  }
+
+  async slowQueries(): Promise<StatementStat[]> {
+    return [];
+  }
+
+  async slowQueryExample(): Promise<string | null> {
+    return null;
+  }
+
+  async resetSlowQueries(): Promise<void> {}
+
+  /// SQLite has no server, so most of the dashboard has nothing to report
+  /// — and saying that is the honest answer. What it DOES have is a file,
+  /// and how big that file is (and how much of it is free pages waiting on
+  /// a VACUUM) is a real thing to know.
+  async health(): Promise<HealthSnapshot> {
+    const db = this.require();
+    const out = emptyHealth('sqlite');
+    const notes = [
+      'SQLite runs in this process — there are no sessions, no connection ceiling and no shared cache to report on.',
+    ];
+
+    const scalar = (sql: string): number | null => {
+      try {
+        const row = db.prepare(sql).get() as Record<string, unknown> | undefined;
+        const v = row ? Object.values(row)[0] : null;
+        return typeof v === 'number' ? v : v === null || v === undefined ? null : Number(v);
+      } catch {
+        return null;
+      }
+    };
+
+    const pageSize = scalar('pragma page_size');
+    const pageCount = scalar('pragma page_count');
+    const freePages = scalar('pragma freelist_count');
+    if (pageSize !== null && pageCount !== null) {
+      out.databaseBytes = pageSize * pageCount;
+      if (freePages !== null && freePages > 0) {
+        notes.push(
+          `${freePages} of ${pageCount} pages are free — about ${Math.round((freePages / pageCount) * 100)}% of the file is space a VACUUM would reclaim.`,
+        );
+      }
+    }
+
+    try {
+      // dbstat is a compile-time option and is absent on plenty of builds;
+      // when it is there it is the only way to size a table in SQLite.
+      const rows = db
+        .prepare(
+          `select name as tbl, sum(pgsize) as bytes
+             from dbstat group by name order by bytes desc limit 50`,
+        )
+        .all() as Array<{ tbl: string; bytes: number }>;
+      out.tables = rows.map((r) => ({
+        schema: 'main',
+        table: String(r.tbl),
+        bytes: Number(r.bytes) || 0,
+        indexBytes: null,
+        estimatedRows: null,
+      }));
+    } catch {
+      notes.push('This SQLite build has no dbstat module, so per-table sizes are not available.');
+    }
+
+    return { ...out, notes };
+  }
+
+  /// Nothing to kill: there is no other session.
+  async killSession(): Promise<{ ok: boolean; error?: string }> {
+    return { ok: false, error: 'SQLite has no sessions.' };
+  }
+
+  async introspect(_opts: { schemas?: string[]; tables?: string[] }): Promise<SchemaSnapshot> {
     const db = this.require();
     const ping = await this.ping();
     const objects = db
@@ -171,8 +275,13 @@ export class SqliteAdapter implements DbAdapter {
       )
       .all() as Array<{ name: string; type: string }>;
 
+    const infoStmt = db.prepare('select * from pragma_table_info(?)');
+    const idxListStmt = db.prepare('select * from pragma_index_list(?)');
+    const fkStmt = db.prepare('select * from pragma_foreign_key_list(?)');
+    const idxInfoStmt = db.prepare('select * from pragma_index_info(?)');
+
     const tables: TableInfo[] = objects.map((o) => {
-      const info = db.prepare(`pragma table_info(${quoteIdent(o.name)})`).all() as Array<{
+      const info = infoStmt.all(o.name) as Array<{
         cid: number; name: string; type: string; notnull: number; dflt_value: string | null; pk: number;
       }>;
       const columns: ColumnInfo[] = info.map((c) => ({
@@ -184,17 +293,17 @@ export class SqliteAdapter implements DbAdapter {
       }));
       const primaryKey = info.filter((c) => c.pk > 0).sort((a, b) => a.pk - b.pk).map((c) => c.name);
 
-      const idxList = db.prepare(`pragma index_list(${quoteIdent(o.name)})`).all() as Array<{
+      const idxList = idxListStmt.all(o.name) as Array<{
         name: string; unique: number;
       }>;
       const indexes: IndexInfo[] = idxList.map((ix) => ({
         name: ix.name,
         unique: ix.unique === 1,
-        columns: (db.prepare(`pragma index_info(${quoteIdent(ix.name)})`).all() as Array<{ name: string }>)
+        columns: (idxInfoStmt.all(ix.name) as Array<{ name: string }>)
           .map((c) => c.name),
       }));
 
-      const fkList = db.prepare(`pragma foreign_key_list(${quoteIdent(o.name)})`).all() as Array<{
+      const fkList = fkStmt.all(o.name) as Array<{
         id: number; table: string; from: string; to: string | null;
       }>;
       const byId = new Map<number, ForeignKeyInfo>();
@@ -251,11 +360,58 @@ export class SqliteAdapter implements DbAdapter {
 
   /// SQLite has no notion of a current schema — `main` and any ATTACHed
   /// database are addressed by qualifying the name. Nothing to switch.
-  async useSchema(_name: string): Promise<void> {}
+  async useSchema(_name: string): Promise<string> {
+    return 'main';
+  }
+
+  async currentSchema(): Promise<string | null> {
+    return 'main';
+  }
+
+  /// SQLite's read-only is an OPEN FLAG, not a transaction, so an armed
+  /// write cannot reuse the read-only handle at all — it needs a second one
+  /// opened writable. Kept once opened: reopening a local file costs about
+  /// a millisecond, but doing it per statement would mean losing any
+  /// in-memory page cache each time.
+  private writable(): DatabaseSync {
+    if (!this.writeDb) {
+      if (!this.spec?.file) throw new Error('sqlite connection requires a file path');
+      this.writeDb = new DatabaseSync(this.spec.file);
+    }
+    return this.writeDb;
+  }
+
+  async beginTransaction(): Promise<void> {
+    if (this.txnOpen) return;
+    this.writable().exec('begin');
+    this.txnOpen = true;
+  }
+
+  async commit(): Promise<void> {
+    if (!this.txnOpen) return;
+    this.txnOpen = false;
+    this.writable().exec('commit');
+  }
+
+  async rollback(): Promise<void> {
+    if (!this.txnOpen) return;
+    this.txnOpen = false;
+    try {
+      this.writable().exec('rollback');
+    } catch {
+      // Already unwound; nothing left to undo.
+    }
+  }
+
+  inTransaction(): boolean {
+    return this.txnOpen;
+  }
 
   async close(): Promise<void> {
     this.db?.close();
+    this.writeDb?.close();
     this.db = null;
+    this.writeDb = null;
   }
 
   private require(): DatabaseSync {

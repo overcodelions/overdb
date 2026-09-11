@@ -39,9 +39,21 @@ function write(file: SecretFile): void {
 
 export function isEncryptionAvailable(): boolean {
   try {
-    return safeStorage.isEncryptionAvailable();
+    if (!safeStorage.isEncryptionAvailable()) return false;
+    return process.platform !== 'linux' || safeStorage.getSelectedStorageBackend?.() !== 'basic_text';
   } catch {
     return false;
+  }
+}
+
+/// Linux `basic_text` reports "available" while encrypting with a constant
+/// key — it is not protection, and the UI must be able to say so.
+export function secretsBackend(): string {
+  try {
+    if (process.platform !== 'linux') return process.platform === 'darwin' ? 'keychain' : 'dpapi';
+    return safeStorage.getSelectedStorageBackend?.() ?? 'unknown';
+  } catch {
+    return 'unknown';
   }
 }
 
@@ -55,6 +67,19 @@ export function setSecret(ref: string, value: string): void {
     file.values[ref] = { data: Buffer.from(value, 'utf-8').toString('base64'), encrypted: false };
   }
   write(file);
+}
+
+/// Copy a stored credential from one ref to another, for duplicating a
+/// connection. The ciphertext is moved as-is: nothing is decrypted, and no
+/// value passes through the caller — which is what lets a duplicate keep
+/// its password even though the renderer asking for it cannot read one.
+export function copySecret(fromRef: string, toRef: string): boolean {
+  const file = read();
+  const entry = file.values[fromRef];
+  if (!entry) return false;
+  file.values[toRef] = { ...entry };
+  write(file);
+  return true;
 }
 
 export function deleteSecret(ref: string): void {

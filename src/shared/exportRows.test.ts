@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import { describe, expect, it } from 'vitest';
 import { formatRows, insertTarget } from './exportRows';
 import type { Cell, ColumnMeta } from './types';

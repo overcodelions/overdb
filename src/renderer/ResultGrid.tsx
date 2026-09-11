@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import type { Cell, ColumnMeta } from '@shared/types';
 import { formatRows, insertTarget, nullBehaviour, type ExportFormat } from '@shared/exportRows';
+import { needsValue, type FilterOp, type GridFilter } from '@shared/gridView';
 import { CellView, isNumericKind } from './Cell';
 import { useStore } from './store';
 
@@ -32,16 +33,34 @@ export function ResultGrid({
   sort,
   sortable,
   onSort,
+  filters,
+  onFilter,
+  canEdit,
+  onEditCell,
 }: {
   columns: ColumnMeta[];
   rows: Cell[][];
   sort?: { column: string; direction: 'asc' | 'desc' } | null;
   sortable?: boolean;
   onSort?(column: string): void;
+  /// Applied by re-asking the server, never by hiding rows — see
+  /// src/shared/gridView.ts for why that distinction is the whole point.
+  filters?: GridFilter[];
+  onFilter?(filter: GridFilter | null, column: string): void;
+  /// Whether this column's cells can be written back, and why not when they
+  /// cannot. Answered by the caller, which has the catalog — see
+  /// src/shared/rowEdit.ts.
+  canEdit?(columnIndex: number): { ok: boolean; reason?: string };
+  /// A committed edit. The grid does not apply it optimistically: the row is
+  /// re-read, because a trigger or default may store something else.
+  onEditCell?(rowIndex: number, columnIndex: number, value: string | null): void;
 }): JSX.Element {
   const parentRef = useRef<HTMLDivElement>(null);
   const [sel, setSel] = useState<Selection | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  const [filterAt, setFilterAt] = useState<{ column: string; x: number; y: number } | null>(null);
+  /// The cell being edited, if any. One at a time, by construction.
+  const [editing, setEditing] = useState<{ r: number; c: number; draft: string } | null>(null);
   // A ref, not state: this changes on every mousedown/up and re-rendering a
   // virtualized grid for it would make the drag stutter.
   const dragging = useRef(false);
@@ -76,18 +95,27 @@ export function ResultGrid({
   const totalWidth = GUTTER + colVirt.getTotalSize();
 
   const copy = async (format: ExportFormat, headers: boolean, nullAs?: string) => {
-    const s = sel ? norm(sel) : { top: 0, bottom: rows.length - 1, left: 0, right: columns.length - 1 };
-    const cols = columns.slice(s.left, s.right + 1);
-    const body = rows.slice(s.top, s.bottom + 1).map((r) => r.slice(s.left, s.right + 1));
-    const text = formatRows(cols, body, format, { headers, nullAs });
-    await window.overdb.invoke('app:copyText', text);
-    setMenu(null);
-    const n = body.length;
-    toast(`Copied ${n.toLocaleString()} row${n === 1 ? '' : 's'} as ${format.toUpperCase()}.`);
+    try {
+      const s = sel ? norm(sel) : { top: 0, bottom: rows.length - 1, left: 0, right: columns.length - 1 };
+      const cols = columns.slice(s.left, s.right + 1);
+      const body = rows.slice(s.top, s.bottom + 1).map((r) => r.slice(s.left, s.right + 1));
+      const text = formatRows(cols, body, format, { headers, nullAs });
+      await window.overdb.invoke('app:copyText', text);
+      setMenu(null);
+      const n = body.length;
+      toast(`Copied ${n.toLocaleString()} row${n === 1 ? '' : 's'} as ${format.toUpperCase()}.`);
+    } catch (err) {
+      setMenu(null);
+      toast(`Could not copy: ${String(err)}`);
+    }
   };
 
   useEffect(() => {
     setSel(null);
+    // A cell being edited belongs to rows that no longer exist once the
+    // statement has been re-run — leaving the input open would put it on
+    // whatever row happens to be at that index now.
+    setEditing(null);
   }, [columns, rows.length]);
 
   // The drag ends wherever the mouse is released, including outside the
@@ -102,15 +130,18 @@ export function ResultGrid({
 
   // Dismiss the menu on any outside click.
   useEffect(() => {
-    if (!menu) return;
-    const close = () => setMenu(null);
+    if (!menu && !filterAt) return;
+    const close = () => {
+      setMenu(null);
+      setFilterAt(null);
+    };
     window.addEventListener('click', close);
     window.addEventListener('resize', close);
     return () => {
       window.removeEventListener('click', close);
       window.removeEventListener('resize', close);
     };
-  }, [menu]);
+  }, [menu, filterAt]);
 
   if (columns.length === 0) {
     return (
@@ -125,7 +156,10 @@ export function ResultGrid({
     !!selected && r >= selected.top && r <= selected.bottom && c >= selected.left && c <= selected.right;
   const rowPicked = (r: number) => !!selected && r >= selected.top && r <= selected.bottom;
 
+  const active = (filters ?? []).length;
+
   return (
+    <div className="h-full relative">
     <div
       ref={parentRef}
       tabIndex={0}
@@ -161,7 +195,7 @@ export function ResultGrid({
               onClick={() => (sortable && onSort ? onSort(col.name) : undefined)}
               // A right-aligned numeric column needs a right-aligned label,
               // or the header floats over the wrong part of its own column.
-              className={`absolute top-0 flex items-center gap-1.5 px-2.5 overflow-hidden whitespace-nowrap border-r grid-rule ${
+              className={`group/head absolute top-0 flex items-center gap-1.5 px-2.5 overflow-hidden whitespace-nowrap border-r grid-rule ${
                 isNumericKind(col.kind) ? 'justify-end' : ''
               } ${sortable ? 'cursor-pointer hover:bg-card' : 'cursor-default'}`}
               style={{ left: vc.start, width: vc.size, height: ROW_H + 4 }}
@@ -177,6 +211,29 @@ export function ResultGrid({
               <span className="text-[10px] text-ink-faint truncate">{col.typeName}</span>
               {sorted && (
                 <span className="text-[9px] text-accent shrink-0">{sorted === 'asc' ? '▲' : '▼'}</span>
+              )}
+              {onFilter && (
+                <button
+                  onClick={(e) => {
+                    // Not a sort: the header's own click is already spoken
+                    // for, and a filter that sorted as a side effect would
+                    // re-run twice for one gesture.
+                    e.stopPropagation();
+                    const box = (e.target as HTMLElement).getBoundingClientRect();
+                    setFilterAt({ column: col.name, x: box.left, y: box.bottom + 4 });
+                  }}
+                  title={`Filter on ${col.name}`}
+                  aria-label={`Filter on ${col.name}`}
+                  className={`ml-auto shrink-0 leading-none px-0.5 ${
+                    filterOf(filters, col.name)
+                      ? 'text-accent'
+                      : 'text-ink-faint/0 group-hover/head:text-ink-faint hover:!text-ink'
+                  }`}
+                >
+                  <svg width="9" height="9" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M1.5 2h9l-3.4 4v3.6L4.9 10.5V6L1.5 2z" />
+                  </svg>
+                </button>
               )}
             </div>
           );
@@ -251,12 +308,63 @@ export function ResultGrid({
                     }
                     setMenu({ x: e.clientX, y: e.clientY });
                   }}
+                  onDoubleClick={() => {
+                    if (!onEditCell || !canEdit) return;
+                    const check = canEdit(vc.index);
+                    if (!check.ok) {
+                      // Never silently inert: "why can't I type here" is the
+                      // whole question, and the reason answers it.
+                      toast(check.reason ?? 'This cell is not editable.', 'error');
+                      return;
+                    }
+                    const value = rows[vr.index][vc.index];
+                    setEditing({
+                      r: vr.index,
+                      c: vc.index,
+                      draft:
+                        value === null || typeof value === 'object' ? '' : String(value),
+                    });
+                  }}
+                  title={onEditCell ? 'Double-click to edit' : undefined}
                   className={`absolute top-0 px-2.5 text-[11px] leading-[26px] overflow-hidden whitespace-nowrap border-r grid-rule ${
                     isNumericKind(col.kind) ? 'text-right' : ''
                   } ${picked ? 'bg-accent/30 text-ink' : ''}`}
                   style={{ left: vc.start, width: vc.size, height: vr.size }}
                 >
-                  <CellView value={rows[vr.index][vc.index]} column={col} />
+                  {editing && editing.r === vr.index && editing.c === vc.index ? (
+                    <input
+                      autoFocus
+                      value={editing.draft}
+                      onChange={(e) => setEditing({ ...editing, draft: e.target.value })}
+                      onMouseDown={(e) => e.stopPropagation()}
+                      onBlur={() => setEditing(null)}
+                      onKeyDown={(e) => {
+                        e.stopPropagation();
+                        if (e.key === 'Escape') setEditing(null);
+                        if (e.key !== 'Enter') return;
+                        const before = rows[vr.index][vc.index];
+                        const draft = editing.draft;
+                        setEditing(null);
+                        // An unchanged cell writes nothing. An UPDATE that
+                        // sets a column to what it already holds still fires
+                        // triggers and still shows up in a binlog.
+                        if (String(before ?? '') === draft) return;
+                        // An emptied cell means NULL where the column allows
+                        // it — the confirmation shows which was chosen.
+                        onEditCell?.(
+                          vr.index,
+                          vc.index,
+                          draft === '' && col.nullable !== false ? null : draft,
+                        );
+                      }}
+                      aria-label={`Edit ${col.name}`}
+                      className={`w-full bg-surface-elevated text-ink text-[11px] leading-[24px] px-1 -mx-1 outline-none border border-accent rounded-[2px] font-mono ${
+                        isNumericKind(col.kind) ? 'text-right' : ''
+                      }`}
+                    />
+                  ) : (
+                    <CellView value={rows[vr.index][vc.index]} column={col} />
+                  )}
                 </div>
               );
             })}
@@ -265,6 +373,19 @@ export function ResultGrid({
         ))}
       </div>
 
+      {filterAt && onFilter && (
+        <FilterMenu
+          at={filterAt}
+          column={filterAt.column}
+          current={filterOf(filters, filterAt.column)}
+          onApply={(f) => {
+            onFilter(f, filterAt.column);
+            setFilterAt(null);
+          }}
+          onClose={() => setFilterAt(null)}
+        />
+      )}
+
       {menu && (
         <CopyMenu
           at={menu}
@@ -272,6 +393,28 @@ export function ResultGrid({
           selectedColumns={selected ? columns.slice(selected.left, selected.right + 1) : columns}
           onCopy={copy}
         />
+      )}
+    </div>
+
+      {/* Column headers with nothing under them read as a grid that has not
+          finished loading. It has: the statement ran and matched nothing, and
+          saying so is the difference between "no results" and "no answer yet".
+          It sits outside the scroller so it stays put when the header row is
+          scrolled sideways. */}
+      {rows.length === 0 && (
+        <div
+          className="absolute inset-x-0 bottom-0 flex flex-col items-center justify-center gap-1 px-8 text-center pointer-events-none"
+          style={{ top: ROW_H + 4 }}
+        >
+          <div className="text-xs text-ink-muted">No rows.</div>
+          <div className="text-[11px] text-ink-faint">
+            {active > 0
+              ? `The statement ran — nothing matched, with ${active} column filter${
+                  active === 1 ? '' : 's'
+                } applied. Clear ${active === 1 ? 'it' : 'them'} to see whether the query itself is empty.`
+              : 'The statement ran and returned an empty result — nothing matched.'}
+          </div>
+        </div>
       )}
     </div>
   );
@@ -340,6 +483,107 @@ function CopyMenu({
       >
         Copy as CSV, NULL explicit
       </button>
+    </div>
+  );
+}
+
+function filterOf(filters: GridFilter[] | undefined, column: string): GridFilter | null {
+  return filters?.find((f) => f.column === column) ?? null;
+}
+
+const FILTER_OPS: Array<{ value: FilterOp; label: string }> = [
+  { value: '=', label: 'equals' },
+  { value: '!=', label: 'not equals' },
+  { value: 'contains', label: 'contains' },
+  { value: 'starts', label: 'starts with' },
+  { value: '>', label: 'greater than' },
+  { value: '>=', label: 'at least' },
+  { value: '<', label: 'less than' },
+  { value: '<=', label: 'at most' },
+  { value: 'is null', label: 'is null' },
+  { value: 'is not null', label: 'is not null' },
+];
+
+/// One column's filter.
+///
+/// It re-runs the statement, so it commits on Enter or Apply rather than on
+/// every keystroke — a filter that fired per character would send a query
+/// per character, and on a 12M-row table that is a real bill.
+function FilterMenu({
+  at,
+  column,
+  current,
+  onApply,
+  onClose,
+}: {
+  at: { x: number; y: number };
+  column: string;
+  current: GridFilter | null;
+  onApply(filter: GridFilter | null): void;
+  onClose(): void;
+}): JSX.Element {
+  const [op, setOp] = useState<FilterOp>(current?.op ?? '=');
+  const [value, setValue] = useState(current?.value ?? '');
+  const input = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    input.current?.focus();
+    input.current?.select();
+  }, []);
+
+  const commit = () => onApply({ column, op, value: needsValue(op) ? value : undefined });
+
+  return (
+    <div
+      className="fixed z-50 w-[236px] rounded-md border border-card bg-surface-elevated shadow-2xl p-2 flex flex-col gap-1.5"
+      style={{ left: at.x, top: at.y }}
+      onClick={(e) => e.stopPropagation()}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') commit();
+        if (e.key === 'Escape') onClose();
+      }}
+    >
+      <div className="text-[10px] text-ink-faint truncate font-mono">{column}</div>
+      <select
+        value={op}
+        onChange={(e) => setOp(e.target.value as FilterOp)}
+        aria-label="Filter operator"
+        className="field px-1.5 py-1 text-[11px]"
+      >
+        {FILTER_OPS.map((o) => (
+          <option key={o.value} value={o.value}>{o.label}</option>
+        ))}
+      </select>
+      {needsValue(op) && (
+        <input
+          ref={input}
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          placeholder="value"
+          aria-label="Filter value"
+          className="field px-1.5 py-1 text-[11px] font-mono"
+        />
+      )}
+      <div className="flex items-center gap-1.5">
+        <button
+          onClick={commit}
+          className="text-[11px] px-2 py-1 rounded bg-accent text-white hover:bg-accent-strong"
+        >
+          Apply
+        </button>
+        {current && (
+          <button
+            onClick={() => onApply(null)}
+            className="text-[11px] px-2 py-1 rounded border border-card text-ink-muted hover:text-ink"
+          >
+            Clear
+          </button>
+        )}
+        <div className="flex-1" />
+        {/* Said once, here, because "why did my row count change" is the
+            question this answers. */}
+        <span className="text-[9px] text-ink-faint">re-runs the query</span>
+      </div>
     </div>
   );
 }

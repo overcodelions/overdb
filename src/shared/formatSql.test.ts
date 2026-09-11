@@ -1,14 +1,113 @@
 import { describe, expect, it } from 'vitest';
-import { ensureTerminated, formatSql } from './formatSql';
+import { ensureTerminated, formatSql, FORMAT_STYLES, type FormatStyle } from './formatSql';
 
-describe('formatSql', () => {
-  it('puts each clause on its own line, columns indented one per line', () => {
+/// The reference statement and its five layouts, exactly as the styles are
+/// defined elsewhere in the industry. These are byte-for-byte assertions on
+/// purpose: a formatter that is "nearly" a named style is a formatter whose
+/// output nobody recognises.
+const REFERENCE =
+  "SELECT CompanyName, AddressType, AddressLine1 FROM Customer " +
+  "JOIN CustomerAddress ON (Customer.CustomerID = CustomerAddress.CustomerID) " +
+  "JOIN Address ON (CustomerAddress.AddressID = Address.AddressID) " +
+  "WHERE CompanyName = 'ACME Corporation'";
+
+const EXPECTED: Record<FormatStyle, string> = {
+  collapsed: [
+    'SELECT CompanyName, AddressType, AddressLine1',
+    'FROM Customer',
+    '     JOIN CustomerAddress ON(Customer.CustomerID=CustomerAddress.CustomerID)',
+    '     JOIN Address ON(CustomerAddress.AddressID=Address.AddressID)',
+    "WHERE CompanyName='ACME Corporation'",
+  ].join('\n'),
+
+  'commas-before': [
+    'SELECT CompanyName',
+    '     , AddressType',
+    '     , AddressLine1',
+    'FROM Customer',
+    '    JOIN CustomerAddress',
+    '        ON (Customer.CustomerID = CustomerAddress.CustomerID)',
+    '    JOIN Address',
+    '        ON (CustomerAddress.AddressID = Address.AddressID)',
+    "WHERE CompanyName = 'ACME Corporation'",
+  ].join('\n'),
+
+  default: [
+    'SELECT CompanyName,',
+    '       AddressType,',
+    '       AddressLine1',
+    'FROM Customer',
+    '    JOIN CustomerAddress',
+    '        ON (Customer.CustomerID = CustomerAddress.CustomerID)',
+    '    JOIN Address',
+    '        ON (CustomerAddress.AddressID = Address.AddressID)',
+    "WHERE CompanyName = 'ACME Corporation'",
+  ].join('\n'),
+
+  indented: [
+    'SELECT',
+    '    CompanyName,',
+    '    AddressType,',
+    '    AddressLine1',
+    'FROM',
+    '    Customer',
+    '    JOIN',
+    '        CustomerAddress',
+    '            ON (Customer.CustomerID = CustomerAddress.CustomerID)',
+    '    JOIN',
+    '        Address',
+    '            ON (CustomerAddress.AddressID = Address.AddressID)',
+    'WHERE',
+    "    CompanyName = 'ACME Corporation'",
+  ].join('\n'),
+
+  'right-aligned': [
+    'SELECT CompanyName,',
+    '       AddressType,',
+    '       AddressLine1',
+    '  FROM Customer',
+    '  JOIN CustomerAddress',
+    '    ON (Customer.CustomerID       = CustomerAddress.CustomerID)',
+    '  JOIN Address',
+    '    ON (CustomerAddress.AddressID = Address.AddressID)',
+    " WHERE CompanyName = 'ACME Corporation'",
+  ].join('\n'),
+};
+
+describe('the five named layouts', () => {
+  for (const style of FORMAT_STYLES) {
+    it(`renders ${style.label} exactly`, () => {
+      expect(formatSql(REFERENCE, style.id)).toBe(EXPECTED[style.id]);
+    });
+  }
+
+  it('offers every style it can render, and no others', () => {
+    expect(FORMAT_STYLES.map((s) => s.id).sort()).toEqual(Object.keys(EXPECTED).sort());
+  });
+
+  it('lines the equals signs up only where the style asks for it', () => {
+    // Right-aligned is the one layout that does this; doing it everywhere
+    // would insert whitespace the other four never promised.
+    expect(formatSql(REFERENCE, 'default')).not.toContain('CustomerID       =');
+    expect(formatSql(REFERENCE, 'right-aligned')).toContain('CustomerID       =');
+  });
+
+  it('widens the right-aligned gutter to the longest keyword present', () => {
+    // GROUP BY is eight characters, so every keyword in that statement
+    // right-aligns to eight rather than to SELECT's six.
+    const out = formatSql('select a, count(*) from t group by a order by a', 'right-aligned');
+    expect(out).toContain('  SELECT a,');
+    expect(out).toContain('GROUP BY a');
+  });
+});
+
+describe('formatSql, on the Default layout', () => {
+  it('aligns the list under its first item', () => {
     expect(formatSql('select a, b, c from t where x = 1 order by a desc limit 10')).toBe(
       [
-        'SELECT',
-        '  a,',
-        '  b,',
-        '  c',
+        'SELECT a,',
+        '       b,',
+        '       c',
         'FROM t',
         'WHERE x = 1',
         'ORDER BY a desc',
@@ -17,15 +116,18 @@ describe('formatSql', () => {
     );
   });
 
-  it('breaks joins and their ON clauses onto their own lines', () => {
-    const out = formatSql(
-      'select pw.id from panel_widget pw join client c on c.client_id = pw.client_id',
-    );
-    expect(out.split('\n')).toEqual([
+  it('gives ON its own line here, and keeps it inline under Collapsed', () => {
+    const sql = 'select pw.id from panel_widget pw join client c on c.client_id = pw.client_id';
+    expect(formatSql(sql).split('\n')).toEqual([
       'SELECT pw.id',
       'FROM panel_widget pw',
-      'JOIN client c',
-      'ON c.client_id = pw.client_id',
+      '    JOIN client c',
+      '        ON c.client_id = pw.client_id',
+    ]);
+    expect(formatSql(sql, 'collapsed').split('\n')).toEqual([
+      'SELECT pw.id',
+      'FROM panel_widget pw',
+      '     JOIN client c ON c.client_id=pw.client_id',
     ]);
   });
 
@@ -36,9 +138,9 @@ describe('formatSql', () => {
     expect(formatSql('select 1 union all select 2')).toContain('UNION ALL');
   });
 
-  it('indents AND / OR under the condition they extend', () => {
-    const out = formatSql("select a from t where x = 1 and y = 2 or z = 3");
-    expect(out).toContain('WHERE x = 1\n  AND y = 2\n  OR z = 3');
+  it('right-aligns AND / OR so the conditions they join stay in one column', () => {
+    const out = formatSql('select a from t where x = 1 and y = 2 or z = 3');
+    expect(out).toContain('WHERE x = 1\n  AND y = 2\n   OR z = 3');
   });
 
   it('leaves subqueries alone rather than unindenting them to column 0', () => {
@@ -87,8 +189,8 @@ describe('formatSql', () => {
     expect(formatSql('select count(*) from t')).toBe('SELECT count(*)\nFROM t');
   });
 
-  it('still breaks up a real list', () => {
-    expect(formatSql('select a, b from t')).toBe('SELECT\n  a,\n  b\nFROM t');
+  it('still breaks up a real list, one item per line', () => {
+    expect(formatSql('select a, b from t')).toBe('SELECT a,\n       b\nFROM t');
   });
 
   it('keeps a qualifier bound to what follows it', () => {
@@ -113,5 +215,47 @@ describe('ensureTerminated', () => {
 
   it('leaves empty input alone', () => {
     expect(ensureTerminated('   ')).toBe('');
+  });
+});
+
+describe('bracketed conditions', () => {
+  // The shape an ORM emits, and the one the formatter used to leave as a
+  // single 300-character line: the connectors are INSIDE the brackets.
+  const hibernate =
+    "select p.id from acme.partner p where(p.pending_customer_approval = 0 AND p.exclude_reports = 0 AND p.partner_source <> 26) and(p.client_id is not null)";
+
+  it('breaks a long condition group onto its own lines', () => {
+    const out = formatSql(hibernate, 'default');
+    expect(out).toContain('WHERE (p.pending_customer_approval = 0\n');
+    expect(out).toContain('AND p.exclude_reports = 0');
+    expect(out.split('\n').every((l) => l.length < 80)).toBe(true);
+  });
+
+  it('aligns the connectors with the first condition in the group', () => {
+    const lines = formatSql(hibernate, 'default').split('\n');
+    const first = lines.find((l) => l.includes('pending_customer_approval'))!;
+    const second = lines.find((l) => l.trim().startsWith('AND p.exclude_reports'))!;
+    expect(second.indexOf('AND')).toBe(first.indexOf('p.pending'));
+  });
+
+  it('leaves a short group alone', () => {
+    // Breaking `(a = 1 AND b = 2)` costs two lines and buys nothing.
+    expect(formatSql('select * from t where (a = 1 AND b = 2)', 'default')).toBe(
+      'SELECT *\nFROM t\nWHERE (a = 1 AND b = 2)',
+    );
+  });
+
+  it('never breaks an IN list, which has no connectors in it', () => {
+    const out = formatSql(
+      "select * from t where id in ('aaaaaaaaaaaaaaaaaaaaaaaaaaaa','bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb','cccccccccccccccccccc')",
+      'default',
+    );
+    // The claim is that it stays on ONE line — the comma layout inside a
+    // bracket is the list rule's business, not this one's.
+    expect(out.split('\n').filter((l) => l.includes('aaaaaaaa'))).toHaveLength(1);
+  });
+
+  it('keeps collapsed collapsed', () => {
+    expect(formatSql(hibernate, 'collapsed').split('\n').some((l) => l.trim().startsWith('AND p.exclude'))).toBe(false);
   });
 });

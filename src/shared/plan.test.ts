@@ -85,3 +85,67 @@ describe('SQLite and fallbacks', () => {
     expect(rows[0].title).toBe('not json at all');
   });
 });
+
+describe('nested loops', () => {
+  it('multiplies the inner side by the rows the outer side produces', () => {
+    // MySQL reports rows PER SCAN. The join order is the array order, so the
+    // second table runs once per row surviving the first — which is where a
+    // bad join's cost actually lives.
+    const rows = parsePlan(
+      'mysql',
+      'json',
+      JSON.stringify({
+        query_block: {
+          nested_loop: [
+            { table: { table_name: 'partner', access_type: 'ALL', rows_examined_per_scan: 1000, filtered: 10 } },
+            { table: { table_name: 'client', access_type: 'eq_ref', key: 'PRIMARY', rows_examined_per_scan: 1, filtered: 100 } },
+          ],
+        },
+      }),
+    );
+    expect(rows[0].loops).toBeUndefined();
+    expect(rows[1].loops).toBe(100);
+  });
+});
+
+describe('MariaDB and materialisation', () => {
+  it('reads MariaDB’s block-nl-join, which spells the same join differently', () => {
+    const rows = parsePlan(
+      'mysql',
+      'json',
+      JSON.stringify({
+        query_block: {
+          nested_loop: [
+            { table: { table_name: 'partner', rows_examined_per_scan: 500, filtered: 100 } },
+            { 'block-nl-join': { table: { table_name: 'client', rows_examined_per_scan: 2 } } },
+          ],
+        },
+      }),
+    );
+    expect(rows.map((r) => r.title)).toEqual(['partner', 'client']);
+    expect(rows[1].loops).toBe(500);
+  });
+
+  it('marks a materialized subquery as built once rather than looped', () => {
+    // The counterpart to a loop: a scan inside a materialisation is read
+    // once and reused, so it is not the disaster it looks like.
+    const rows = parsePlan(
+      'mysql',
+      'json',
+      JSON.stringify({
+        query_block: {
+          table: {
+            table_name: 'partner',
+            rows_examined_per_scan: 100,
+            materialized_from_subquery: {
+              query_block: { table: { table_name: 'custom_activity', rows_examined_per_scan: 4148 } },
+            },
+          },
+        },
+      }),
+    );
+    expect(rows[1].title).toBe('custom_activity');
+    expect(rows[1].materialized).toBe(true);
+    expect(rows[1].loops).toBeUndefined();
+  });
+});

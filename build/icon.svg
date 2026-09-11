@@ -1,13 +1,13 @@
 <svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
   <!-- Family shell: same white rounded square and black round-capped
        strokes as overcli (a `>` prompt) and overgit (a branch graph).
-       overdb's mark is two arcs stacked vertically — a rotated `) )`,
-       which is also the silhouette of a database platter stack. The gap
-       between them is what makes it read as two platters rather than one
-       thick doubled stroke. -->
+       overdb's mark is three arcs stacked vertically — a rotated `)))`,
+       the silhouette of a database platter stack. Three reads as a stack;
+       two read as a doubled stroke. -->
   <rect x="100" y="100" width="824" height="824" rx="185" ry="185" fill="#ffffff"/>
   <g fill="none" stroke="#000000" stroke-width="50" stroke-linecap="round">
-    <path d="M332 352 Q 512 512 692 352"/>
-    <path d="M332 600 Q 512 760 692 600"/>
+    <path d="M332 302 Q 512 462 692 302"/>
+    <path d="M332 472 Q 512 632 692 472"/>
+    <path d="M332 642 Q 512 802 692 642"/>
   </g>
 </svg>

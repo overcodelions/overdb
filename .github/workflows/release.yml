@@ -8,6 +8,8 @@ on:
 
 permissions:
   contents: write
+  attestations: write
+  id-token: write
 
 jobs:
   build:
@@ -57,6 +59,26 @@ jobs:
             release/*.deb
           if-no-files-found: ignore
 
+      - name: Checksums
+        shell: bash
+        run: |
+          [ -d release ] || exit 0
+          cd release
+          shopt -s nullglob
+          files=(*.dmg *.zip *.exe *.AppImage *.deb)
+          [ ${#files[@]} -gt 0 ] || exit 0
+          if command -v sha256sum >/dev/null; then sha256sum "${files[@]}"; else shasum -a 256 "${files[@]}"; fi \
+            > "SHA256SUMS-${{ matrix.os }}.txt"
+
+      - uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        with:
+          subject-path: |
+            release/*.dmg
+            release/*.zip
+            release/*.exe
+            release/*.AppImage
+            release/*.deb
+
       # On tag pushes, attach the per-platform artifacts to the GitHub
       # Release for that tag. Each matrix job uploads its own files to
       # the same Release; softprops/action-gh-release creates the Release
@@ -73,3 +95,4 @@ jobs:
             release/*.exe
             release/*.AppImage
             release/*.deb
+            release/SHA256SUMS-*.txt

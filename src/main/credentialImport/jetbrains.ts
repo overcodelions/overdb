@@ -16,18 +16,22 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { parseJdbcUrl } from '../../shared/jdbcUrl';
-import type { EnvKind, Engine } from '../../shared/types';
+import type { EnvKind, Engine, SslMode } from '../../shared/types';
+import { variantFromDriver } from '../../shared/engines';
+import type { Variant } from '../../shared/engines';
 
 export interface ImportCandidate {
-  /// Only ever set by sources that legitimately hold one (a .pgpass the
-  /// user owns, a URL in their own environment). Never read from another
-  /// application's keychain.
-  password?: string;
+  /// Whether the source holds a password. The value itself never leaves main.
+  hasPassword?: boolean;
   /// Stable across re-scans, so re-importing does not duplicate.
   sourceId: string;
   name: string;
   origin: string;
   engine: Engine | null;
+  /// Read straight off the JDBC driver name where it says so — so six
+  /// Redshift connections are labelled Redshift before any is opened.
+  /// Refined by the server's own answer on first connect.
+  variant?: Variant;
   driver: string;
   env: EnvKind;
   group?: string;
@@ -35,6 +39,7 @@ export interface ImportCandidate {
   port?: number;
   database?: string;
   user?: string;
+  ssl?: SslMode;
   /// Set when the source driver is not natively supported but speaks a
   /// protocol overdb does — Redshift over the Postgres wire.
   note?: string;
@@ -48,7 +53,11 @@ export function envForGroup(group: string | undefined, name: string): EnvKind {
   if (/\bprod|production\b/.test(text)) return 'prod';
   if (/\bstag|staging|stg\b/.test(text)) return 'staging';
   if (/\blocal|localhost\b/.test(text)) return 'local';
-  if (/\bdev|sandbox|sbox|test\b/.test(text)) return 'dev';
+  // Checked BEFORE dev: a sandbox is its own tier, and folding it into dev
+  // is how `@Sbox`, `@Sbox [detailed]` and `Sandbox Acme` all ended up
+  // filed as dev connections.
+  if (/\bsandbox|sbox|sbx\b/.test(text)) return 'sandbox';
+  if (/\bdev|test\b/.test(text)) return 'dev';
   return 'other';
 }
 
@@ -105,6 +114,7 @@ export function parseDataSources(
       name,
       origin,
       engine: parsed?.engine ?? null,
+      variant: variantFromDriver(parsed?.driver ?? element(block, 'driver-ref') ?? ''),
       driver: parsed?.driver ?? element(block, 'driver-ref') ?? 'unknown',
       env: envForGroup(group, name),
       group,
@@ -174,8 +184,10 @@ export function scanJetBrains(): ImportCandidate[] {
 /// than the global list.
 export function scanJetBrainsProjects(root: string, maxDepth = 3): ImportCandidate[] {
   const found: ImportCandidate[] = [];
+  let visited = 0;
+  const MAX_DIRS = 4_000;
   const walk = (dir: string, depth: number): void => {
-    if (depth > maxDepth) return;
+    if (depth > maxDepth || visited++ > MAX_DIRS) return;
     let entries: fs.Dirent[];
     try {
       entries = fs.readdirSync(dir, { withFileTypes: true });

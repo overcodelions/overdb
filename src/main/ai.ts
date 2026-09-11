@@ -131,6 +131,9 @@ export function runOneShot(
       else done({ ok: false, output: body, error: stderr.trim() || `${tool} exited with ${code}`, tool });
     });
 
+    // The CLI can exit on a bad --model before it drains stdin. Unlistened,
+    // that EPIPE is an uncaught exception in the Electron main process.
+    child.stdin.on('error', () => undefined);
     child.stdin.write(prompt);
     child.stdin.end();
   });

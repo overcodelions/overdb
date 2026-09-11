@@ -1,0 +1,26 @@
+node_modules/
+dist/
+coverage/
+release/
+docs/
+.mender/
+
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+.DS_Store
+Thumbs.db
+
+.claude/
+
+# Defensive: some users have a global ignore (e.g. `*log.*`) that would
+# otherwise swallow CHANGELOG.md. Force it to be tracked.
+!CHANGELOG.md
+.mockups/
+
+# Design canvas working files (seeded into the published canvas, not app source)
+.design/
+.design-*/

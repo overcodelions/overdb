@@ -1,5 +1,8 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { parsePgpass, splitPgpassLine } from './pgpass';
+import { parsePgpass, readPgpass, splitPgpassLine } from './pgpass';
 import { parseConnectionUrl, scanEnvironment } from './envUrl';
 
 describe('splitPgpassLine', () => {
@@ -28,6 +31,21 @@ describe('parsePgpass', () => {
     const [entry] = parsePgpass('*:*:*:me:secret');
     expect(entry.wildcard).toEqual({ host: true, port: true, database: true, user: false });
     expect(entry.port).toBeNull();
+  });
+});
+
+describe('readPgpass on Windows', () => {
+  it('ignores the mode gate, since Node reports 0o666 on Windows regardless of ACLs', () => {
+    const file = path.join(os.tmpdir(), `pgpass-win-${Date.now()}`);
+    fs.writeFileSync(file, 'localhost:5432:app:me:secret\n', { mode: 0o644 });
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    try {
+      expect(readPgpass(file)).toMatchObject({ ok: true });
+    } finally {
+      Object.defineProperty(process, 'platform', platform);
+      fs.unlinkSync(file);
+    }
   });
 });
 

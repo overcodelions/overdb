@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { classify, needsWriteAccess, splitStatements, statementAt } from './sqlGuard';
+import { affectedVerb, classify, needsWriteAccess, replaceEnd, severity, splitStatements, statementAt } from './sqlGuard';
 
 const texts = (sql: string, engine?: 'postgres' | 'mysql' | 'sqlite') =>
   splitStatements(sql, engine).map((s) => s.sql);
@@ -140,5 +140,91 @@ describe('statement offsets (regression: welded statements)', () => {
     for (const s of splitStatements(doc, 'mysql')) {
       expect(doc.slice(s.start, s.end)).toBe(s.sql);
     }
+  });
+});
+
+describe('severity', () => {
+  it('separates losing data from changing it', () => {
+    // Both are writes. Only one of them can lose you something.
+    expect(severity("delete from t where id = 1")).toBe('destructive');
+    expect(severity('drop table t')).toBe('destructive');
+    expect(severity('truncate table t')).toBe('destructive');
+    expect(severity("update t set x = 1")).toBe('mutating');
+    expect(severity('insert into t (a) values (1)')).toBe('mutating');
+    expect(severity('alter table t add index i (a)')).toBe('mutating');
+  });
+
+  it('calls an ordinary query a read', () => {
+    expect(severity('select * from t')).toBe('read');
+    expect(severity('  -- a note\nSELECT 1')).toBe('read');
+    expect(severity('show tables')).toBe('read');
+  });
+
+  it('reads through a data-modifying CTE to what it actually does', () => {
+    expect(severity('with x as (delete from t returning *) select * from x')).toBe('destructive');
+    expect(severity('with x as (insert into t values (1) returning *) select * from x')).toBe('mutating');
+    expect(severity('with x as (select 1) select * from x')).toBe('read');
+  });
+
+  it('leaves SELECT ... FOR UPDATE a read, though classify calls it a write', () => {
+    // It takes locks; it changes nothing. The progress bar should not go
+    // red for a query that cannot lose you anything.
+    expect(classify('select * from t for update')).toBe('write');
+    expect(severity('select * from t for update')).toBe('read');
+  });
+});
+
+describe('affectedVerb', () => {
+  it('names what the statement did', () => {
+    expect(affectedVerb("delete from t where id = '1'")).toBe('deleted');
+    expect(affectedVerb('UPDATE t SET a = 1')).toBe('updated');
+    expect(affectedVerb('insert into t values (1)')).toBe('inserted');
+    expect(affectedVerb('-- a comment\n  truncate table t')).toBe('truncated');
+  });
+
+  it('falls back to "affected" rather than guessing', () => {
+    // A procedure may insert, update or both. "3 rows affected" is vague;
+    // "3 rows deleted" about an insert would be wrong.
+    expect(affectedVerb('call rebuild_everything()')).toBe('affected');
+    expect(affectedVerb('with x as (delete from t returning *) insert into u select * from x'))
+      .toBe('affected');
+  });
+});
+
+describe('replaceEnd', () => {
+  it('reaches past the terminator a replacement would duplicate', () => {
+    // The reported bug: translating or refining a statement wrote its own
+    // `;` and left the original stranded on a line of its own.
+    const doc = 'select * from t order by a desc;';
+    const [stmt] = splitStatements(doc);
+    expect(doc.slice(stmt.start, stmt.end)).toBe('select * from t order by a desc');
+    expect(doc.slice(stmt.start, replaceEnd(doc, stmt.end))).toBe(doc);
+  });
+
+  it('crosses the whitespace before a detached terminator', () => {
+    const doc = 'select 1\n;';
+    const [stmt] = splitStatements(doc);
+    expect(doc.slice(stmt.start, replaceEnd(doc, stmt.end))).toBe(doc);
+  });
+
+  it('leaves an unterminated statement alone', () => {
+    const doc = 'select 1';
+    expect(replaceEnd(doc, doc.length)).toBe(doc.length);
+  });
+
+  it('stops at its own terminator, never inside the next statement', () => {
+    const doc = 'select 1;\n\nselect 2;';
+    const [first, second] = splitStatements(doc);
+    expect(doc.slice(first.start, replaceEnd(doc, first.end))).toBe('select 1;');
+    expect(doc.slice(second.start, replaceEnd(doc, second.end))).toBe('select 2;');
+  });
+
+  it('does not reach forward to a terminator that is not its own', () => {
+    // An unterminated statement followed by another: the next `;` belongs to
+    // the statement after it, and swallowing the text between would delete a
+    // query the user never touched.
+    const doc = 'select 1';
+    const [only] = splitStatements(`${doc}`);
+    expect(replaceEnd(doc, only.end)).toBe(doc.length);
   });
 });

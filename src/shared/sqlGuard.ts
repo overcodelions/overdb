@@ -141,6 +141,20 @@ export function splitStatements(sql: string, engine: Engine = 'postgres'): State
   return out;
 }
 
+/// Where a REPLACEMENT for a statement has to end.
+///
+/// `splitStatements` bounds the trimmed text, so `end` stops before the
+/// terminating semicolon — correct, because the semicolon separates
+/// statements rather than belonging to one. But everything that swaps a
+/// statement for another one (a translation, a refine) writes its own
+/// terminator, and overwriting only [start, end) leaves the old semicolon
+/// stranded on a line by itself. This is the span to overwrite instead.
+export function replaceEnd(sql: string, end: number): number {
+  let i = end;
+  while (i < sql.length && /\s/.test(sql[i])) i += 1;
+  return sql[i] === ';' ? i + 1 : end;
+}
+
 /// Strip comments and leading whitespace so classification sees the first
 /// real keyword rather than a banner comment.
 function firstKeyword(sql: string): string {
@@ -234,4 +248,61 @@ export function statementAt(statements: Statement[], offset: number): Statement 
   let best: Statement | undefined;
   for (const s of statements) if (s.start <= offset) best = s;
   return best ?? statements[0];
+}
+
+
+/// How much damage a statement can do, which is a different question from
+/// whether it writes. `DELETE` and `UPDATE` are both writes, and only one of
+/// them can lose you something you cannot get back — so the progress bar
+/// colours by this, not by `classify`.
+export type Severity = 'destructive' | 'mutating' | 'read';
+
+const DESTRUCTIVE = new Set(['delete', 'drop', 'truncate']);
+const MUTATING = new Set([
+  'update', 'insert', 'replace', 'merge', 'upsert',
+  'alter', 'create', 'rename', 'grant', 'revoke', 'call',
+]);
+
+export function severity(sql: string): Severity {
+  const head = firstKeyword(sql);
+  if (!head) return 'read';
+
+  // A data-modifying CTE opens with `with` and can carry any of these, so
+  // the body decides — the same reasoning classify() uses.
+  if (head === 'with') {
+    const body = stripStrings(sql);
+    if (/\b(delete|truncate|drop)\b/i.test(body)) return 'destructive';
+    if (/\b(insert|update|merge)\b/i.test(body)) return 'mutating';
+    return 'read';
+  }
+
+  if (DESTRUCTIVE.has(head)) return 'destructive';
+  if (MUTATING.has(head)) return 'mutating';
+  // `SELECT … FOR UPDATE` takes locks but changes nothing, so it stays a
+  // read here even though classify() calls it a write.
+  return 'read';
+}
+
+/// The past-tense verb for "N rows ___", so a finished write reports what it
+/// did rather than the useless "0 rows" a write always returns.
+///
+/// Falls back to "affected" whenever the verb is not obvious — a CALL, a
+/// data-modifying CTE, a dialect we did not enumerate. "3 rows affected" is
+/// vague but never wrong, and guessing "deleted" for a procedure that
+/// inserted would be worse than vague.
+export function affectedVerb(sql: string): string {
+  switch (firstKeyword(sql)) {
+    case 'delete':
+      return 'deleted';
+    case 'update':
+      return 'updated';
+    case 'insert':
+      return 'inserted';
+    case 'replace':
+      return 'replaced';
+    case 'truncate':
+      return 'truncated';
+    default:
+      return 'affected';
+  }
 }

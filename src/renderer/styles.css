@@ -14,13 +14,93 @@
   --c-surface-elevated: 255 255 255;
   --c-ink: 26 26 31;
   --c-ink-muted: 90 90 102;
-  --c-ink-faint: 154 154 166;
-  --c-accent: 107 86 255;
-  --c-accent-strong: 86 64 240;
+  --c-ink-faint: 116 116 132;
+  --c-accent: 89 66 255;
+  --c-accent-strong: 72 50 214;
+  /* "A model is involved" — the question band, the gutter chip, the mark on
+   * any control that hands work to one.
+   *
+   * A hue of its own, and specifically NOT the accent: violet already means
+   * SQL keyword, active statement, caret and Run in this editor, which is
+   * why an accent-coloured flag blended into the thing it was flagging. Not
+   * green or amber either — those are read/mutating/destructive on the
+   * running bar, and green is also the string literal colour, so a green
+   * mark beside Run reads as "safe to run" rather than "a model wrote it".
+   * Cyan is the one hue with no job here. */
+  --c-ai: 13 133 148;
   --c-card-bg: rgba(0, 0, 0, 0.07);
-  --c-card-border: rgba(0, 0, 0, 0.14);
-  --c-rule: rgba(0, 0, 0, 0.07);
+  --c-card-border: rgba(0, 0, 0, 0.18);
+  --c-rule: rgba(0, 0, 0, 0.11);
   --c-row-alt: rgba(0, 0, 0, 0.025);
+
+  /* Literals in the editor. Two hues that are not the keyword violet and
+   * not each other, re-stepped per surface: the dark pair sits at around
+   * 2:1 on white, which is a syntax colour you have to lean in to read. */
+  --c-sql-string: 22 122 78;
+  --c-sql-number: 166 92 16;
+
+  /* A wash barely off the surface — the fill on inert chips and slots that
+   * are outlined rather than raised. It is ink-coloured, not white: on a
+   * light surface a white wash is nothing at all. */
+  --c-wash: rgba(0, 0, 0, 0.025);
+  --c-wash-strong: rgba(0, 0, 0, 0.07);
+
+  /* Semantic hues. Four roles, not a palette: `good` is a healthy reading
+   * or a read-only statement, `warn` is caution and armed writes, `hot` is
+   * the top step of a cost ramp whose middle step is `warn`, `bad` is an
+   * error or a destructive action. `-strong` is the emphasis step, for text
+   * sitting on that hue's own tinted panel.
+   *
+   * Every one of these is re-stepped per theme rather than flipped. The
+   * dark steps are Tailwind's 200-400 — pale, saturated, built for a dark
+   * ground, and 1.7:1 on a near-white one, which is not a colour so much as
+   * a rumour. The light steps are the 600-800s. `warn` also moves off amber
+   * toward yellow on light so that it stays distinguishable from `hot`,
+   * which the two brown-ish 700 steps would not have been.
+   *
+   * Each is stepped to clear 4.5:1 at NINETY percent, not at full strength:
+   * `text-warn/90` is what this codebase actually writes, and a token that
+   * only passes opaque fails everywhere it is really used. */
+  --c-good: 4 113 82;
+  --c-good-strong: 6 95 70;
+  --c-warn: 141 86 6;
+  --c-warn-strong: 113 63 18;
+  --c-hot: 182 61 11;
+  --c-bad: 205 33 33;
+  --c-bad-strong: 153 27 27;
+
+  /* Engine badges. Whole colours rather than channels: the badge is muted
+   * by design, and the amount of muting is not the same on both grounds —
+   * a 70% tint of a pale hue disappears on white. Baking it into the token
+   * keeps the dark badge exactly as it was and lets the light one carry
+   * its own weight. */
+  --c-tag-sky: #0369a1;
+  --c-tag-rose: #be123c;
+  --c-tag-cyan: #0e7490;
+  --c-tag-violet: #6d28d9;
+  --c-tag-indigo: #4338ca;
+  --c-tag-amber: #b45309;
+  --c-tag-orange: #c2410c;
+  --c-tag-emerald: #047857;
+  --c-tag-blue: #1d4ed8;
+
+  /* Series colours, in slot order. The ORDER is the colour-blind-safety
+   * mechanism, not a matter of taste: adjacent slots are the pairs a reader
+   * has to tell apart, and this sequence is one of the orderings that clears
+   * every CVD and normal-vision separation gate against both of our
+   * surfaces. Assign by slot, never cycle, and never generate a ninth —
+   * src/shared/chartSpec.ts caps the series count for exactly this reason.
+   *
+   * Hex rather than channels: these are never used with an opacity modifier,
+   * and a chart's identity colours should be the exact validated step. */
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
+  --series-4: #eda100;
+  --series-5: #e87ba4;
+  --series-6: #008300;
+  --series-7: #4a3aa7;
+  --series-8: #e34948;
 }
 
 :root.dark,
@@ -35,12 +115,48 @@
   --c-ink-faint: 107 107 118;
   --c-accent: 127 110 242;
   --c-accent-strong: 107 86 255;
+  --c-ai: 84 215 228;
   --c-card-bg: rgba(255, 255, 255, 0.035);
   --c-card-border: rgba(255, 255, 255, 0.07);
   /* Interior rules sit at roughly a third of the strength of a real edge.
    * At full strength, a wide table reads as a wall of boxes. */
   --c-rule: rgba(255, 255, 255, 0.045);
   --c-row-alt: rgba(255, 255, 255, 0.022);
+  --c-sql-string: 125 211 160;
+  --c-sql-number: 224 164 94;
+  --c-wash: rgba(255, 255, 255, 0.02);
+  --c-wash-strong: rgba(255, 255, 255, 0.06);
+
+  --c-good: 52 211 153;
+  --c-good-strong: 110 231 183;
+  --c-warn: 251 191 36;
+  --c-warn-strong: 253 230 138;
+  --c-hot: 251 146 60;
+  --c-bad: 248 113 113;
+  --c-bad-strong: 252 165 165;
+
+  --c-tag-sky: rgb(125 211 252 / 0.75);
+  --c-tag-rose: rgb(253 164 175 / 0.75);
+  --c-tag-cyan: rgb(103 232 249 / 0.75);
+  --c-tag-violet: rgb(196 181 253 / 0.75);
+  --c-tag-indigo: rgb(165 180 252 / 0.75);
+  --c-tag-amber: rgb(252 211 77 / 0.75);
+  --c-tag-orange: rgb(253 186 116 / 0.75);
+  --c-tag-emerald: rgb(110 231 183 / 0.75);
+  --c-tag-blue: rgb(147 197 253 / 0.75);
+
+  /* The same eight hues, re-stepped for the dark surface — not an automatic
+   * flip. Four of the light steps sit under 3:1 on our light surface (the
+   * chart carries visible labels and a one-click table view for that); all
+   * eight of these clear it on the dark one. */
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --series-3: #199e70;
+  --series-4: #c98500;
+  --series-5: #d55181;
+  --series-6: #008300;
+  --series-7: #9085e9;
+  --series-8: #e66767;
 }
 
 html,
@@ -89,6 +205,54 @@ body,
   background: rgb(var(--c-accent) / 0.12);
   border-color: transparent;
   box-shadow: inset 2px 0 0 rgb(var(--c-accent));
+}
+
+/* The edit/delete drawer at the end of a sidebar row. Closed, it takes no
+ * width at all, so the pin star finishes the row 8px off the status dot
+ * rather than 56px short of it, hanging in space it is not responsible for.
+ *
+ * `0fr -> 1fr` rather than a width: a fr track animates to whatever the
+ * drawer actually holds, so a row with only a delete button opens exactly
+ * 28px and one with both opens 56px, with no number written down anywhere
+ * that a fourth control would quietly falsify. The inner element is what
+ * clips — a grid ITEM can be hidden, a track cannot — and it needs
+ * `min-width: 0` or the 0fr track resolves to min-content and never
+ * closes. */
+.row-actions {
+  display: grid;
+  grid-template-columns: 0fr;
+  transition: grid-template-columns 150ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+.row-actions > * {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  overflow: hidden;
+}
+.sidebar-row:hover .row-actions,
+.row-actions:focus-within {
+  grid-template-columns: 1fr;
+}
+
+/* The drawer slides and the icons fade — same 150ms, same curve, so it
+ * reads as one gesture rather than two. The fade lives here rather than in
+ * a `group-hover:` class because the trigger is the DRAWER's state: tab to
+ * the delete button and its neighbour has to come with it, or the open
+ * drawer holds one button and one hole. */
+.row-actions button {
+  opacity: 0;
+  transition: opacity 150ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+.sidebar-row:hover .row-actions button,
+.row-actions:focus-within button {
+  opacity: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .row-actions,
+  .row-actions button {
+    transition: none;
+  }
 }
 
 /* Zebra striping. Across 20 columns of hex ids, the eye loses the row it
@@ -152,19 +316,408 @@ body {
 .cm-stmt-line {
   box-shadow: inset 2px 0 0 var(--c-rule);
 }
+/* 0.04 was tuned against a ten-line statement, where the tint covers enough
+ * area to register. On a ONE-LINE statement the same tint is a sliver and
+ * reads as nothing at all — so the fill carries more, and the marker goes to
+ * full strength rather than half. */
 .cm-stmt-active {
-  background: rgb(var(--c-accent) / 0.04);
-  box-shadow: inset 2px 0 0 rgb(var(--c-accent) / 0.5);
+  background: rgb(var(--c-accent) / 0.10);
+  box-shadow: inset 2px 0 0 rgb(var(--c-accent));
+}
+
+/* A value standing in a placeholder — see src/renderer/paramChips.ts.
+ *
+ * A filled one is drawn in the STRING colour, because that is what it will
+ * be to the server: the chip is the value the query is about to carry, and
+ * reading the statement should feel like reading the finished query. The
+ * tint and the leading mark are what keep it honest — this is a bound
+ * parameter, not text somebody typed into the SQL.
+ *
+ * An empty one is a warning, in the same amber as an armed write: nothing
+ * will run until it is filled, and that has to be visible from across the
+ * buffer rather than discovered when a statement refuses. */
+.cm-param {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 0 5px;
+  border-radius: 3px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  /* The chip sits in a line of monospace text, so it must not change the
+   * line's height — hence no vertical padding and a border that eats into
+   * nothing. */
+  line-height: inherit;
+}
+.cm-param-mark {
+  font-style: normal;
+  font-size: 10px;
+  opacity: 0.55;
+}
+.cm-param-set {
+  background: rgb(var(--c-sql-string) / 0.10);
+  border-color: rgb(var(--c-sql-string) / 0.32);
+  color: rgb(var(--c-sql-string));
+}
+.cm-param-set:hover {
+  background: rgb(var(--c-sql-string) / 0.18);
+}
+.cm-param-none {
+  background: rgb(var(--c-warn) / 0.10);
+  border-color: rgb(var(--c-warn) / 0.38);
+  color: rgb(var(--c-warn));
+}
+.cm-param-none:hover {
+  background: rgb(var(--c-warn) / 0.18);
+}
+.cm-param:focus-visible {
+  outline: none;
+  border-color: rgb(var(--c-accent));
+  box-shadow: 0 0 0 2px rgb(var(--c-accent) / 0.28);
+}
+
+/* The read-only toggle, right after the server refused a write. The point
+ * is to connect the refusal to the control that answers it — the error says
+ * what happened, this says where to go. Three pulses and done: a control
+ * that keeps pulsing becomes furniture. */
+@keyframes attention-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgb(var(--c-accent) / 0); }
+  50% { box-shadow: 0 0 0 4px rgb(var(--c-accent) / 0.35); }
+}
+.animate-attention {
+  animation: attention-pulse 900ms ease-in-out 3;
+}
+@media (prefers-reduced-motion: reduce) {
+  .animate-attention {
+    animation: none;
+    box-shadow: 0 0 0 2px rgb(var(--c-accent) / 0.5);
+  }
 }
 
 /* Plain English typed where SQL goes is shown as a question, not as broken
  * SQL. `!important` beats the syntax highlighter, which is colouring words
  * it has no business claiming — and this lives here rather than in the
  * CodeMirror theme object because a style module may drop the flag. */
-.cm-question {
-  color: rgb(var(--c-ink-muted)) !important;
+/* Prose in the editor — including prose that opens with SELECT, which the
+ * SQL highlighter would otherwise paint as a perfectly good keyword.
+ *
+ * It has to be distinguishable from .cm-stmt-active at a glance, because the
+ * two used to be near-identical accent tints and the whole point of the
+ * marking is to say which of two DIFFERENT things ⌘↵ is about to do. So the
+ * question gets the accent as a striped edge rather than a fill: a solid bar
+ * means "this runs", stripes mean "this gets rewritten first". */
+/* A question is text you are WRITING, not something greyed out awaiting a
+ * verdict — so it gets the editor's brightest ink, and none of the syntax
+ * colouring underneath it. Highlighting "for" and "all" as reserved words in
+ * a sentence makes the editor look like it is failing to parse English,
+ * which it is not: it understood, and it is waiting for ⌘↵. Italic is the
+ * only thing separating it from SQL at the character level; the band and the
+ * gutter chip do the rest. */
+.cm-question,
+/* The descendants matter as much as the mark itself: the highlighter wraps
+ * each keyword in its own span INSIDE this one, and an explicit colour on a
+ * child beats an inherited one from the parent — `!important` or not. Which
+ * is why "all" and "for" in a sentence stayed painted as reserved words. */
+.cm-question * {
+  color: rgb(var(--c-ink)) !important;
   font-style: italic !important;
 }
+/* Quiet enough to read through. The band's job is to be noticed once, in
+ * peripheral vision; the sentence on top of it is what you are actually
+ * looking at, and stripes dark enough to see clearly are stripes you are
+ * reading through. The rail and the gutter chip carry the identification —
+ * they sit beside the text rather than under it, so they can be strong. */
 .cm-question-line {
-  background: rgb(var(--c-accent) / 0.09);
+  background: rgb(var(--c-ai) / 0.04);
+  box-shadow: inset 2px 0 0 rgb(var(--c-ai) / 0.85);
+  background-image: repeating-linear-gradient(
+    -45deg,
+    rgb(var(--c-ai) / 0.07) 0 6px,
+    transparent 6px 12px
+  );
+}
+
+/* The same flag in the margin: on a statement's first line the line number
+ * gives way to a small mark, so a question is findable from the gutter
+ * without reading the text — and so the door to changing any statement is
+ * where your eye already goes for a line.
+ *
+ * The mark is a real SVG child (see SqlEditor.tsx), positioned over the
+ * number rather than beside it; the number is still there, just not painted,
+ * so nothing about the gutter's width or alignment moves. */
+.cm-ai-gutter {
+  position: relative;
+  cursor: pointer;
+}
+.cm-ai-mark {
+  position: absolute;
+  right: 2px;
+  top: 50%;
+  margin-top: -8px;
+  width: 16px;
+  height: 16px;
+  /* Tight: the glyph, not the block, is what has to be legible — a chip
+   * this size with 3px of padding is mostly padding. */
+  padding: 2px;
+  box-sizing: border-box;
+  border-radius: 5px;
+  display: block;
+  opacity: 0;
+  transition: transform 100ms, box-shadow 100ms;
+  /* The click target is the gutter element itself — the handler in
+   * SqlEditor.tsx looks for `.cm-ai-gutter` on the event's target. */
+  pointer-events: none;
+}
+.cm-question-gutter,
+.cm-ai-gutter-active,
+.cm-ai-gutter:hover {
+  color: transparent !important;
+}
+/* Drawn as a chip, not a brighter glyph.
+ *
+ * Two rounds of raising the contrast on a 12px outline did not fix this,
+ * because contrast was never the problem: a small shape in a dark gutter
+ * reads as a texture, and no amount of violet makes a texture look like
+ * something you can press. A block with the mark inside it is a button at
+ * any size — which is what this is.
+ *
+ * Filled or tinted is the whole ladder. On the statement you happen to be
+ * in, the chip is a door you did not ask about, so it is tinted: present,
+ * legible, not competing with the query. It fills in only where it has
+ * earned the attention — under the pointer, and on a question, where it is
+ * reporting a state rather than offering one. */
+.cm-ai-gutter-active .cm-ai-mark {
+  opacity: 1;
+  background: rgb(var(--c-ai) / 0.16);
+  fill: rgb(var(--c-ai));
+}
+/* Order matters: hover has to be able to override the resting state above,
+   and both are one class deep. */
+.cm-question-gutter .cm-ai-mark,
+.cm-ai-gutter:hover .cm-ai-mark {
+  opacity: 1;
+  background: rgb(var(--c-ai));
+  fill: rgb(var(--c-surface));
+}
+.cm-ai-gutter:hover .cm-ai-mark {
+  transform: scale(1.08);
+}
+
+/* The same mark at text size, on the controls that hand work to a model.
+ * Tinted rather than inherited, so a plain button carries the signal without
+ * having to shout; on hover the button fills with the accent and the mark
+ * goes with it. */
+.ai-spark {
+  fill: rgb(var(--c-ai));
+}
+button:hover > .ai-spark {
+  fill: currentColor;
+}
+
+/* The box that asks for a change, in the same hue as the mark that opened
+ * it. Written here rather than as accent utilities: this belongs to the AI
+ * family, and `--c-ai` is where that family is tuned. */
+.ai-box {
+  border: 1px solid rgb(var(--c-ai) / 0.45);
+  background: rgb(var(--c-ai) / 0.07);
+}
+.ai-btn {
+  background: rgb(var(--c-ai));
+  color: rgb(var(--c-surface));
+}
+.ai-btn:hover:not(:disabled) {
+  background: rgb(var(--c-ai) / 0.85);
+}
+
+/* No CLI, no door: the mark stops being a button when there is nothing
+ * behind it, and the question's own mark goes grey with its band. */
+.no-ai .cm-question-gutter .cm-ai-mark {
+  background: rgb(var(--c-ink-faint)) !important;
+  fill: rgb(var(--c-surface)) !important;
+}
+.no-ai .cm-ai-gutter {
+  cursor: default;
+}
+.no-ai .cm-ai-gutter-active .cm-ai-mark,
+.no-ai .cm-ai-gutter:hover .cm-ai-mark {
+  opacity: 0;
+  box-shadow: none;
+  transform: none;
+}
+.no-ai .cm-ai-gutter-active,
+.no-ai .cm-ai-gutter:hover {
+  color: rgb(var(--c-ink-faint)) !important;
+}
+
+/* Being turned into SQL right now.
+ *
+ * The stripes were already there, so the work is shown by MOVING them —
+ * nothing new appears, the band you are looking at simply starts marching.
+ * They also darken for the duration: at rest the pattern is tuned to be read
+ * through, and something that faint cannot carry motion.
+ *
+ * 16.97px is one full period of the pattern along x — 12px of pattern at
+ * 45 degrees — so the loop has no seam. */
+@keyframes cm-question-march {
+  to {
+    background-position: 16.97px 0;
+  }
+}
+.cm-translating .cm-question-line {
+  background-image: repeating-linear-gradient(
+    -45deg,
+    rgb(var(--c-ai) / 0.16) 0 6px,
+    transparent 6px 12px
+  );
+  animation: cm-question-march 900ms linear infinite;
+}
+/* Motion here is a nicety; the Run button and the band's own tint say the
+ * same thing standing still. */
+@media (prefers-reduced-motion: reduce) {
+  .cm-translating .cm-question-line {
+    animation: none;
+  }
+}
+
+/* Same text, no CLI to translate it (src/renderer/SqlEditor.tsx). The accent
+ * is a promise that a model is about to take this over; when there is none
+ * installed the only true statement left is "this is not SQL", so the marking
+ * drops to grey and stops advertising a feature this machine does not have. */
+.no-ai .cm-question-line {
+  background: rgb(var(--c-ink-faint) / 0.05);
+  background-image: repeating-linear-gradient(
+    -45deg,
+    rgb(var(--c-ink-faint) / 0.08) 0 6px,
+    transparent 6px 12px
+  );
+  box-shadow: inset 2px 0 0 rgb(var(--c-ink-faint) / 0.7);
+}
+
+/* Current flowing along a plan trace (src/renderer/PlanRiver.tsx).
+ *
+ * The dashes ARE the rows: a trace carrying ten thousand of them runs dense
+ * and quick, one carrying three runs sparse and slow, so the difference in
+ * volume is visible in motion as well as in thickness. Animated through
+ * stroke-dashoffset rather than a transform, so the wire itself stays put. */
+/* A dash pattern loops seamlessly only when the travel over one cycle is
+ * EXACTLY the pattern's period — dash plus gap. Both classes shared one
+ * keyframe that travelled 24px, which is right for `8 16` and wrong for
+ * `6 34`: the thin trace ended each cycle 16px out of phase with itself and
+ * snapped back, which reads as the animation stuttering rather than as a
+ * trace flowing. One keyframe each, each matching its own period. */
+@keyframes trace-flow {
+  to {
+    stroke-dashoffset: -24;
+  }
+}
+@keyframes trace-flow-thin {
+  to {
+    stroke-dashoffset: -40;
+  }
+}
+.trace-flow {
+  stroke-dasharray: 8 16;
+  animation: trace-flow 1.1s linear infinite;
+}
+.trace-flow-thin {
+  stroke-dasharray: 6 34;
+  animation: trace-flow-thin 1.85s linear infinite;
+}
+
+/* Heat, on a step that reads far more than it passes on. */
+@keyframes trace-heat {
+  0%, 100% { opacity: 0.10; }
+  50% { opacity: 0.26; }
+}
+.trace-heat {
+  animation: trace-heat 2.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .trace-flow,
+  .trace-flow-thin,
+  .trace-heat {
+    animation: none;
+  }
+  .trace-flow,
+  .trace-flow-thin {
+    stroke-dasharray: none;
+  }
+}
+
+/* Plan bars draw themselves in. It is not decoration: the eye follows the
+ * amber bar all the way across and then watches the green one stop almost
+ * immediately, which is the entire comparison, told in the order it happens. */
+@keyframes bar-grow {
+  from {
+    transform: scaleX(0);
+  }
+}
+.bar-grow {
+  transform-origin: left center;
+  animation: bar-grow 620ms cubic-bezier(0.2, 0, 0.3, 1);
+}
+@media (prefers-reduced-motion: reduce) {
+  .bar-grow {
+    animation: none;
+  }
+}
+
+/* ── Strain, in the plan river (src/renderer/PlanRiver.tsx) ─────────────
+ *
+ * Three motions, and each one has to MEAN something or it is decoration on
+ * a diagnostic. Duration carries the magnitude in all three: the numbers
+ * are already printed, so what motion adds is a sense of how hard the
+ * server is working, felt rather than read.
+ */
+
+/* Rows leaving the query. At a step that reads 28,616 and passes on 143,
+ * the arithmetic is on the label and the LOSS is here: flecks peeling out
+ * of the stream and fading, faster the more of them there are. This is the
+ * only animation in the view that is about waste, so nothing else moves
+ * diagonally. */
+@keyframes plan-shed {
+  0% { opacity: 0; transform: translate(0, 0); }
+  12% { opacity: 0.85; }
+  100% { opacity: 0; transform: translate(22px, 30px); }
+}
+.plan-shed {
+  animation: plan-shed var(--shed, 1.7s) cubic-bezier(0.3, 0, 0.7, 1) infinite;
+}
+
+/* The wedge those flecks fall into, breathing. Slow and shallow: it is the
+ * ground the flecks read against, and a wedge that pulsed hard would
+ * compete with the thing it is meant to frame. */
+@keyframes plan-strain {
+  0%, 100% { opacity: 0.08; }
+  50% { opacity: 0.2; }
+}
+.plan-strain {
+  animation: plan-strain var(--strain, 3s) ease-in-out infinite;
+}
+
+/* A loop, felt as repetition. The marker runs BACKWARD through the step —
+ * against the direction of everything else on the board — because that is
+ * what a nested loop does: it goes back and does it again. Its cadence is
+ * the loop count, so a step that turns 26,385 times flickers and one that
+ * turns twelve times ticks over. */
+@keyframes plan-loop {
+  0% { opacity: 0; transform: translateX(0); }
+  15% { opacity: 0.9; }
+  100% { opacity: 0; transform: translateX(calc(-1 * var(--loop-span, 40px))); }
+}
+.plan-loop {
+  animation: plan-loop var(--loop, 1.4s) linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .plan-shed,
+  .plan-loop {
+    animation: none;
+    opacity: 0.55;
+  }
+  .plan-strain {
+    animation: none;
+    opacity: 0.16;
+  }
 }

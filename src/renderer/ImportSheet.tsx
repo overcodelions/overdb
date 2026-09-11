@@ -1,12 +1,12 @@
 import { useEffect, useState } from 'react';
-import type { Connection, EnvKind } from '@shared/types';
+import type { Connection, EnvKind, SslMode } from '@shared/types';
 import { useStore } from './store';
 
 type Candidate = {
   sourceId: string; name: string; origin: string;
   engine: 'postgres' | 'mysql' | 'sqlite' | null; driver: string; env: EnvKind;
   group?: string; host?: string; port?: number; database?: string;
-  user?: string; password?: string; note?: string;
+  user?: string; hasPassword?: boolean; ssl?: SslMode; note?: string;
 };
 type Source = { id: string; label: string; detail: string; candidates: Candidate[] };
 
@@ -64,10 +64,14 @@ export function ImportSheet(): JSX.Element {
           port: c.port,
           database: c.database,
           user: c.user,
-          password: c.password,
-          secretSource: c.password ? ('stored' as const) : ('none' as const),
+          ssl: c.ssl,
+          // secretSource is derived in store.ts from whether import:commit
+          // actually finds and stores a password for this sourceId — not
+          // from hasPassword here, which could disagree if a re-scan
+          // cleared the main-side scanned map between pick and apply.
+          sourceId: c.sourceId,
         }));
-      await importConnections(items as Array<Omit<Connection, 'id'> & { password?: string }>);
+      await importConnections(items);
       setSheet(null);
     } finally {
       setBusy(false);
@@ -146,7 +150,7 @@ export function ImportSheet(): JSX.Element {
                         <span
                           className={`text-[9px] uppercase tracking-wider px-1 rounded ${
                             c.env === 'prod'
-                              ? 'bg-amber-500/10 text-amber-400/90 border border-amber-500/25'
+                              ? 'bg-warn/10 text-warn/90 border border-warn/25'
                               : 'text-ink-faint'
                           }`}
                         >

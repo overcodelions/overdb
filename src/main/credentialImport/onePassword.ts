@@ -10,12 +10,13 @@
 // waiting on a prompt can't hang a connection attempt forever.
 
 import { spawn } from 'node:child_process';
+import { execEnv } from './command';
 
 const OP_TIMEOUT_MS = 20_000;
 
 export function probeOp(): Promise<boolean> {
   return new Promise((resolve) => {
-    const child = spawn('op', ['--version'], { env: process.env });
+    const child = spawn('op', ['--version'], { env: execEnv() });
     let settled = false;
     const done = (ok: boolean) => {
       if (settled) return;
@@ -41,7 +42,7 @@ export function readOpSecret(reference: string): Promise<
     });
   }
   return new Promise((resolve) => {
-    const child = spawn('op', ['read', reference.trim()], { env: process.env });
+    const child = spawn('op', ['read', reference.trim()], { env: execEnv() });
     let stdout = '';
     let stderr = '';
     let settled = false;

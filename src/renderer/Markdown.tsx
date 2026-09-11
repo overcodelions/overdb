@@ -10,9 +10,17 @@ import { Fragment } from 'react';
 export function Markdown({
   text,
   onInsertSql,
+  onNewTabSql,
+  onExplainSql,
 }: {
   text: string;
   onInsertSql?(sql: string): void;
+  /// The same statement, in a tab of its own — for a rewrite you want to
+  /// keep beside the original rather than under it.
+  onNewTabSql?(sql: string): void;
+  /// Plan this statement without running it. A suggested rewrite is a claim
+  /// about cost, and EXPLAIN is how you check a claim about cost.
+  onExplainSql?(sql: string): void;
 }): JSX.Element {
   const blocks = splitFences(text);
   return (
@@ -25,12 +33,35 @@ export function Markdown({
                 {block.lang || 'code'}
               </span>
               <div className="flex-1" />
+              {onExplainSql && /^\s*(select|with)\b/i.test(block.text) && (
+                <button
+                  onClick={() => onExplainSql(block.text)}
+                  title="Run EXPLAIN on this statement and draw its plan — it is not executed"
+                  className="text-[10px] px-1.5 py-0.5 rounded border border-card text-ink-muted hover:text-ink hover:bg-card"
+                >
+                  Plan this
+                </button>
+              )}
+              {onNewTabSql && (
+                <button
+                  onClick={() => onNewTabSql(block.text)}
+                  title="Open this statement in a new tab, leaving the current one alone"
+                  className="text-[10px] px-1.5 py-0.5 rounded border border-card text-ink-muted hover:text-ink hover:bg-card"
+                >
+                  New tab
+                </button>
+              )}
               {onInsertSql && (
                 <button
                   onClick={() => onInsertSql(block.text)}
+                  // It appends now rather than inserting at the cursor, and
+                  // the label says so: "Insert into editor" on a button
+                  // that lands text at the bottom is a small lie you only
+                  // catch after it has cut a statement in half.
+                  title="Add to the end of this tab, under a comment saying where it came from"
                   className="text-[10px] px-1.5 py-0.5 rounded border border-card text-ink-muted hover:text-ink hover:bg-card"
                 >
-                  Insert into editor
+                  Append to tab
                 </button>
               )}
             </div>
@@ -69,24 +100,61 @@ function splitFences(text: string): Block[] {
 function Prose({ text }: { text: string }): JSX.Element {
   const lines = text.split('\n');
   const nodes: JSX.Element[] = [];
-  let bullets: string[] = [];
+  let list: { ordered: boolean; items: string[] } | null = null;
 
   const flush = () => {
-    if (!bullets.length) return;
+    if (!list) return;
+    const { ordered, items } = list;
+    list = null;
+    const cls = `pl-4 space-y-1 marker:text-ink-faint ${ordered ? 'list-decimal' : 'list-disc'}`;
+    const children = items.map((b, i) => <li key={i}>{inline(b)}</li>);
     nodes.push(
-      <ul key={`u${nodes.length}`} className="list-disc pl-4 space-y-0.5">
-        {bullets.map((b, i) => (
-          <li key={i}>{inline(b)}</li>
-        ))}
-      </ul>,
+      ordered ? (
+        <ol key={`u${nodes.length}`} className={cls}>
+          {children}
+        </ol>
+      ) : (
+        <ul key={`u${nodes.length}`} className={cls}>
+          {children}
+        </ul>
+      ),
     );
-    bullets = [];
   };
 
   for (const line of lines) {
+    // A heading is the model's own structure; rendering it as literal `##`
+    // is worse than not supporting it at all, because the marker reads as
+    // noise in the middle of the answer.
+    const heading = /^\s{0,3}(#{1,6})\s+(.*?)\s*#*$/.exec(line);
+    if (heading) {
+      flush();
+      const level = heading[1].length;
+      nodes.push(
+        <p
+          key={`h${nodes.length}`}
+          className={
+            'font-semibold text-ink pt-1 ' +
+            (level <= 2 ? 'text-[12px]' : 'text-[11px] uppercase tracking-wide text-ink-muted')
+          }
+        >
+          {inline(heading[2])}
+        </p>,
+      );
+      continue;
+    }
+    if (/^\s{0,3}([-*_])\s*\1\s*\1[-*_\s]*$/.test(line)) {
+      flush();
+      nodes.push(<hr key={`r${nodes.length}`} className="border-0 border-t border-card my-1" />);
+      continue;
+    }
     const bullet = /^\s*[-*]\s+(.*)$/.exec(line);
-    if (bullet) {
-      bullets.push(bullet[1]);
+    const numbered = /^\s*\d+[.)]\s+(.*)$/.exec(line);
+    const match = bullet ?? numbered;
+    if (match) {
+      const ordered = !bullet;
+      if (list && list.ordered !== ordered) flush();
+      if (!list) list = { ordered, items: [] };
+      list.items.push(match[1]);
       continue;
     }
     flush();

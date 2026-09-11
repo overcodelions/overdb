@@ -1,10 +1,17 @@
 import { useEffect, useMemo, useState } from 'react';
+import { ensureTerminated, formatSql } from '@shared/formatSql';
+import { suggestionBlock } from '@shared/suggestion';
 import { useStore } from './store';
+import { ERD_TAB, HEALTH_TAB, HISTORY_TAB, SLOW_TAB, useQuery } from './queryStore';
 
 interface Command {
   id: string;
   label: string;
   hint?: string;
+  /// Extra text the filter searches but never shows. A saved query is found
+  /// as often by a table in it as by the name someone gave it, and putting
+  /// the whole statement in the label would make every row unreadable.
+  keywords?: string;
   run: () => void;
 }
 
@@ -12,10 +19,16 @@ interface Command {
 export function CommandPalette(): JSX.Element | null {
   const open = useStore((s) => s.paletteOpen);
   const setOpen = useStore((s) => s.setPaletteOpen);
+  const setActiveTab = useQuery((s) => s.setActive);
   const setSheet = useStore((s) => s.setSheet);
   const select = useStore((s) => s.select);
   const connections = useStore((s) => s.connections);
   const envSets = useStore((s) => s.envSets);
+  const savedQueries = useStore((s) => s.savedQueries);
+  const selection = useStore((s) => s.selection);
+  const newBuffer = useStore((s) => s.newBuffer);
+  const setBuffer = useStore((s) => s.setBuffer);
+  const formatStyle = useStore((s) => s.settings.formatStyle);
   const [query, setQuery] = useState('');
   const [cursor, setCursor] = useState(0);
 
@@ -39,16 +52,97 @@ export function CommandPalette(): JSX.Element | null {
         hint: c.env,
         run: close(() => select({ kind: 'connection', id: c.id })),
       })),
+      // Saved queries, by name. The History pane is where you make one and
+      // where you go to browse them; this is how you get one back when you
+      // already know what it is called, which is most of the time and does
+      // not want a pane at all.
+      ...savedQueries
+        .map((q) => ({
+          q,
+          // A saved query's own connection is a hint, not a restriction —
+          // running the same statement somewhere else is the premise of the
+          // app — so wherever you are standing wins, and its own connection
+          // is only the fallback for opening one from nowhere in particular.
+          target:
+            selection?.kind === 'connection'
+              ? selection.id
+              : connections.some((c) => c.id === q.connectionId)
+                ? q.connectionId
+                : null,
+        }))
+        // Nowhere to put it: no connection selected, and the one it was
+        // written against is gone. A row that cannot do anything is worse
+        // than a row that is not there.
+        .filter((x): x is { q: (typeof savedQueries)[number]; target: string } => !!x.target)
+        .map(({ q, target }) => ({
+          id: `saved:${q.id}`,
+          label: q.name,
+          hint: 'saved',
+          keywords: `${q.sql} ${q.tags.join(' ')}`,
+          run: close(() => {
+            if (selection?.kind !== 'connection' || selection.id !== target) {
+              select({ kind: 'connection', id: target });
+            }
+            // A tab of its own, not appended to whatever you were typing:
+            // reaching for ⌘K is starting something, and the note says
+            // where it came from so it is not mistaken for your own typing
+            // a week later.
+            const key = newBuffer(target);
+            setBuffer(
+              key,
+              suggestionBlock(ensureTerminated(formatSql(q.sql, formatStyle)), `Saved · ${q.name}`),
+            );
+          }),
+        })),
+      // The standing views. They live behind tabs at the bottom of the
+      // query pane, which is the right place to have them and the wrong
+      // place to discover them.
+      {
+        id: 'view-history',
+        label: 'History and saved queries',
+        hint: 'view',
+        run: close(() => setActiveTab(HISTORY_TAB)),
+      },
+      {
+        id: 'view-health',
+        label: 'Server health',
+        hint: 'view',
+        run: close(() => setActiveTab(HEALTH_TAB)),
+      },
+      {
+        id: 'view-diagram',
+        label: 'Schema diagram',
+        hint: 'view',
+        run: close(() => setActiveTab(ERD_TAB)),
+      },
+      {
+        id: 'view-slow',
+        label: 'Slow queries',
+        hint: 'view',
+        run: close(() => setActiveTab(SLOW_TAB)),
+      },
       { id: 'new-connection', label: 'New connection…', run: close(() => setSheet({ kind: 'newConnection' })) },
       { id: 'new-envset', label: 'New environment set…', run: close(() => setSheet({ kind: 'newEnvSet' })) },
       { id: 'settings', label: 'Settings…', run: close(() => setSheet({ kind: 'settings' })) },
     ];
-  }, [connections, envSets, select, setSheet, setOpen]);
+  }, [
+    connections,
+    envSets,
+    savedQueries,
+    selection,
+    formatStyle,
+    newBuffer,
+    setBuffer,
+    select,
+    setSheet,
+    setOpen,
+    setActiveTab,
+  ]);
 
   const matches = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return commands;
-    return commands.filter((c) => c.label.toLowerCase().includes(q));
+    return commands.filter((c) => `${c.label} ${c.keywords ?? ''}`.toLowerCase().includes(q));
   }, [commands, query]);
 
   useEffect(() => {
@@ -70,7 +164,7 @@ export function CommandPalette(): JSX.Element | null {
         <input
           autoFocus
           value={query}
-          placeholder="Jump to a connection or env set…"
+          placeholder="Jump to a connection, env set or saved query…"
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === 'Escape') setOpen(false);
