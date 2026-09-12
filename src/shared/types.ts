@@ -19,7 +19,7 @@ import type { FormatStyle } from './formatSql';
 // is erased at compile time — neither module emits a runtime import of the
 // other — but it is why both sides must stay `import type`.
 import type { SlowQuerySupport, StatementStat } from './slowQueries';
-import type { HealthSnapshot } from './health';
+import type { HealthScope, HealthSnapshot } from './health';
 import type { HistoryEntry, RunRecord, SavedQuery } from './history';
 import type { SshTunnel } from './sshTunnel';
 export type { SshTunnel } from './sshTunnel';
@@ -692,7 +692,12 @@ export interface IPCInvokeMap {
   /// What the server says about itself right now. Reads statistics views
   /// only — no rows of anyone's data are touched, and it stays read-only
   /// on a prod connection regardless of arm state.
-  'perf:health': (connectionId: string) => HealthSnapshot;
+  /// `scope: 'pulse'` reads only the half that moves — sessions,
+  /// connections, cache, replication — and skips everything that walks
+  /// storage, which is what makes a one-second refresh affordable. The
+  /// storage fields come back empty; lay it over the last full reading
+  /// with `mergePulse`.
+  'perf:health': (connectionId: string, scope?: HealthScope) => HealthSnapshot;
   /// Stop someone else's statement, or close their connection.
   ///
   /// The one perf channel that ACTS. `confirm` carries the typed

@@ -272,7 +272,7 @@ wire.onMessage((req) => {
           wire.send({ kind: 'reply', id: req.id, ok: true, value: null });
           return;
         case 'health':
-          wire.send({ kind: 'reply', id: req.id, ok: true, value: await require_().health() });
+          wire.send({ kind: 'reply', id: req.id, ok: true, value: await require_().health(req.scope) });
           return;
         case 'killSession':
           wire.send({

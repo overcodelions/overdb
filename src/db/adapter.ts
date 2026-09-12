@@ -6,7 +6,7 @@
 import type { Cell, ColumnMeta, Engine, SslMode, TableInfo } from '../shared/types';
 import type { Variant } from '../shared/engines';
 import type { SlowQuerySupport, StatementStat } from '../shared/slowQueries';
-import type { HealthSnapshot } from '../shared/health';
+import type { HealthScope, HealthSnapshot } from '../shared/health';
 
 // Schema shapes live in shared/ so the renderer and the pure diffing
 // modules can use them without importing the engine layer.
@@ -189,7 +189,14 @@ export interface DbAdapter {
   /// a managed server hides some of these views from ordinary users, and a
   /// single missing permission must cost one row of the dashboard rather
   /// than all of it. What could not be read comes back in `notes`.
-  health(): Promise<HealthSnapshot>;
+  ///
+  /// `scope: 'pulse'` asks for only the half that moves second to second
+  /// and skips everything that walks storage, so a fast poll costs the
+  /// server almost nothing. The fields it did not read come back at their
+  /// empty values — an adapter must not guess at them, and the caller is
+  /// expected to lay the result over its last full reading with
+  /// `mergePulse` rather than to treat the gaps as answers.
+  health(scope?: HealthScope): Promise<HealthSnapshot>;
   /// Stop someone else's statement (`terminate: false`) or close their
   /// connection (`terminate: true`).
   ///

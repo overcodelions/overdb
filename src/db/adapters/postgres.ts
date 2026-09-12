@@ -32,7 +32,7 @@ import { tlsOptions } from '../tls';
 import { detectVariant, isRedshift } from '../../shared/engines';
 import type { Variant } from '../../shared/engines';
 import { classifyPgProbeError, PG_REDACTED } from '../../shared/slowQueries';
-import { emptyHealth, type HealthSnapshot } from '../../shared/health';
+import { emptyHealth, type HealthScope, type HealthSnapshot } from '../../shared/health';
 import type { SlowQuerySupport, StatementStat } from '../../shared/slowQueries';
 
 /// Identity for every type: hand back the wire text untouched.
@@ -863,7 +863,7 @@ export class PostgresAdapter implements DbAdapter {
   /// Redshift has none of these views under these names, and a single
   /// `Promise.all` that rejects would turn one missing permission into a
   /// blank dashboard. A failure becomes a note; the rest still renders.
-  async health(): Promise<HealthSnapshot> {
+  async health(scope: HealthScope = 'full'): Promise<HealthSnapshot> {
     const client = this.require();
     const out = emptyHealth('postgres');
     const notes: string[] = [];
@@ -886,10 +886,13 @@ export class PostgresAdapter implements DbAdapter {
     }
 
     await attempt('server', async () => {
+      // pg_database_size() adds up every file in the database directory,
+      // which is the one expensive thing in an otherwise in-memory query —
+      // so a pulse asks for everything here except the size.
       const r = await client.query(
         `select version() as v,
                 extract(epoch from (now() - pg_postmaster_start_time())) as uptime,
-                pg_database_size(current_database()) as size,
+                ${scope === 'full' ? 'pg_database_size(current_database())' : 'null'} as size,
                 current_setting('max_connections') as max_conn,
                 current_setting('superuser_reserved_connections') as reserved,
                 (select count(*) from pg_stat_activity) as used`,
@@ -964,65 +967,72 @@ export class PostgresAdapter implements DbAdapter {
       out.transactions = { committed: n(row.xact_commit) ?? 0, rolledBack: n(row.xact_rollback) ?? 0 };
     });
 
-    await attempt('table sizes', async () => {
-      const r = await client.query(
-        `select schemaname as sch, relname as tbl,
-                pg_table_size(relid) as bytes,
-                pg_indexes_size(relid) as index_bytes,
-                n_live_tup as rows
-           from pg_stat_user_tables
-          order by pg_total_relation_size(relid) desc
-          limit 50`,
-      );
-      out.tables = (r.rows as Array<Record<string, string | null>>).map((row) => ({
-        schema: String(row.sch),
-        table: String(row.tbl),
-        bytes: n(row.bytes) ?? 0,
-        indexBytes: n(row.index_bytes),
-        estimatedRows: n(row.rows),
-      }));
-    });
+    // The storage half. Every one of these stats a file per relation or
+    // reads a statistics table with a row per object, which is why a fast
+    // poll skips them and the pane keeps showing the last measurement with
+    // the time it was taken. `replication` below stays in the pulse: it is
+    // an in-memory view, and lag is live data.
+    if (scope === 'full') {
+      await attempt('table sizes', async () => {
+        const r = await client.query(
+          `select schemaname as sch, relname as tbl,
+                  pg_table_size(relid) as bytes,
+                  pg_indexes_size(relid) as index_bytes,
+                  n_live_tup as rows
+             from pg_stat_user_tables
+            order by pg_total_relation_size(relid) desc
+            limit 50`,
+        );
+        out.tables = (r.rows as Array<Record<string, string | null>>).map((row) => ({
+          schema: String(row.sch),
+          table: String(row.tbl),
+          bytes: n(row.bytes) ?? 0,
+          indexBytes: n(row.index_bytes),
+          estimatedRows: n(row.rows),
+        }));
+      });
 
-    await attempt('index usage', async () => {
-      const r = await client.query(
-        `select s.schemaname as sch, s.relname as tbl, s.indexrelname as idx,
-                s.idx_scan as scans,
-                pg_relation_size(s.indexrelid) as bytes,
-                i.indisunique as uniq
-           from pg_stat_user_indexes s
-           join pg_index i on i.indexrelid = s.indexrelid
-          where s.idx_scan = 0
-          order by pg_relation_size(s.indexrelid) desc
-          limit 50`,
-      );
-      out.unusedIndexes = (r.rows as Array<Record<string, string | null>>).map((row) => ({
-        schema: String(row.sch),
-        table: String(row.tbl),
-        index: String(row.idx),
-        scans: n(row.scans) ?? 0,
-        bytes: n(row.bytes),
-        unique: String(row.uniq) === 'true',
-      }));
-    });
+      await attempt('index usage', async () => {
+        const r = await client.query(
+          `select s.schemaname as sch, s.relname as tbl, s.indexrelname as idx,
+                  s.idx_scan as scans,
+                  pg_relation_size(s.indexrelid) as bytes,
+                  i.indisunique as uniq
+             from pg_stat_user_indexes s
+             join pg_index i on i.indexrelid = s.indexrelid
+            where s.idx_scan = 0
+            order by pg_relation_size(s.indexrelid) desc
+            limit 50`,
+        );
+        out.unusedIndexes = (r.rows as Array<Record<string, string | null>>).map((row) => ({
+          schema: String(row.sch),
+          table: String(row.tbl),
+          index: String(row.idx),
+          scans: n(row.scans) ?? 0,
+          bytes: n(row.bytes),
+          unique: String(row.uniq) === 'true',
+        }));
+      });
 
-    await attempt('scan counts', async () => {
-      const r = await client.query(
-        `select schemaname as sch, relname as tbl,
-                seq_scan, seq_tup_read, idx_scan, n_live_tup as rows
-           from pg_stat_user_tables
-          where seq_scan > 0
-          order by seq_tup_read desc
-          limit 50`,
-      );
-      out.sequentialScans = (r.rows as Array<Record<string, string | null>>).map((row) => ({
-        schema: String(row.sch),
-        table: String(row.tbl),
-        sequentialScans: n(row.seq_scan) ?? 0,
-        sequentialRowsRead: n(row.seq_tup_read) ?? 0,
-        indexScans: n(row.idx_scan) ?? 0,
-        estimatedRows: n(row.rows),
-      }));
-    });
+      await attempt('scan counts', async () => {
+        const r = await client.query(
+          `select schemaname as sch, relname as tbl,
+                  seq_scan, seq_tup_read, idx_scan, n_live_tup as rows
+             from pg_stat_user_tables
+            where seq_scan > 0
+            order by seq_tup_read desc
+            limit 50`,
+        );
+        out.sequentialScans = (r.rows as Array<Record<string, string | null>>).map((row) => ({
+          schema: String(row.sch),
+          table: String(row.tbl),
+          sequentialScans: n(row.seq_scan) ?? 0,
+          sequentialRowsRead: n(row.seq_tup_read) ?? 0,
+          indexScans: n(row.idx_scan) ?? 0,
+          estimatedRows: n(row.rows),
+        }));
+      });
+    }
 
     await attempt('replication', async () => {
       const r = await client.query(

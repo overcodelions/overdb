@@ -104,6 +104,45 @@ export interface HealthSnapshot {
   notes: string[];
 }
 
+/// How much of the dashboard to read.
+///
+/// The two halves cost wildly different amounts, and the difference is not
+/// a matter of degree. `pulse` is what changes between one second and the
+/// next — who is connected, what they are waiting on, the cache and
+/// rollback counters, how far behind the replicas are — and every one of
+/// those is a view the server keeps in memory. `full` adds the storage
+/// half: table sizes, unused indexes, scan counts, each of which stats a
+/// file per relation or walks a statistics table with a row per object.
+///
+/// That is what makes a one-second refresh defensible: it reads the pulse
+/// and nothing else. A poll that walked every relation every second would
+/// be the load, and it would show up in the slow-query pane next door.
+export type HealthScope = 'full' | 'pulse';
+
+/// Lay a pulse reading over the last full one.
+///
+/// The storage fields of a pulse snapshot are empty because it did not ask,
+/// and everywhere else in this file an empty list means "there is nothing
+/// here". Confusing the two would blank the size and index panels on every
+/// fast tick. So the last measured storage reading is carried forward, and
+/// the pane captions it with when it was actually taken — a number from a
+/// minute ago, said to be from a minute ago, beats one that flickers.
+export function mergePulse(previous: HealthSnapshot, pulse: HealthSnapshot): HealthSnapshot {
+  const notes = [...pulse.notes];
+  // Whatever the storage half had to say about itself — a missing
+  // permission, an estimate warning — belongs with the rows it is about,
+  // which are the rows being carried forward.
+  for (const note of previous.notes) if (!notes.includes(note)) notes.push(note);
+  return {
+    ...pulse,
+    databaseBytes: pulse.databaseBytes ?? previous.databaseBytes,
+    tables: previous.tables,
+    unusedIndexes: previous.unusedIndexes,
+    sequentialScans: previous.sequentialScans,
+    notes,
+  };
+}
+
 export function emptyHealth(engine: Engine): HealthSnapshot {
   return {
     engine,
