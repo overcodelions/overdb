@@ -19,6 +19,18 @@ describe('isLostSession', () => {
     }
   });
 
+  // The laptop-slept case: libuv gives us the errno and nothing else.
+  it('recognises a socket whose interface went away', () => {
+    for (const m of [
+      'read EADDRNOTAVAIL',
+      'connect EHOSTUNREACH 10.0.0.5:5432',
+      'read ECONNABORTED',
+      'socket hang up',
+    ]) {
+      expect(isLostSession(m), m).toBe(true);
+    }
+  });
+
   it('recognises a host that died under the request', () => {
     expect(isLostSession('connection host exited')).toBe(true);
     expect(isLostSession('connection is not open')).toBe(true);
@@ -34,6 +46,9 @@ describe('isLostSession', () => {
       'permission denied for table orders',
       'Query execution was interrupted',
       'closed the cursor',
+      // A host we never reached, not a session we lost.
+      'connect ECONNREFUSED 127.0.0.1:5432',
+      'getaddrinfo ENOTFOUND db.internal',
     ]) {
       expect(isLostSession(m), m).toBe(false);
     }

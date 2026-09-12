@@ -48,6 +48,9 @@ export function SlowQueryPane({
 }): JSX.Element {
   const toast = useStore((s) => s.toast);
   const askConfirm = useStore((s) => s.askConfirm);
+  /// The same 'open' | 'closed' | 'error' the sidebar dot is drawn from.
+  const state = useStore((s) => (connectionId ? s.connState[connectionId] : undefined));
+  const connected = state === 'open';
 
   const [support, setSupport] = useState<SlowQuerySupport | null>(null);
   const [stats, setStats] = useState<StatementStat[] | null>(null);
@@ -115,10 +118,13 @@ export function SlowQueryPane({
   }, [probe]);
 
   useEffect(() => {
-    if (!auto || !support?.supported) return;
+    // `connected` for the same reason as in HealthPane: main opens the
+    // connection for a read somebody asked for, so a timer left running
+    // against a connection the user closed would keep reopening it.
+    if (!auto || !support?.supported || !connected) return;
     const t = setInterval(() => void load(), 5_000);
     return () => clearInterval(t);
-  }, [auto, support, load]);
+  }, [auto, support, load, connected]);
 
   if (!connectionId) {
     return <Empty>Select a connection to see what it is spending time on.</Empty>;
