@@ -246,6 +246,17 @@ export const useQuery = create<QueryState>((set, get) => ({
       }
     }
 
+    // Then the schema the tab in front expects, before the first statement
+    // rather than after it. The preference is normally applied at the tail
+    // of loadSchemaList, which sits behind a full introspect — so on a
+    // fresh launch Run beat it, statement one ran on whatever database the
+    // session came up on, and only a second run was on the right one.
+    // Costs nothing when the session is already there.
+    const bufferKey = useStore.getState().activeBuffer[connectionId];
+    if (bufferKey) {
+      await useStore.getState().applyBufferSchema(connectionId, bufferKey);
+    }
+
     for (const [i, statement] of statements.entries()) {
       if (cancelledBatch) {
         set((st) => ({

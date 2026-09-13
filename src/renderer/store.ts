@@ -244,7 +244,7 @@ interface State {
   /// always has somewhere to type.
   closeBuffer(connectionId: string, key: string): void;
   selectBuffer(connectionId: string, key: string): void;
-  applyBufferSchema(connectionId: string, key: string): void;
+  applyBufferSchema(connectionId: string, key: string): Promise<void>;
   persistBufferState(): void;
   switchSchema(connectionId: string, name: string): Promise<void>;
   syncSchema(connectionId: string): Promise<void>;
@@ -662,14 +662,14 @@ export const useStore = create<State>((set, get) => ({
     }));
     void window.overdb.invoke('store:dropBuffer', { key });
     get().persistBufferState();
-    get().applyBufferSchema(connectionId, nextActive);
+    void get().applyBufferSchema(connectionId, nextActive);
   },
 
   selectBuffer(connectionId, key) {
     if (get().activeBuffer[connectionId] === key) return;
     set((st) => ({ activeBuffer: { ...st.activeBuffer, [connectionId]: key } }));
     get().persistBufferState();
-    get().applyBufferSchema(connectionId, key);
+    void get().applyBufferSchema(connectionId, key);
   },
 
   /// Put the session on the schema this tab expects.
@@ -678,7 +678,7 @@ export const useStore = create<State>((set, get) => ({
   /// transaction ran against the schema it started on, and moving the
   /// session out from under them to satisfy a tab switch is how you end up
   /// committing against tables you never looked at.
-  applyBufferSchema(connectionId, key) {
+  async applyBufferSchema(connectionId, key) {
     const want = get().bufferSchema[key];
     const now = get().activeSchema[connectionId];
     if (!want || want === now) return;
@@ -689,7 +689,7 @@ export const useStore = create<State>((set, get) => ({
       );
       return;
     }
-    void get().switchSchema(connectionId, want);
+    await get().switchSchema(connectionId, want);
   },
 
   persistBufferState() {
@@ -719,7 +719,10 @@ export const useStore = create<State>((set, get) => ({
       // change event and there was no way to fix it from the UI.
       const current = await window.overdb.invoke('conn:currentSchema', connectionId);
       const conn = get().connections.find((c) => c.id === connectionId);
-      const resolved = current ?? conn?.database ?? conn?.defaultSchema ?? names[0];
+      // `||`, not `??`: a connection saved with an empty database string
+      // is a connection with no database, and `??` let that empty string
+      // win over a defaultSchema that was actually set.
+      const resolved = current || conn?.database || conn?.defaultSchema || names[0];
       if (resolved) {
         set((st) => ({ activeSchema: { ...st.activeSchema, [connectionId]: resolved } }));
       }
@@ -728,7 +731,7 @@ export const useStore = create<State>((set, get) => ({
       // something else — this is the restart case, where the whole point of
       // remembering a tab's schema is that you land back on it.
       const key = get().activeBuffer[connectionId];
-      if (key) get().applyBufferSchema(connectionId, key);
+      if (key) await get().applyBufferSchema(connectionId, key);
     } catch {
       // Losing the list costs the picker, not the connection.
     }
