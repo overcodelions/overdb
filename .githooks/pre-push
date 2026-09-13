@@ -1,4 +1,5 @@
 #!/bin/sh
+hook_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 zero=0000000000000000000000000000000000000000
 while read -r local_ref local_sha remote_ref remote_sha; do
   [ "$local_sha" = "$zero" ] && continue
@@ -7,5 +8,5 @@ while read -r local_ref local_sha remote_ref remote_sha; do
   else
     revision=$remote_sha..$local_sha
   fi
-  node scripts/check-no-forbidden-identities.mjs --revision "$revision" || exit 1
+  node "$hook_dir/../scripts/check-no-forbidden-identities.mjs" --revision "$revision" || exit 1
 done
