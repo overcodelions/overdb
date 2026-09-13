@@ -36,10 +36,11 @@ jobs:
 
       - run: npm ci
 
-      # electron-builder picks GH_TOKEN up automatically and will attach
-      # the produced artifacts to the GitHub Release for the pushed tag.
-      # Code signing / notarization is intentionally not configured —
-      # users on macOS will need to right-click → Open the first time.
+      - name: Test
+        run: npm test
+
+      # Code signing / notarization is not configured yet. Release entries
+      # remain drafts so a maintainer must review the unsigned artifacts.
       - name: Build distributables
         run: npm run ${{ matrix.dist_script }}
         env:
@@ -89,6 +90,9 @@ jobs:
         with:
           draft: true
           fail_on_unmatched_files: false
+          body: |
+            > Pre-1.0 build. These binaries are not yet code-signed or notarized.
+            > macOS Gatekeeper and Windows SmartScreen may warn on first launch.
           files: |
             release/*.dmg
             release/*.zip

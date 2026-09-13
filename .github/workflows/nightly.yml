@@ -63,6 +63,9 @@ jobs:
 
       - run: npm ci
 
+      - name: Test
+        run: npm test
+
       - name: Stamp nightly version
         shell: bash
         run: |
@@ -78,7 +81,7 @@ jobs:
           "
 
       # Code signing / notarization is intentionally not configured (matches
-      # release.yml) — macOS users will need to right-click → Open the first time.
+      # release.yml); macOS Gatekeeper and Windows SmartScreen may warn.
       - name: Build distributables
         run: npm run ${{ matrix.dist_script }}
         env:
@@ -157,8 +160,8 @@ jobs:
             - Linux (x64 AppImage): [`Overdb-nightly-linux-x64.AppImage`](https://github.com/${{ github.repository }}/releases/download/nightly/Overdb-nightly-linux-x64.AppImage)
             - Linux (ARM64 AppImage): [`Overdb-nightly-linux-arm64.AppImage`](https://github.com/${{ github.repository }}/releases/download/nightly/Overdb-nightly-linux-arm64.AppImage)
 
-            > Pre-release. Not signed or notarized on macOS — Gatekeeper will warn on
-            > first launch (right-click → Open).
+            > Pre-release. These binaries are not code-signed or notarized. macOS
+            > Gatekeeper and Windows SmartScreen may warn on first launch.
           files: |
             artifacts/*
             stable/*

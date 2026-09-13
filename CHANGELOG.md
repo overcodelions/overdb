@@ -54,12 +54,13 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 - **Ask panel** — a conversational AI surface over the connected database,
   running on whichever of `claude` / `codex` / `gemini` you already have
-  logged in. No API key, no subscription. Three modes: Ask (prose questions
-  about the schema), Write SQL (describe what you want), and Explain (runs a
-  real EXPLAIN and interprets the plan). Only identifiers, types and
-  constraints are sent — never row data, enforced by `schemaContext.ts`
-  holding no adapter reference. Nothing executes on its own: proposals land
-  in the editor at your cursor, guarded by `aiNeverExecutes.test.ts`.
+  logged in. overdb requires no separate API key. Three modes: Ask (prose
+  questions about the schema), Write SQL (describe what you want), and Explain
+  (runs a real EXPLAIN and interprets the plan). Prompts may include the
+  question, conversation, schema metadata, SQL text, server errors, and plan
+  statistics; result rows and bound values are not intentionally included.
+  Nothing executes on its own: proposals land in the editor at your cursor,
+  guarded by `aiNeverExecutes.test.ts`.
 - **AI where the work is, not in a rail.** A failed query now offers the fix
   at the error: an unknown column is matched against the catalog and answered
   with no model at all (`id` -> `er_id` in one click), with an AI repair as
@@ -91,6 +92,10 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - The editor caret was near-invisible: CodeMirror styles built-ins like the
   cursor and selection layer for a light background unless the theme
   declares `dark: true`.
+- Production builds now start from an empty `dist`, exclude tests, and fail if
+  the distributable tree contains compiled tests or absolute user-home paths.
+- Public documentation now states exactly what AI prompts contain and calls
+  out DynamoDB's local read-only guard and IAM boundary.
 
 ### Changed
 - Default row limit is 1,000, not 100,000. The first thing you do with a
@@ -101,12 +106,11 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   edge made a wide table read as a wall of boxes.
 
 ### Known gaps
-- Env-set fan-out and schema drift are not built. Writes are
-  not possible at all yet: every connection is read-only.
 - The MySQL adapter is exercised against MariaDB 10.8; real MySQL 8 is
   untested. The two diverge on performance-schema views, which will matter
   for the query-performance work, not for querying.
-- Packaging is unverified. `pg` and `mysql2` are required at runtime by the
-  main and host processes rather than bundled by Vite, so the
-  electron-builder `files` list needs checking against a real `npm run dist`
-  before the first release.
+- Release binaries are not yet code-signed or notarized. Release workflow
+  output remains a draft for maintainer review; nightly builds are explicitly
+  marked as unsigned prereleases.
+- DynamoDB has no server-side read-only session. Use read-only IAM credentials
+  for a durable production boundary.

@@ -14,7 +14,7 @@ body:
     attributes:
       label: What happened?
       description: A clear description of what went wrong, and what you expected instead.
-      placeholder: When I clicked Pull on a workspace, …
+      placeholder: When I ran a query against an environment set, …
     validations:
       required: true
 
@@ -22,10 +22,10 @@ body:
     id: repro
     attributes:
       label: Steps to reproduce
-      description: Numbered steps. Include the relevant repo / workspace shape if it matters (e.g. "workspace with 3 members, one dirty").
+      description: Numbered steps. Include the database engine and relevant connection or environment-set shape, but remove credentials and private data.
       placeholder: |
-        1. Open workspace X
-        2. Click …
+        1. Open a Postgres connection
+        2. Run …
         3. …
     validations:
       required: true
@@ -57,11 +57,11 @@ body:
       placeholder: "macOS 14.5 / Windows 11 23H2 / Ubuntu 24.04"
 
   - type: input
-    id: git-version
+    id: database-version
     attributes:
-      label: git version
-      description: Output of `git --version`.
-      placeholder: "git version 2.45.0"
+      label: Database version
+      description: The engine and server version, if relevant. Do not include hostnames or credentials.
+      placeholder: "PostgreSQL 16.4 / MySQL 8.4 / SQLite 3.46"
 
   - type: textarea
     id: logs

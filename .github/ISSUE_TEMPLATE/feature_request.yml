@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        overdb is opinionated — the bar for new behavior is "does it make coordinated multi-repo work cleaner?".
+        overdb is opinionated — the bar for new behavior is "does it make working across database environments clearer?".
         That doesn't mean we won't do other things, but framing your idea against that helps it land.
 
   - type: textarea
