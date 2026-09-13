@@ -78,24 +78,30 @@ export function readPgpass(
     ? path.join(process.env.APPDATA ?? os.homedir(), 'postgresql', 'pgpass.conf')
     : path.join(os.homedir(), '.pgpass'),
 ): PgpassResult {
-  let stat: fs.Stats;
+  // The permission gate and the read must be about the same file. Checking
+  // the path's mode and then reading the path again lets a 0644 file be
+  // swapped in after the check passed (CodeQL js/file-system-race), so the
+  // mode is taken from the descriptor that is then read.
+  let fd: number;
   try {
-    stat = fs.statSync(file);
+    fd = fs.openSync(file, 'r');
   } catch {
     return { ok: false, reason: 'No ~/.pgpass found.' };
   }
-  // 0600 exactly, as libpq requires. Node reports 0o666 on Windows
-  // regardless of ACLs, so the mode gate does not apply there.
-  const mode = stat.mode & 0o777;
-  if (process.platform !== 'win32' && (mode & 0o077)) {
-    return {
-      ok: false,
-      reason: `~/.pgpass is mode ${mode.toString(8)} — libpq ignores it unless it is 0600. Fix with: chmod 600 ~/.pgpass`,
-    };
-  }
   try {
-    return { ok: true, entries: parsePgpass(fs.readFileSync(file, 'utf-8')), path: file };
+    // 0600 exactly, as libpq requires. Node reports 0o666 on Windows
+    // regardless of ACLs, so the mode gate does not apply there.
+    const mode = fs.fstatSync(fd).mode & 0o777;
+    if (process.platform !== 'win32' && (mode & 0o077)) {
+      return {
+        ok: false,
+        reason: `~/.pgpass is mode ${mode.toString(8)} — libpq ignores it unless it is 0600. Fix with: chmod 600 ~/.pgpass`,
+      };
+    }
+    return { ok: true, entries: parsePgpass(fs.readFileSync(fd, 'utf-8')), path: file };
   } catch (err) {
     return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+  } finally {
+    fs.closeSync(fd);
   }
 }

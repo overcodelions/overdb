@@ -72,6 +72,45 @@ export interface ScanRatio {
   estimatedRows: number | null;
 }
 
+/// A panel an engine fills in for itself.
+///
+/// The fixed fields of this snapshot are the questions every server-shaped
+/// engine answers the same way — who is connected, how much room is left,
+/// which tables are biggest. The rest is not shared and pretending it is
+/// produces the worst of both: a Postgres field left null on Redshift
+/// where the real answer is a different fact entirely (nothing is
+/// "unused index" on a database with no indexes; what bites you there is
+/// a table that has gone unsorted), and a renderer that grows a switch on
+/// engine and has to be edited to add one.
+///
+/// So an adapter describes its own panels and the pane draws them without
+/// knowing what it is drawing. Rows are deliberately the shape every card
+/// on this screen already has: a name, an optional second line, a number,
+/// and a bar when there is a ratio worth seeing.
+export interface HealthPanel {
+  key: string;
+  title: string;
+  rows: HealthPanelRow[];
+  /// The sentence under the rows. The same rule as everywhere in this
+  /// file: a number with nothing next to it is a number nobody acts on.
+  note?: string;
+  /// Shown in place of the rows when there are none, for a panel worth
+  /// keeping on screen to say that nothing is wrong.
+  empty?: string;
+}
+
+export interface HealthPanelRow {
+  label: string;
+  /// A second, quieter line — what the number is measured against, or
+  /// where the row came from.
+  sub?: string;
+  value: string;
+  /// 0..1, drawn as a bar. Omitted where a bar would imply a comparison
+  /// that is not there.
+  ratio?: number;
+  tone?: ReadingTone;
+}
+
 export interface HealthSnapshot {
   engine: Engine;
   capturedAt: string;
@@ -98,10 +137,56 @@ export interface HealthSnapshot {
   transactions: { committed: number; rolledBack: number } | null;
   /// Replication lag in bytes, per replica, when visible.
   replication: Array<{ client: string | null; state: string | null; lagBytes: number | null }>;
+  /// Panels this engine describes for itself — the facts that have no
+  /// equivalent on the others. Drawn after the built-in cards, in order.
+  panels: HealthPanel[];
   /// What this server would not say, and why. Shown rather than swallowed —
   /// "you need pg_stat_statements" is a more useful answer than a blank
   /// panel.
   notes: string[];
+}
+
+/// How much of the dashboard to read.
+///
+/// The two halves cost wildly different amounts, and the difference is not
+/// a matter of degree. `pulse` is what changes between one second and the
+/// next — who is connected, what they are waiting on, the cache and
+/// rollback counters, how far behind the replicas are — and every one of
+/// those is a view the server keeps in memory. `full` adds the storage
+/// half: table sizes, unused indexes, scan counts, each of which stats a
+/// file per relation or walks a statistics table with a row per object.
+///
+/// That is what makes a one-second refresh defensible: it reads the pulse
+/// and nothing else. A poll that walked every relation every second would
+/// be the load, and it would show up in the slow-query pane next door.
+export type HealthScope = 'full' | 'pulse';
+
+/// Lay a pulse reading over the last full one.
+///
+/// The storage fields of a pulse snapshot are empty because it did not ask,
+/// and everywhere else in this file an empty list means "there is nothing
+/// here". Confusing the two would blank the size and index panels on every
+/// fast tick. So the last measured storage reading is carried forward, and
+/// the pane captions it with when it was actually taken — a number from a
+/// minute ago, said to be from a minute ago, beats one that flickers.
+export function mergePulse(previous: HealthSnapshot, pulse: HealthSnapshot): HealthSnapshot {
+  const notes = [...pulse.notes];
+  // Whatever the storage half had to say about itself — a missing
+  // permission, an estimate warning — belongs with the rows it is about,
+  // which are the rows being carried forward.
+  for (const note of previous.notes) if (!notes.includes(note)) notes.push(note);
+  return {
+    ...pulse,
+    databaseBytes: pulse.databaseBytes ?? previous.databaseBytes,
+    tables: previous.tables,
+    unusedIndexes: previous.unusedIndexes,
+    sequentialScans: previous.sequentialScans,
+    // A panel is whatever its adapter made it, and an adapter that had
+    // nothing to say on a pulse did not measure it again rather than
+    // finding it empty.
+    panels: pulse.panels.length > 0 ? pulse.panels : previous.panels,
+    notes,
+  };
 }
 
 export function emptyHealth(engine: Engine): HealthSnapshot {
@@ -119,6 +204,7 @@ export function emptyHealth(engine: Engine): HealthSnapshot {
     sequentialScans: [],
     transactions: null,
     replication: [],
+    panels: [],
     notes: [],
   };
 }

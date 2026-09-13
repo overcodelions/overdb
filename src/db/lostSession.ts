@@ -14,6 +14,14 @@
 /// adapter's own "lost" flag stays clear and every later call comes back
 /// with the driver's "Can't add new command when connection is in closed
 /// state" — which is what this pattern is mostly here to catch.
+///
+/// The bare errnos are the wake-from-sleep cases. A laptop that slept, a
+/// VPN that dropped or a Wi-Fi network that changed takes the interface the
+/// socket was bound to with it, and libuv raises the failure on the driver's
+/// socket with no wording of its own — `read EADDRNOTAVAIL` and friends
+/// reach us as the in-flight query's rejection, before either adapter's
+/// 'error' listener has latched a fatal, so this list is the only thing
+/// that recognises them.
 const LOST = [
   /connection is in closed state/i,
   /can't write in closed state/i,
@@ -24,7 +32,11 @@ const LOST = [
   /connection terminated/i,
   /terminating connection due to/i,
   /client has encountered a connection error/i,
-  /ECONNRESET|EPIPE|ETIMEDOUT/,
+  // Not ECONNREFUSED, ENOTFOUND or EAI_AGAIN: those are a host we never
+  // reached rather than a session we lost, so the replacement would fail to
+  // connect too and healing would only delay an honest error.
+  /ECONNRESET|EPIPE|ETIMEDOUT|ECONNABORTED|EADDRNOTAVAIL|EHOSTUNREACH|EHOSTDOWN|ENETUNREACH|ENETDOWN/,
+  /socket hang up/i,
   /adapter is not connected/i,
   /^not connected$/i,
   // The supervisor's own vocabulary for a host that went away mid-request.

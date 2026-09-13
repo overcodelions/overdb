@@ -228,6 +228,10 @@ export function request(
   connectionId: string,
   req: HostRequestBody,
 ): Promise<unknown> {
+  // The host this request is about to go to, captured before it does, so
+  // the catch below can tell a session that is still the current one from
+  // one another request has already replaced.
+  const sent = hosts.get(connectionId);
   return send(connectionId, req).catch(async (err: Error) => {
     // A session dies for reasons that have nothing to do with the request
     // — a MySQL wait_timeout, a server restart, a laptop that slept — and
@@ -237,12 +241,23 @@ export function request(
     // arriving in the log once per background poll, forever, for a
     // connection the user could have fixed by reconnecting if anything had
     // told them to. Replace the session and ask again, once.
-    if (!healable(req) || !isLostSession(err.message)) throw err;
-    // Not while quitting, and not for a connection the user closed: the
-    // host is gone from the map the moment either happens, and reopening
-    // here would resurrect it behind their back.
+    if (!healable(req) || shuttingDown) throw err;
+    if (!isLostSession(err.message)) throw err;
+    // A dead socket kills every request on it, not one: the schema load
+    // and the schema list both run on mount, so both arrive here together.
+    // Whoever gets here second must not reopen again — `opening` only
+    // dedupes opens that overlap, so a second doOpen would close the
+    // replacement the first heal just made and reject the request it had
+    // re-issued on it, with "connection closed". Wait for an open that is
+    // still running, then ask the session we ended up with.
+    const inFlight = opening.get(connectionId);
+    if (inFlight) await inFlight.catch(() => null);
+    // Not for a connection the user closed, and not for a reopen that
+    // failed: the host is gone from the map the moment either happens, and
+    // reopening here would resurrect it behind their back.
     const host = hosts.get(connectionId);
-    if (!host || shuttingDown) throw err;
+    if (!host) throw err;
+    if (inFlight || (sent && host !== sent)) return send(connectionId, req);
     const ping = (await openConnection(connectionId, host.spec).catch(() => null)) as {
       ok?: boolean;
     } | null;

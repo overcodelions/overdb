@@ -24,9 +24,13 @@ export function readEnvFileVar(filePath: string, variable: string): EnvFileResul
   const resolved = expandHome(filePath.trim(), os.homedir());
   if (!variable.trim()) return { ok: false, error: 'No variable name is set.' };
 
-  let stat: fs.Stats;
+  // One open, then everything asked of that descriptor. Stat-ing the path
+  // and reading it again leaves a window where the size and directory
+  // checks describe a different file from the one read (CodeQL
+  // js/file-system-race) — and this one holds a credential.
+  let fd: number;
   try {
-    stat = fs.statSync(resolved);
+    fd = fs.openSync(resolved, 'r');
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     return {
@@ -34,26 +38,33 @@ export function readEnvFileVar(filePath: string, variable: string): EnvFileResul
       error:
         code === 'ENOENT'
           ? `There is no file at ${resolved}.`
-          : `Could not open ${resolved}: ${code ?? 'unknown error'}.`,
+          : code === 'EACCES'
+            ? `overdb is not allowed to read ${resolved}.`
+            : `Could not open ${resolved}: ${code ?? 'unknown error'}.`,
     };
-  }
-  if (stat.isDirectory()) return { ok: false, error: `${resolved} is a directory.` };
-  if (stat.size > MAX_BYTES) {
-    return { ok: false, error: `${resolved} is larger than 512KB — that is not an env file.` };
   }
 
   let text: string;
   try {
-    text = fs.readFileSync(resolved, 'utf-8');
+    const stat = fs.fstatSync(fd);
+    if (stat.isDirectory()) return { ok: false, error: `${resolved} is a directory.` };
+    if (stat.size > MAX_BYTES) {
+      return { ok: false, error: `${resolved} is larger than 512KB — that is not an env file.` };
+    }
+    text = fs.readFileSync(fd, 'utf-8');
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     return {
       ok: false,
       error:
-        code === 'EACCES'
-          ? `overdb is not allowed to read ${resolved}.`
-          : `Could not read ${resolved}.`,
+        code === 'EISDIR'
+          ? `${resolved} is a directory.`
+          : code === 'EACCES'
+            ? `overdb is not allowed to read ${resolved}.`
+            : `Could not read ${resolved}.`,
     };
+  } finally {
+    fs.closeSync(fd);
   }
 
   const value = parseDotenv(text)[variable.trim()];

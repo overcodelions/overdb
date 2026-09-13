@@ -20,6 +20,7 @@ import { PostgresAdapter } from '../db/adapters/postgres';
 import type { Engine } from '../shared/engines';
 import { SqliteAdapter } from '../db/adapters/sqlite';
 import type { DbAdapter } from '../db/adapter';
+import { cleanError } from './cleanError';
 import type { HostRequest, HostResponse } from './protocol';
 
 /// Electron's utilityProcess exposes `parentPort`; child_process.fork uses
@@ -186,14 +187,6 @@ async function runQuery(req: Extract<HostRequest, { op: 'run' }>): Promise<void>
   }
 }
 
-/// Driver errors carry stack noise and, on Postgres and MySQL, sometimes
-/// echo connection parameters. Main scrubs known secret values on top of
-/// this; here we just trim to the message.
-function cleanError(err: unknown): string {
-  if (err instanceof Error) return err.message;
-  return String(err);
-}
-
 wire.onMessage((req) => {
   void (async () => {
     try {
@@ -272,7 +265,7 @@ wire.onMessage((req) => {
           wire.send({ kind: 'reply', id: req.id, ok: true, value: null });
           return;
         case 'health':
-          wire.send({ kind: 'reply', id: req.id, ok: true, value: await require_().health() });
+          wire.send({ kind: 'reply', id: req.id, ok: true, value: await require_().health(req.scope) });
           return;
         case 'killSession':
           wire.send({

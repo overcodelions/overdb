@@ -29,7 +29,16 @@ export async function resolve(
     engine: conn.engine,
     host: conn.host,
     port: conn.port,
-    database: conn.database,
+    // MySQL has no schema/database distinction, so a connection's
+    // defaultSchema IS its database — but the form lets you set one
+    // without the other, and `defaultSchema` below only reaches postgres,
+    // as searchPath. A mysql connection saved with an empty database and a
+    // defaultSchema therefore came up on no database at all: every
+    // unqualified statement failed with "No database selected" while the
+    // picker showed the schema you had chosen. Same engine mapping as the
+    // supervisor's applyChosenSchema — postgres gets a search path,
+    // dynamodb a region, everything else a database.
+    database: conn.engine === 'mysql' ? conn.database || conn.defaultSchema : conn.database,
     // Redshift's IAM path issues a temporary user as well as a password,
     // and it is not the one in the form: `IAM:alice`, not `alice`. Using
     // the typed name there fails with a message about the password.

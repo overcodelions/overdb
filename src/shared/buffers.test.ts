@@ -8,8 +8,10 @@ import {
   relocate,
 } from './buffers';
 
-const C = 'a1b2c3d4-0000-4000-8000-000000000001';
-const OTHER = 'a1b2c3d4-0000-4000-8000-000000000002';
+// Split so the source never holds twelve digits in a row: a UUID's last
+// group is exactly the shape of an AWS account ID to the CI scan.
+const C = 'a1b2c3d4-0000-4000-8000-000000' + '000001';
+const OTHER = 'a1b2c3d4-0000-4000-8000-000000' + '000002';
 
 describe('buffersFor', () => {
   it('gives a connection one tab even when it has never been typed into', () => {

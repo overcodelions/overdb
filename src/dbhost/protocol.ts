@@ -5,6 +5,7 @@
 // `child_process.fork` used by the future CLI interchangeable.
 
 import type { ConnectSpec, SchemaSnapshot } from '../db/adapter';
+import type { HealthScope } from '../shared/health';
 import type { Cell, ColumnMeta } from '../shared/types';
 
 export type HostRequest =
@@ -24,7 +25,7 @@ export type HostRequest =
   | { id: string; op: 'slowQueries'; limit: number }
   | { id: string; op: 'slowQueryExample'; digest: string }
   | { id: string; op: 'resetSlowQueries' }
-  | { id: string; op: 'health' }
+  | { id: string; op: 'health'; scope?: HealthScope }
   | { id: string; op: 'killSession'; sessionId: string; terminate: boolean }
   | { id: string; op: 'close' };
 

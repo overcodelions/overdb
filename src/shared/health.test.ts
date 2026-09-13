@@ -4,6 +4,7 @@ import {
   formatBytes,
   formatDuration,
   killSupport,
+  mergePulse,
   pushSample,
   readings,
   sessionStates,
@@ -100,6 +101,50 @@ describe('readings', () => {
     const behind = health({ replication: [{ client: 'r1', state: 'streaming', lagBytes: 2 ** 30 }] });
     expect(find(behind, 'replication')?.tone).toBe('watch');
     expect(find(behind, 'replication')?.note).toMatch(/reading the past/);
+  });
+});
+
+describe('mergePulse', () => {
+  const previous: HealthSnapshot = {
+    ...emptyHealth('postgres'),
+    databaseBytes: 1024,
+    tables: [{ schema: 'public', table: 'events', bytes: 900, indexBytes: 100, estimatedRows: 9 }],
+    unusedIndexes: [
+      { schema: 'public', table: 'events', index: 'events_gin', scans: 0, bytes: 64, unique: false },
+    ],
+    sequentialScans: [
+      { schema: 'public', table: 'events', sequentialScans: 2, sequentialRowsRead: 20, indexScans: 0, estimatedRows: 9 },
+    ],
+    notes: ['pg_stat_replication needs a superuser.'],
+  };
+
+  it('keeps the storage half a pulse did not ask about', () => {
+    const pulse = { ...emptyHealth('postgres'), sessions: [session({ id: '7' })] };
+    const merged = mergePulse(previous, pulse);
+    expect(merged.tables).toEqual(previous.tables);
+    expect(merged.unusedIndexes).toEqual(previous.unusedIndexes);
+    expect(merged.sequentialScans).toEqual(previous.sequentialScans);
+    expect(merged.databaseBytes).toBe(1024);
+  });
+
+  it('takes the live half from the pulse, not from the reading it replaces', () => {
+    const merged = mergePulse(
+      { ...previous, sessions: [session({ id: '1' })], connections: { used: 4, max: 100 } },
+      {
+        ...emptyHealth('postgres'),
+        sessions: [session({ id: '2' })],
+        connections: { used: 91, max: 100 },
+        replication: [{ client: '10.0.0.2', state: 'streaming', lagBytes: 12 }],
+      },
+    );
+    expect(merged.sessions.map((s) => s.id)).toEqual(['2']);
+    expect(merged.connections?.used).toBe(91);
+    expect(merged.replication).toHaveLength(1);
+  });
+
+  it('keeps what the storage half said about itself, and says it once', () => {
+    const pulse = { ...emptyHealth('postgres'), notes: ['pg_stat_replication needs a superuser.'] };
+    expect(mergePulse(previous, pulse).notes).toEqual(['pg_stat_replication needs a superuser.']);
   });
 });
 

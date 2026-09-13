@@ -107,7 +107,13 @@ export function formatRows(
       const head = `| ${columns.map((c) => c.name).join(' | ')} |`;
       const rule = `| ${columns.map(() => '---').join(' | ')} |`;
       const body = rows.map(
-        (row) => `| ${row.map((v) => plain(v, nullAs || 'NULL').replace(/\|/g, '\\|')).join(' | ')} |`,
+        // Backslashes first. Escaping only the pipe turns a value that
+        // already ends in `\` into `\\|` — an escaped backslash followed
+        // by a live separator — and the row splits into one cell too many.
+        (row) =>
+          `| ${row
+            .map((v) => plain(v, nullAs || 'NULL').replace(/\\/g, '\\\\').replace(/\|/g, '\\|'))
+            .join(' | ')} |`,
       );
       return [head, rule, ...body].join('\n');
     }

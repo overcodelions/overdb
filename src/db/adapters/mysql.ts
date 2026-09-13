@@ -36,7 +36,7 @@ import { tlsOptions } from '../tls';
 import { detectVariant } from '../../shared/engines';
 import type { Variant } from '../../shared/engines';
 import { classifyMysqlProbeError, digestTruncated } from '../../shared/slowQueries';
-import { emptyHealth, type HealthSnapshot } from '../../shared/health';
+import { emptyHealth, type HealthScope, type HealthSnapshot } from '../../shared/health';
 import type { SlowQuerySupport, StatementStat } from '../../shared/slowQueries';
 
 /// mysql2 field type codes. Hardcoded rather than imported from
@@ -888,7 +888,7 @@ export class MysqlAdapter implements DbAdapter {
   /// `information_schema.TABLES` reports size from the storage engine's own
   /// statistics, which on InnoDB are estimates that can be badly stale —
   /// said out loud in a note rather than presented as a measurement.
-  async health(): Promise<HealthSnapshot> {
+  async health(scope: HealthScope = 'full'): Promise<HealthSnapshot> {
     const conn = this.require();
     const out = emptyHealth('mysql');
     const notes: string[] = [];
@@ -970,69 +970,76 @@ export class MysqlAdapter implements DbAdapter {
       // actually near its ceiling — the one case the number exists for.
     });
 
-    await attempt('table sizes', async () => {
-      const rows = (await exec(conn, MYSQL_TABLE_SIZE_SQL)) as Array<
-        Record<string, string | number | null>
-      >;
-      out.tables = rows.map((row) => ({
-        schema: String(row.sch),
-        table: String(row.tbl),
-        bytes: num(row.bytes) ?? 0,
-        indexBytes: num(row.index_bytes),
-        estimatedRows: num(row.est_rows),
-      }));
-      if (out.tables.length > 0) {
-        notes.push(
-          'Sizes and row counts come from InnoDB’s own statistics, which are estimates and can be well out of date. ANALYZE TABLE refreshes them.',
-        );
-      }
-      out.databaseBytes = out.tables.reduce((sum, t) => sum + t.bytes + (t.indexBytes ?? 0), 0);
-    });
+    // The storage half, skipped by a pulse. information_schema.TABLES
+    // opens every table's statistics and sys.schema_unused_indexes is a
+    // view over performance_schema — neither is something to ask a busy
+    // server for once a second. SHOW REPLICAS below is cheap and live, so
+    // it stays in the pulse.
+    if (scope === 'full') {
+      await attempt('table sizes', async () => {
+        const rows = (await exec(conn, MYSQL_TABLE_SIZE_SQL)) as Array<
+          Record<string, string | number | null>
+        >;
+        out.tables = rows.map((row) => ({
+          schema: String(row.sch),
+          table: String(row.tbl),
+          bytes: num(row.bytes) ?? 0,
+          indexBytes: num(row.index_bytes),
+          estimatedRows: num(row.est_rows),
+        }));
+        if (out.tables.length > 0) {
+          notes.push(
+            'Sizes and row counts come from InnoDB’s own statistics, which are estimates and can be well out of date. ANALYZE TABLE refreshes them.',
+          );
+        }
+        out.databaseBytes = out.tables.reduce((sum, t) => sum + t.bytes + (t.indexBytes ?? 0), 0);
+      });
 
-    await attempt('index usage', async () => {
-      // sys.schema_unused_indexes is a view over performance_schema; it is
-      // absent when performance_schema is off, which is exactly the case
-      // the attempt wrapper turns into a note.
-      const rows = (await exec(
-        conn,
-        `select object_schema as sch, object_name as tbl, index_name as idx
-           from sys.schema_unused_indexes
-          where object_schema = database()
-          limit 50`,
-      )) as Array<Record<string, string | null>>;
-      out.unusedIndexes = rows.map((row) => ({
-        schema: String(row.sch),
-        table: String(row.tbl),
-        index: String(row.idx),
-        scans: 0,
-        bytes: null,
-        unique: false,
-      }));
-    });
+      await attempt('index usage', async () => {
+        // sys.schema_unused_indexes is a view over performance_schema; it is
+        // absent when performance_schema is off, which is exactly the case
+        // the attempt wrapper turns into a note.
+        const rows = (await exec(
+          conn,
+          `select object_schema as sch, object_name as tbl, index_name as idx
+             from sys.schema_unused_indexes
+            where object_schema = database()
+            limit 50`,
+        )) as Array<Record<string, string | null>>;
+        out.unusedIndexes = rows.map((row) => ({
+          schema: String(row.sch),
+          table: String(row.tbl),
+          index: String(row.idx),
+          scans: 0,
+          bytes: null,
+          unique: false,
+        }));
+      });
 
-    await attempt('scan counts', async () => {
-      const rows = (await exec(conn, MYSQL_TABLE_READS_SQL)) as Array<
-        Record<string, string | number | null>
-      >;
-      // MySQL does not separate sequential from indexed access at the table
-      // level the way pg_stat_user_tables does. What it has is rows read
-      // per table, which answers the same question — "what is being read
-      // hardest" — and is reported as that rather than dressed up as a
-      // seq-scan count.
-      out.sequentialScans = rows.map((row) => ({
-        schema: String(row.sch),
-        table: String(row.tbl),
-        sequentialScans: num(row.read_count) ?? 0,
-        sequentialRowsRead: num(row.rows_read) ?? 0,
-        indexScans: 0,
-        estimatedRows: null,
-      }));
-      if (rows.length > 0) {
-        notes.push(
-          'MySQL counts rows read per table rather than sequential scans, so this list is “read hardest”, not “scanned end to end”.',
-        );
-      }
-    });
+      await attempt('scan counts', async () => {
+        const rows = (await exec(conn, MYSQL_TABLE_READS_SQL)) as Array<
+          Record<string, string | number | null>
+        >;
+        // MySQL does not separate sequential from indexed access at the table
+        // level the way pg_stat_user_tables does. What it has is rows read
+        // per table, which answers the same question — "what is being read
+        // hardest" — and is reported as that rather than dressed up as a
+        // seq-scan count.
+        out.sequentialScans = rows.map((row) => ({
+          schema: String(row.sch),
+          table: String(row.tbl),
+          sequentialScans: num(row.read_count) ?? 0,
+          sequentialRowsRead: num(row.rows_read) ?? 0,
+          indexScans: 0,
+          estimatedRows: null,
+        }));
+        if (rows.length > 0) {
+          notes.push(
+            'MySQL counts rows read per table rather than sequential scans, so this list is “read hardest”, not “scanned end to end”.',
+          );
+        }
+      });
+    }
 
     await attempt('replication', async () => {
       const rows = (await exec(conn, 'show replicas')) as Array<Record<string, string | number>>;

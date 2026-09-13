@@ -32,7 +32,12 @@ import { tlsOptions } from '../tls';
 import { detectVariant, isRedshift } from '../../shared/engines';
 import type { Variant } from '../../shared/engines';
 import { classifyPgProbeError, PG_REDACTED } from '../../shared/slowQueries';
-import { emptyHealth, type HealthSnapshot } from '../../shared/health';
+import {
+  emptyHealth,
+  type HealthPanel,
+  type HealthScope,
+  type HealthSnapshot,
+} from '../../shared/health';
 import type { SlowQuerySupport, StatementStat } from '../../shared/slowQueries';
 
 /// Identity for every type: hand back the wire text untouched.
@@ -78,6 +83,11 @@ export class PostgresAdapter implements DbAdapter {
   private variant: Variant = 'postgres';
   /// True between beginTransaction() and commit()/rollback().
   private txnOpen = false;
+  /// Our own pid on a Redshift cluster. STV_SESSIONS has no equivalent of
+  /// `pid = pg_backend_pid()` to select on, so it is read once per health
+  /// snapshot and compared in memory — offering to kill the session you are
+  /// reading the list through is the trap this avoids.
+  private redshiftSelfPid: string | null = null;
   /// The connection-level error that ended this session, if one did. Set
   /// from the client's own 'error' event; see `connect`.
   private fatal: Error | null = null;
@@ -863,7 +873,7 @@ export class PostgresAdapter implements DbAdapter {
   /// Redshift has none of these views under these names, and a single
   /// `Promise.all` that rejects would turn one missing permission into a
   /// blank dashboard. A failure becomes a note; the rest still renders.
-  async health(): Promise<HealthSnapshot> {
+  async health(scope: HealthScope = 'full'): Promise<HealthSnapshot> {
     const client = this.require();
     const out = emptyHealth('postgres');
     const notes: string[] = [];
@@ -878,18 +888,16 @@ export class PostgresAdapter implements DbAdapter {
       }
     };
 
-    if (this.variant === 'redshift') {
-      notes.push(
-        'Redshift is forked from PostgreSQL 8.0 and reports on itself through STV_/STL_ views instead of pg_stat_*. Nothing below applies to it.',
-      );
-      return { ...out, notes };
-    }
+    if (isRedshift(this.variant)) return this.redshiftHealth(scope);
 
     await attempt('server', async () => {
+      // pg_database_size() adds up every file in the database directory,
+      // which is the one expensive thing in an otherwise in-memory query —
+      // so a pulse asks for everything here except the size.
       const r = await client.query(
         `select version() as v,
                 extract(epoch from (now() - pg_postmaster_start_time())) as uptime,
-                pg_database_size(current_database()) as size,
+                ${scope === 'full' ? 'pg_database_size(current_database())' : 'null'} as size,
                 current_setting('max_connections') as max_conn,
                 current_setting('superuser_reserved_connections') as reserved,
                 (select count(*) from pg_stat_activity) as used`,
@@ -964,65 +972,72 @@ export class PostgresAdapter implements DbAdapter {
       out.transactions = { committed: n(row.xact_commit) ?? 0, rolledBack: n(row.xact_rollback) ?? 0 };
     });
 
-    await attempt('table sizes', async () => {
-      const r = await client.query(
-        `select schemaname as sch, relname as tbl,
-                pg_table_size(relid) as bytes,
-                pg_indexes_size(relid) as index_bytes,
-                n_live_tup as rows
-           from pg_stat_user_tables
-          order by pg_total_relation_size(relid) desc
-          limit 50`,
-      );
-      out.tables = (r.rows as Array<Record<string, string | null>>).map((row) => ({
-        schema: String(row.sch),
-        table: String(row.tbl),
-        bytes: n(row.bytes) ?? 0,
-        indexBytes: n(row.index_bytes),
-        estimatedRows: n(row.rows),
-      }));
-    });
+    // The storage half. Every one of these stats a file per relation or
+    // reads a statistics table with a row per object, which is why a fast
+    // poll skips them and the pane keeps showing the last measurement with
+    // the time it was taken. `replication` below stays in the pulse: it is
+    // an in-memory view, and lag is live data.
+    if (scope === 'full') {
+      await attempt('table sizes', async () => {
+        const r = await client.query(
+          `select schemaname as sch, relname as tbl,
+                  pg_table_size(relid) as bytes,
+                  pg_indexes_size(relid) as index_bytes,
+                  n_live_tup as rows
+             from pg_stat_user_tables
+            order by pg_total_relation_size(relid) desc
+            limit 50`,
+        );
+        out.tables = (r.rows as Array<Record<string, string | null>>).map((row) => ({
+          schema: String(row.sch),
+          table: String(row.tbl),
+          bytes: n(row.bytes) ?? 0,
+          indexBytes: n(row.index_bytes),
+          estimatedRows: n(row.rows),
+        }));
+      });
 
-    await attempt('index usage', async () => {
-      const r = await client.query(
-        `select s.schemaname as sch, s.relname as tbl, s.indexrelname as idx,
-                s.idx_scan as scans,
-                pg_relation_size(s.indexrelid) as bytes,
-                i.indisunique as uniq
-           from pg_stat_user_indexes s
-           join pg_index i on i.indexrelid = s.indexrelid
-          where s.idx_scan = 0
-          order by pg_relation_size(s.indexrelid) desc
-          limit 50`,
-      );
-      out.unusedIndexes = (r.rows as Array<Record<string, string | null>>).map((row) => ({
-        schema: String(row.sch),
-        table: String(row.tbl),
-        index: String(row.idx),
-        scans: n(row.scans) ?? 0,
-        bytes: n(row.bytes),
-        unique: String(row.uniq) === 'true',
-      }));
-    });
+      await attempt('index usage', async () => {
+        const r = await client.query(
+          `select s.schemaname as sch, s.relname as tbl, s.indexrelname as idx,
+                  s.idx_scan as scans,
+                  pg_relation_size(s.indexrelid) as bytes,
+                  i.indisunique as uniq
+             from pg_stat_user_indexes s
+             join pg_index i on i.indexrelid = s.indexrelid
+            where s.idx_scan = 0
+            order by pg_relation_size(s.indexrelid) desc
+            limit 50`,
+        );
+        out.unusedIndexes = (r.rows as Array<Record<string, string | null>>).map((row) => ({
+          schema: String(row.sch),
+          table: String(row.tbl),
+          index: String(row.idx),
+          scans: n(row.scans) ?? 0,
+          bytes: n(row.bytes),
+          unique: String(row.uniq) === 'true',
+        }));
+      });
 
-    await attempt('scan counts', async () => {
-      const r = await client.query(
-        `select schemaname as sch, relname as tbl,
-                seq_scan, seq_tup_read, idx_scan, n_live_tup as rows
-           from pg_stat_user_tables
-          where seq_scan > 0
-          order by seq_tup_read desc
-          limit 50`,
-      );
-      out.sequentialScans = (r.rows as Array<Record<string, string | null>>).map((row) => ({
-        schema: String(row.sch),
-        table: String(row.tbl),
-        sequentialScans: n(row.seq_scan) ?? 0,
-        sequentialRowsRead: n(row.seq_tup_read) ?? 0,
-        indexScans: n(row.idx_scan) ?? 0,
-        estimatedRows: n(row.rows),
-      }));
-    });
+      await attempt('scan counts', async () => {
+        const r = await client.query(
+          `select schemaname as sch, relname as tbl,
+                  seq_scan, seq_tup_read, idx_scan, n_live_tup as rows
+             from pg_stat_user_tables
+            where seq_scan > 0
+            order by seq_tup_read desc
+            limit 50`,
+        );
+        out.sequentialScans = (r.rows as Array<Record<string, string | null>>).map((row) => ({
+          schema: String(row.sch),
+          table: String(row.tbl),
+          sequentialScans: n(row.seq_scan) ?? 0,
+          sequentialRowsRead: n(row.seq_tup_read) ?? 0,
+          indexScans: n(row.idx_scan) ?? 0,
+          estimatedRows: n(row.rows),
+        }));
+      });
+    }
 
     await attempt('replication', async () => {
       const r = await client.query(
@@ -1048,8 +1063,188 @@ export class PostgresAdapter implements DbAdapter {
   /// `pg_terminate_backend` closes the connection and rolls back whatever
   /// it held, which is the bigger hammer and the one the UI makes you
   /// confirm.
+  /// The same dashboard, read out of a database that has none of the views
+  /// it is normally read from.
+  ///
+  /// Redshift forked from PostgreSQL 8.0 and never got pg_stat_*. It is not
+  /// a Postgres missing a few fields: the things worth knowing there are
+  /// different things. It has no indexes, so "the planner never chose this
+  /// index" is not a sentence about Redshift; what costs you a query is a
+  /// table that has gone unsorted, whose statistics are stale, or whose
+  /// rows landed unevenly across the slices. Those are the panels.
+  ///
+  /// Each read is attempted on its own, because which of these views a
+  /// cluster will show depends on the user's privileges — an ordinary user
+  /// sees only their own rows in STV_RECENTS, and that is worth a note
+  /// rather than an empty pane.
+  private async redshiftHealth(scope: HealthScope): Promise<HealthSnapshot> {
+    const client = this.require();
+    const out = emptyHealth('postgres');
+    const notes: string[] = [];
+
+    const attempt = async (what: string, run: () => Promise<void>): Promise<void> => {
+      try {
+        await run();
+      } catch (err) {
+        notes.push(`${what}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    };
+
+    // Whether this user is a superuser decides what half of these views
+    // will even show, so it is read first and shapes the notes rather than
+    // being discovered as a string of permission errors.
+    let superuser = false;
+
+    await attempt('server', async () => {
+      const r = await client.query(
+        `select version() as v,
+                pg_backend_pid() as pid,
+                (select usesuper from pg_user where usename = current_user) as super`,
+      );
+      const row = r.rows[0] as Record<string, string | null>;
+      out.serverVersion = row.v;
+      this.redshiftSelfPid = row.pid === null ? null : String(row.pid);
+      superuser = String(row.super) === 'true';
+    });
+
+    await attempt('sessions', async () => {
+      // STV_SESSIONS is everyone connected; STV_RECENTS is what is running.
+      // Joined rather than read separately so a session appears once, with
+      // its statement when it has one — and aggregated first because a pid
+      // can have several rows in STV_RECENTS.
+      const r = await client.query(
+        `select s.process::text as id,
+                trim(s.user_name) as usr,
+                trim(s.db_name) as db,
+                case when r.pid is null then 'idle' else 'active' end as state,
+                r.query as query,
+                datediff(second,
+                         case when r.pid is null then s.starttime else r.starttime end,
+                         getdate()) as secs
+           from stv_sessions s
+           left join (select pid, max(starttime) as starttime, min(query) as query
+                        from stv_recents
+                       where status = 'Running'
+                       group by pid) r
+             on r.pid = s.process
+          order by case when r.pid is null then 1 else 0 end, secs desc
+          limit 500`,
+      );
+      out.sessions = (r.rows as Array<Record<string, string | null>>).map((row) => ({
+        id: String(row.id),
+        user: row.usr,
+        // Redshift reports neither an application name nor the client
+        // address on STV_SESSIONS.
+        application: null,
+        clientAddress: null,
+        database: row.db,
+        state: row.state,
+        waitEvent: null,
+        query: row.query,
+        seconds: n(row.secs),
+        isSelf: this.redshiftSelfPid !== null && String(row.id) === this.redshiftSelfPid,
+        blockedBy: [],
+      }));
+      out.connections = { used: out.sessions.length, max: null };
+      notes.push(
+        'Redshift does not publish a connection ceiling to its clients; the count is the sessions it listed.',
+      );
+      // The one misreading this pane could cause on Redshift: STV_RECENTS
+      // shows a non-superuser only their OWN statements, so every other
+      // session on a busy cluster arrives here with nothing running and is
+      // drawn as idle. A screen saying "432 connected · 0 awake" on a
+      // cluster that is working hard is worse than a screen saying nothing.
+      if (!superuser && out.sessions.every((session) => session.state === 'idle')) {
+        notes.push(
+          'Every session reads as idle because STV_RECENTS shows a non-superuser only their own statements. Other people may well be running queries; this connection cannot see them.',
+        );
+      }
+    });
+
+    await attempt('locks', async () => {
+      // The Redshift spelling of pg_blocking_pids: a transaction waiting on
+      // a relation, and whoever holds the lock on it.
+      const r = await client.query(
+        `select w.pid::text as waiter, h.pid::text as holder
+           from svv_transactions w
+           join svv_transactions h
+             on h.relation = w.relation
+            and h.granted = true
+            and h.pid <> w.pid
+          where w.granted = false`,
+      );
+      const blocked = new Map<string, string[]>();
+      for (const row of r.rows as Array<Record<string, string>>) {
+        const list = blocked.get(String(row.waiter)) ?? [];
+        list.push(String(row.holder));
+        blocked.set(String(row.waiter), list);
+      }
+      for (const session of out.sessions) {
+        const holders = blocked.get(session.id);
+        if (holders) {
+          session.blockedBy = holders;
+          session.waitEvent = 'lock';
+        }
+      }
+    });
+
+    if (scope === 'full') {
+      // SVV_TABLE_INFO is superuser-only. Said once, in a sentence carrying
+      // the way out of it, rather than letting a raw "permission denied for
+      // relation svv_table_info" stand as the pane's whole explanation —
+      // and not attempted at all when it is already known it will fail,
+      // which would spend a round trip per refresh to learn nothing.
+      if (!superuser) {
+        notes.push(
+          'Table sizes, unsorted percentage and distribution skew come from SVV_TABLE_INFO, which Redshift shows to superusers only. Connecting as one, or being granted access to it, fills in the rest of this pane.',
+        );
+      }
+
+      await attempt('table sizes', async () => {
+        if (!superuser) return;
+        // SVV_TABLE_INFO is one row per table and carries, in the same
+        // row, both how big it is and the three things that make it slow.
+        const r = await client.query(
+          `select "schema" as sch, "table" as tbl, size as mb, tbl_rows as rows,
+                  unsorted, stats_off, skew_rows
+             from svv_table_info
+            order by size desc
+            limit 50`,
+        );
+        const rows = r.rows as Array<Record<string, string | null>>;
+        // `size` is a count of 1 MB blocks, not bytes.
+        out.tables = rows.map((row) => ({
+          schema: String(row.sch),
+          table: String(row.tbl),
+          bytes: (n(row.mb) ?? 0) * 1024 * 1024,
+          indexBytes: null,
+          estimatedRows: n(row.rows),
+        }));
+        out.databaseBytes = out.tables.reduce((sum, t) => sum + t.bytes, 0);
+        if (out.tables.length === 50) {
+          notes.push('Sizes cover the 50 biggest tables, so the total is a floor, not the database.');
+        }
+        out.panels = redshiftPanels(rows);
+      });
+    }
+
+    return { ...out, notes };
+  }
+
   async killSession(id: string, opts: { terminate: boolean }): Promise<{ ok: boolean; error?: string }> {
     try {
+      if (isRedshift(this.variant)) {
+        // CANCEL takes no parameters, hence the interpolation — of a number
+        // this checks, not of anything a user typed. PG_TERMINATE_BACKEND
+        // does exist there and is the only one of the pair that reports.
+        if (!/^\d+$/.test(id)) return { ok: false, error: `${id} is not a session id.` };
+        if (opts.terminate) {
+          await this.require().query(`select pg_terminate_backend(${Number(id)})`);
+        } else {
+          await this.require().query(`cancel ${Number(id)}`);
+        }
+        return { ok: true };
+      }
       const r = await this.require().query(
         opts.terminate
           ? 'select pg_terminate_backend($1::int) as ok'
@@ -1131,6 +1326,88 @@ export function sqlLiteralList(values: string[]): string {
 /// what `format_type` returns on Postgres into a bare name plus separate
 /// length and precision columns, and a bare `character varying` in the
 /// completion popup tells you nothing about what will fit.
+/// The three things that make a Redshift table slow, as panels.
+///
+/// Kept out of the adapter method and exported so the thresholds can be
+/// tested, because they are claims about Redshift rather than about
+/// layout: a table is worth vacuuming somewhere around a tenth of it being
+/// unsorted, statistics start costing you plans around a fifth stale, and
+/// skew is a ratio where 1 is even and anything approaching 2 means one
+/// slice is doing twice the work of the average.
+///
+/// Each panel is dropped entirely when nothing crosses its threshold. A
+/// card reading "nothing to report" for every table on the cluster is a
+/// card that teaches you to stop looking at this column.
+export function redshiftPanels(
+  rows: Array<Record<string, string | null>>,
+): HealthPanel[] {
+  const num = (v: string | null): number => {
+    const parsed = v === null ? NaN : Number(v);
+    return Number.isFinite(parsed) ? parsed : 0;
+  };
+  const name = (row: Record<string, string | null>): string => `${row.sch}.${row.tbl}`;
+  const panels: HealthPanel[] = [];
+
+  const unsorted = rows
+    .filter((row) => num(row.unsorted) >= 10)
+    .sort((a, b) => num(b.unsorted) - num(a.unsorted))
+    .slice(0, 8);
+  if (unsorted.length > 0) {
+    panels.push({
+      key: 'redshift-unsorted',
+      title: 'Tables gone unsorted',
+      rows: unsorted.map((row) => ({
+        label: name(row),
+        value: `${num(row.unsorted).toFixed(0)}%`,
+        ratio: Math.min(1, num(row.unsorted) / 100),
+        tone: num(row.unsorted) >= 25 ? 'bad' : 'watch',
+      })),
+      note: 'Rows written since the last VACUUM sit outside the sort key, so a query that should read one zone map reads the table. VACUUM SORT ONLY puts them back.',
+    });
+  }
+
+  const stale = rows
+    .filter((row) => num(row.stats_off) >= 20)
+    .sort((a, b) => num(b.stats_off) - num(a.stats_off))
+    .slice(0, 8);
+  if (stale.length > 0) {
+    panels.push({
+      key: 'redshift-stats',
+      title: 'Stale statistics',
+      rows: stale.map((row) => ({
+        label: name(row),
+        value: `${num(row.stats_off).toFixed(0)}%`,
+        ratio: Math.min(1, num(row.stats_off) / 100),
+        tone: num(row.stats_off) >= 50 ? 'bad' : 'watch',
+      })),
+      note: 'How far the statistics are from the current table. The planner is choosing joins from these numbers; ANALYZE refreshes them.',
+    });
+  }
+
+  const skewed = rows
+    .filter((row) => num(row.skew_rows) >= 1.5)
+    .sort((a, b) => num(b.skew_rows) - num(a.skew_rows))
+    .slice(0, 8);
+  if (skewed.length > 0) {
+    panels.push({
+      key: 'redshift-skew',
+      title: 'Distribution skew',
+      rows: skewed.map((row) => ({
+        label: name(row),
+        sub: `${(n(row.rows) ?? 0).toLocaleString()} rows`,
+        value: `${num(row.skew_rows).toFixed(1)}×`,
+        // 4 is where a slice is doing four times the average, which is
+        // where the bar should already be full rather than still climbing.
+        ratio: Math.min(1, num(row.skew_rows) / 4),
+        tone: num(row.skew_rows) >= 3 ? 'bad' : 'watch',
+      })),
+      note: 'The busiest slice against the average one. A query is only as fast as its slowest slice, so an uneven distribution key costs every scan of this table.',
+    });
+  }
+
+  return panels;
+}
+
 export function redshiftTypeName(r: Record<string, string>): string {
   const base = String(r.type_name ?? '');
   if (r.char_len != null && r.char_len !== '') return `${base}(${r.char_len})`;

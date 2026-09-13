@@ -49,6 +49,7 @@ import {
 } from './schemaCache';
 import type { QueryOrigin } from '../shared/types';
 import type { SlowQuerySupport } from '../shared/slowQueries';
+import type { HealthScope } from '../shared/health';
 
 // Dev vs prod: hit the Vite dev server only when VITE_DEV_SERVER_URL is
 // set (the dev:electron npm script sets it). Anything else — packaged
@@ -870,28 +871,38 @@ function registerIpc(): void {
     db.cancelRun(args.connectionId, args.runId),
   );
 
-  ipcMain.handle('perf:slowQuerySupport', (_e, connectionId: string) =>
-    db.request(connectionId, { op: 'slowQuerySupport' }),
-  );
+  // Every perf read opens the connection first, the same as the catalog
+  // reads above. These were the last handlers that did not: the pane is
+  // opened against a connection, so asking what a server is spending its
+  // time on IS asking for the connection — and refusing instead put
+  // "connection is not open" in the log once per poll, forever, for a pane
+  // the user was looking at. The polling itself is gated on the status dot
+  // in the renderer, so a connection the user closed stays closed.
+  ipcMain.handle('perf:slowQuerySupport', async (_e, connectionId: string) => {
+    await ensureOpen(connectionId);
+    return db.request(connectionId, { op: 'slowQuerySupport' });
+  });
 
-  ipcMain.handle('perf:slowQueries', (_e, args: { connectionId: string; limit?: number }) =>
-    db.request(args.connectionId, {
+  ipcMain.handle('perf:slowQueries', async (_e, args: { connectionId: string; limit?: number }) => {
+    await ensureOpen(args.connectionId);
+    return db.request(args.connectionId, {
       op: 'slowQueries',
       // Clamped here rather than in the renderer. This read is cheap but it
       // is not free — pg_stat_statements.max defaults to 5000 — and the cap
       // is a property of what main is willing to ask a server for, not of
       // whatever the pane happens to pass.
       limit: Math.min(500, Math.max(1, args.limit ?? 100)),
-    }),
-  );
+    });
+  });
 
-  ipcMain.handle('perf:health', (_e, connectionId: string) =>
-    db.request(connectionId, { op: 'health' }),
-  );
+  ipcMain.handle('perf:health', async (_e, connectionId: string, scope?: HealthScope) => {
+    await ensureOpen(connectionId);
+    return db.request(connectionId, { op: 'health', scope });
+  });
 
   ipcMain.handle(
     'perf:killSession',
-    (
+    async (
       _e,
       args: { connectionId: string; sessionId: string; terminate: boolean; confirm?: string },
     ) => {
@@ -907,6 +918,14 @@ function registerIpc(): void {
           error: `Type ${conn.name} to ${args.terminate ? 'close a connection' : 'cancel a statement'} on a production server.`,
         };
       }
+      // After the prod guard, so a refusal never opens anything — and
+      // reported rather than thrown, because this handler answers with
+      // { ok, error } and the pane toasts what it finds there.
+      try {
+        await ensureOpen(args.connectionId);
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      }
       return db.request(args.connectionId, {
         op: 'killSession',
         sessionId: args.sessionId,
@@ -915,11 +934,22 @@ function registerIpc(): void {
     },
   );
 
-  ipcMain.handle('perf:slowQueryExample', (_e, args: { connectionId: string; digest: string }) =>
-    db.request(args.connectionId, { op: 'slowQueryExample', digest: args.digest }),
+  ipcMain.handle(
+    'perf:slowQueryExample',
+    async (_e, args: { connectionId: string; digest: string }) => {
+      await ensureOpen(args.connectionId);
+      return db.request(args.connectionId, { op: 'slowQueryExample', digest: args.digest });
+    },
   );
 
   ipcMain.handle('perf:resetSlowQueries', async (_e, connectionId: string) => {
+    // Reported rather than thrown, the same as every other failure here:
+    // this handler answers with { ok, error } and the pane toasts it.
+    try {
+      await ensureOpen(connectionId);
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
     // Re-asked rather than taken on trust. The renderer holds a copy of the
     // support answer, but it was true when the pane opened; privileges can
     // be revoked, and this is the one call here that destroys something.

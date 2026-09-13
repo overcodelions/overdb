@@ -32,7 +32,7 @@ import type {
   TableInfo,
 } from '../adapter';
 import type { Cell, CellKind, ColumnMeta } from '../../shared/types';
-import { emptyHealth, type HealthSnapshot } from '../../shared/health';
+import { emptyHealth, type HealthScope, type HealthSnapshot } from '../../shared/health';
 import type { Variant } from '../../shared/engines';
 import type { SlowQuerySupport, StatementStat } from '../../shared/slowQueries';
 
@@ -207,12 +207,18 @@ export class SqliteAdapter implements DbAdapter {
   /// — and saying that is the honest answer. What it DOES have is a file,
   /// and how big that file is (and how much of it is free pages waiting on
   /// a VACUUM) is a real thing to know.
-  async health(): Promise<HealthSnapshot> {
+  async health(scope: HealthScope = 'full'): Promise<HealthSnapshot> {
     const db = this.require();
     const out = emptyHealth('sqlite');
     const notes = [
       'SQLite runs in this process — there are no sessions, no connection ceiling and no shared cache to report on.',
     ];
+
+    // Nothing here moves second to second — there are no sessions — and
+    // the part that is worth reading walks the file. So a pulse reads
+    // nothing at all rather than re-measuring a file on every tick; the
+    // caller keeps the last full reading and says how old it is.
+    if (scope === 'pulse') return { ...out, notes };
 
     const scalar = (sql: string): number | null => {
       try {

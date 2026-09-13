@@ -28,6 +28,7 @@
 //    src/shared/dynamo.ts.
 
 import {
+  DescribeLimitsCommand,
   DescribeTableCommand,
   DynamoDBClient,
   ExecuteStatementCommand,
@@ -47,7 +48,13 @@ import type {
 } from '../adapter';
 import type { SlowQuerySupport, StatementStat } from '../../shared/slowQueries';
 import type { Cell, CellKind, ColumnMeta } from '../../shared/types';
-import { emptyHealth, type HealthSnapshot } from '../../shared/health';
+import {
+  emptyHealth,
+  formatBytes,
+  type HealthPanel,
+  type HealthScope,
+  type HealthSnapshot,
+} from '../../shared/health';
 import type { Variant } from '../../shared/engines';
 import { filterTableNames } from '../../shared/tableFilter';
 import {
@@ -74,6 +81,14 @@ import {
 /// no events table" and naming the one you meant.
 export const MAX_DESCRIBE = 250;
 const DESCRIBE_CONCURRENCY = 6;
+
+/// How many tables the health read will describe.
+///
+/// Every one is its own API call, and an account with a thousand tables
+/// would turn opening a pane into a thousand requests against the same
+/// throttle budget the user's application is spending. The cap is said out
+/// loud in the pane rather than silently shaping the list.
+const HEALTH_DESCRIBE_LIMIT = 40;
 
 /// Which tables get a describe call, in what order.
 ///
@@ -233,6 +248,112 @@ function asAttributeValue(value: unknown): AttributeValue {
     }
   }
   return convertToAttr(value, { removeUndefinedValues: true });
+}
+
+/// Bytes held by a table's global secondary indexes.
+///
+/// Separate from the table's own bytes because on DynamoDB an index is a
+/// copy of the data, not a pointer into it — a table with three GSIs can
+/// be paying for four copies of every attribute they project, and that is
+/// invisible in a column of table sizes.
+export function gsiBytes(table: Record<string, unknown>): number | null {
+  const indexes = table.GlobalSecondaryIndexes as Array<Record<string, unknown>> | undefined;
+  if (!indexes || indexes.length === 0) return null;
+  return indexes.reduce((sum, ix) => sum + Number(ix.IndexSizeBytes ?? 0), 0);
+}
+
+/// The panels DynamoDB fills in for itself.
+///
+/// Two questions the other engines have no word for. How much of the
+/// account's provisioned capacity is already spoken for — the nearest
+/// thing here to "connections against the ceiling", and the number that
+/// decides whether the next table can be created at the size it needs. And
+/// which secondary indexes are big, because a GSI is a second copy of the
+/// data that is paid for on every write to the table it hangs off.
+export function dynamoPanels(
+  tables: Array<Record<string, unknown>>,
+  limits: Record<string, number | undefined>,
+  region: string,
+): HealthPanel[] {
+  const panels: HealthPanel[] = [];
+  const provisioned = (table: Record<string, unknown>, key: 'Read' | 'Write'): number => {
+    const throughput = table.ProvisionedThroughput as Record<string, unknown> | undefined;
+    return Number(throughput?.[`${key}CapacityUnits`] ?? 0);
+  };
+
+  const read = tables.reduce((sum, t) => sum + provisioned(t, 'Read'), 0);
+  const write = tables.reduce((sum, t) => sum + provisioned(t, 'Write'), 0);
+  const onDemand = tables.filter(
+    (t) =>
+      ((t.BillingModeSummary as Record<string, unknown> | undefined)?.BillingMode ??
+        'PROVISIONED') === 'PAY_PER_REQUEST',
+  ).length;
+
+  if (limits.accountRead || limits.accountWrite) {
+    const rows = [];
+    if (limits.accountRead) {
+      rows.push({
+        label: 'Read capacity',
+        sub: `${region} account ceiling`,
+        value: `${read.toLocaleString()} of ${limits.accountRead.toLocaleString()}`,
+        ratio: read / limits.accountRead,
+        tone: ratioTone(read / limits.accountRead),
+      });
+    }
+    if (limits.accountWrite) {
+      rows.push({
+        label: 'Write capacity',
+        sub: `${region} account ceiling`,
+        value: `${write.toLocaleString()} of ${limits.accountWrite.toLocaleString()}`,
+        ratio: write / limits.accountWrite,
+        tone: ratioTone(write / limits.accountWrite),
+      });
+    }
+    panels.push({
+      key: 'dynamo-capacity',
+      title: 'Provisioned against the account',
+      rows,
+      note:
+        onDemand > 0
+          ? `Provisioned units only. ${onDemand} of these ${tables.length} tables bill per request and are not counted here — on-demand has its own, much higher, ceiling.`
+          : 'Units this account has reserved, against what it may reserve. Reaching the ceiling fails the next table or the next increase, not the next query.',
+    });
+  }
+
+  const indexes: Array<{ label: string; sub: string; bytes: number }> = [];
+  for (const table of tables) {
+    const list = table.GlobalSecondaryIndexes as Array<Record<string, unknown>> | undefined;
+    for (const ix of list ?? []) {
+      indexes.push({
+        label: String(ix.IndexName),
+        sub: `on ${String(table.TableName)}`,
+        bytes: Number(ix.IndexSizeBytes ?? 0),
+      });
+    }
+  }
+  if (indexes.length > 0) {
+    indexes.sort((a, b) => b.bytes - a.bytes);
+    const biggest = indexes.slice(0, 8);
+    const scale = Math.max(biggest[0].bytes, 1);
+    panels.push({
+      key: 'dynamo-gsi',
+      title: 'Biggest secondary indexes',
+      rows: biggest.map((ix) => ({
+        label: ix.label,
+        sub: ix.sub,
+        value: formatBytes(ix.bytes),
+        ratio: ix.bytes / scale,
+        tone: 'unknown' as const,
+      })),
+      note: 'A GSI is a second copy of the attributes it projects, written and paid for on every write to its table — not an index into the rows the way it would be elsewhere.',
+    });
+  }
+
+  return panels;
+}
+
+function ratioTone(ratio: number): 'good' | 'watch' | 'bad' {
+  return ratio > 0.9 ? 'bad' : ratio > 0.7 ? 'watch' : 'good';
 }
 
 export class DynamoAdapter implements DbAdapter {
@@ -516,18 +637,95 @@ export class DynamoAdapter implements DbAdapter {
 
   async resetSlowQueries(): Promise<void> {}
 
-  /// DynamoDB reports on itself through CloudWatch, not through its data
-  /// plane. There is no session list, no cache ratio and no scan counter to
-  /// read over this connection — so this says exactly that rather than
-  /// rendering a dashboard of zeroes.
-  async health(): Promise<HealthSnapshot> {
-    return {
-      ...emptyHealth('dynamodb'),
-      notes: [
-        'DynamoDB has no sessions, no connection ceiling and no server-side statement statistics — every client call is an independent HTTPS request.',
-        'Throughput, throttling and latency live in CloudWatch, which is a different API from the one this connection speaks.',
-      ],
+  /// What the data plane will say about itself.
+  ///
+  /// The parts of this pane that do not exist here really do not exist:
+  /// every client call is an independent HTTPS request, so there is no
+  /// session list, no connection ceiling, no cache ratio and no statement
+  /// history, and inventing a zero for any of them would be a reading
+  /// nobody took. What DOES exist is worth the two calls it costs — how
+  /// much of the account's capacity is spoken for, how big the tables are,
+  /// and which secondary indexes are carrying the weight — and that is the
+  /// difference between a pane that says "not supported" and one that
+  /// answers the question you opened it with.
+  ///
+  /// Throttling, consumed capacity and latency are deliberately absent:
+  /// they live in CloudWatch, which is a different API and a different IAM
+  /// permission, and reaching for it from here without being asked would
+  /// widen what this connection can do behind the user's back.
+  async health(scope: HealthScope = 'full'): Promise<HealthSnapshot> {
+    const out = emptyHealth('dynamodb');
+    const notes = [
+      'DynamoDB has no sessions, no connection ceiling and no server-side statement statistics — every client call is an independent HTTPS request.',
+      'Throughput, throttling and latency live in CloudWatch, which is a different API from the one this connection speaks.',
+    ];
+    // Nothing here changes between one second and the next: sizes and item
+    // counts are updated about every six hours, and a capacity ceiling
+    // changes when somebody changes it. A pulse re-reads none of it.
+    if (scope === 'pulse') return { ...out, notes };
+
+    const client = this.require();
+    const attempt = async (what: string, run: () => Promise<void>): Promise<void> => {
+      try {
+        await run();
+      } catch (err) {
+        notes.push(`${what}: ${err instanceof Error ? err.message : String(err)}`);
+      }
     };
+
+    let limits: Record<string, number | undefined> = {};
+    await attempt('account limits', async () => {
+      const res = await client.send(new DescribeLimitsCommand({}));
+      limits = {
+        accountRead: res.AccountMaxReadCapacityUnits,
+        accountWrite: res.AccountMaxWriteCapacityUnits,
+        tableRead: res.TableMaxReadCapacityUnits,
+        tableWrite: res.TableMaxWriteCapacityUnits,
+      };
+    });
+
+    await attempt('tables', async () => {
+      const names = await this.tableNames();
+      const described = names.slice(0, HEALTH_DESCRIBE_LIMIT);
+      const tables: Array<Record<string, unknown>> = [];
+      for (let i = 0; i < described.length; i += DESCRIBE_CONCURRENCY) {
+        const batch = described.slice(i, i + DESCRIBE_CONCURRENCY);
+        const results = await Promise.all(
+          batch.map((name) =>
+            client
+              .send(new DescribeTableCommand({ TableName: name }))
+              .then((res) => res.Table as unknown as Record<string, unknown> | undefined)
+              .catch(() => undefined),
+          ),
+        );
+        for (const table of results) if (table) tables.push(table);
+      }
+
+      out.tables = tables
+        .map((table) => ({
+          schema: this.region,
+          table: String(table.TableName),
+          bytes: Number(table.TableSizeBytes ?? 0),
+          indexBytes: gsiBytes(table),
+          estimatedRows: Number(table.ItemCount ?? 0),
+        }))
+        .sort((a, b) => b.bytes + (b.indexBytes ?? 0) - (a.bytes + (a.indexBytes ?? 0)));
+      out.databaseBytes = out.tables.reduce((sum, t) => sum + t.bytes + (t.indexBytes ?? 0), 0);
+      out.panels = dynamoPanels(tables, limits, this.region);
+
+      if (out.tables.length > 0) {
+        notes.push(
+          'Table sizes and item counts are updated about every six hours, so both are a recent estimate rather than a measurement of this moment.',
+        );
+      }
+      if (names.length > described.length) {
+        notes.push(
+          `Sizes cover ${described.length} of ${names.length} tables — one describe per table, and this pane will not spend a thousand requests against the throttle budget your application is using.`,
+        );
+      }
+    });
+
+    return { ...out, notes };
   }
 
   async killSession(): Promise<{ ok: boolean; error?: string }> {

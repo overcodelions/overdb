@@ -271,6 +271,12 @@ body,
 ::-webkit-scrollbar-track {
   background: transparent;
 }
+/* Where a vertical and a horizontal bar meet. Left to the engine it paints
+ * white, which in a dark pane is a lit square in the corner of every box
+ * that scrolls both ways. */
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
 ::-webkit-scrollbar-thumb {
   background: rgba(127, 127, 127, 0.25);
   border-radius: 10px;
