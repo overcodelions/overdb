@@ -14,9 +14,14 @@ Thanks for your interest. overdb is small and opinionated; the bar for new behav
 
 ```bash
 npm install
+git config core.hooksPath .githooks
 npm run dev          # Vite on :5373 + Electron
 npm test             # vitest
 ```
+
+The repository hooks reject private maintainer identities and commit-message
+trailers before commit, then scan outgoing history again before push. CI
+enforces the same policy.
 
 For live-database work, `docker run` a Postgres and a MySQL rather than pointing tests at anything you care about.
 
