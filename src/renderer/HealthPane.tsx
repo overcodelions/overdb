@@ -12,6 +12,7 @@ import {
   splitReadings,
   unusedIndexSummary,
   waitEvents,
+  type HealthPanel,
   type HealthScope,
   type HealthSnapshot,
   type ReadingTone,
@@ -341,16 +342,22 @@ export function HealthPane({
         ) : full ? (
           <div className="p-3 flex flex-col gap-3">
             {charted.length > 0 && (
-              /* Edge to edge and equal, rather than a row of cards capped at
-                 400px with the rest of a wide window left empty. The
+              /* Edge to edge and equal, rather than a row of cards capped
+                 at 400px with the rest of a wide window left empty. The
                  connection bar is the one that needs the width: its
                  threshold labels sit at the fraction they mark, and they
-                 collide with each other in a narrow card. */
+                 collide with each other in a narrow card.
+
+                 The cap on the card, rather than on the track, is for the
+                 engines that answer fewer of these: Redshift has no cache
+                 ratio and no rollback counters, and two cards sharing a
+                 wide window between them would otherwise each be a slab
+                 with a number in the corner. */
               <div className="grid grid-cols-[repeat(auto-fit,minmax(230px,1fr))] gap-2.5">
                 {charted.map((r) => (
                   <div
                     key={r.key}
-                    className="bg-card border border-card rounded-md px-3 py-2 flex flex-col min-w-0"
+                    className="bg-card border border-card rounded-md px-3 py-2 flex flex-col min-w-0 max-w-[560px]"
                   >
                     <p className="text-[10px] uppercase tracking-wide text-ink-faint">
                       {r.label}
@@ -431,6 +438,17 @@ export function HealthPane({
                       {support.note ??
                         "No client sessions, or this server did not let us read them."}
                     </Empty>
+                  ) : sessions.length === 0 ? (
+                    /* Every session there is, is filtered out. An empty
+                       table under a header saying 432 are connected reads
+                       as a broken pane; the count and the way to see them
+                       is the whole answer. */
+                    <Empty>
+                      {health.sessions.length.toLocaleString()} idle session
+                      {health.sessions.length === 1 ? " is" : "s are"} hidden.
+                      Tick <span className="text-ink">include idle</span> to see
+                      them.
+                    </Empty>
                   ) : (
                     <SessionTable
                       sessions={sessions}
@@ -507,6 +525,13 @@ export function HealthPane({
                 {unused !== null && (
                   <UnusedIndexes health={health} summary={unused} />
                 )}
+
+                {/* What this engine says about itself that the others
+                    have no word for. Drawn without knowing what it is:
+                    the adapter decided both the title and the rows. */}
+                {health.panels.map((panel) => (
+                  <PanelCard key={panel.key} panel={panel} />
+                ))}
 
                 {health.replication.length > 0 && (
                   <Replication health={health} />
@@ -589,6 +614,12 @@ export function HealthPane({
               <Empty>
                 {support.note ??
                   "No client sessions, or this server did not let us read them."}
+              </Empty>
+            ) : sessions.length === 0 ? (
+              <Empty>
+                {health.sessions.length.toLocaleString()} idle session
+                {health.sessions.length === 1 ? " is" : "s are"} hidden. Tick{" "}
+                <span className="text-ink">include idle</span> to see them.
               </Empty>
             ) : (
               <SessionTable
@@ -1102,6 +1133,60 @@ function Card({
       </div>
       <div className={bodyClass}>{children}</div>
     </div>
+  );
+}
+
+/// One of the panels an adapter described for itself.
+///
+/// Deliberately the only thing in this file that renders content it did
+/// not choose the shape of — which is what keeps an engine's own facts an
+/// adapter change rather than a renderer change.
+function PanelCard({ panel }: { panel: HealthPanel }): JSX.Element {
+  return (
+    <Card title={panel.title}>
+      {panel.rows.length === 0 ? (
+        <p className="text-[10px] text-ink-faint">
+          {panel.empty ?? "Nothing to report."}
+        </p>
+      ) : (
+        <div className="flex flex-col gap-1.5">
+          {panel.rows.map((row) => (
+            <div key={row.label} className="flex items-center gap-2">
+              <span className="flex-1 min-w-0 font-mono text-[10px] text-ink-muted">
+                <span className="block truncate" title={row.label}>
+                  {row.label}
+                </span>
+                {row.sub && (
+                  <span className="block truncate text-ink-faint">
+                    {row.sub}
+                  </span>
+                )}
+              </span>
+              {row.ratio !== undefined && (
+                <span className="w-14 shrink-0 h-[5px] rounded-full bg-wash-strong">
+                  <span
+                    className={`block h-[5px] rounded-full bg-current ${TONE[row.tone ?? "unknown"]}`}
+                    style={{
+                      width: `${Math.max(0, Math.min(1, row.ratio)) * 100}%`,
+                    }}
+                  />
+                </span>
+              )}
+              <span
+                className={`shrink-0 w-[64px] text-right tabular-nums text-[10px] ${TONE[row.tone ?? "unknown"]}`}
+              >
+                {row.value}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+      {panel.note && (
+        <p className="mt-2 text-[10px] text-ink-faint leading-snug text-pretty">
+          {panel.note}
+        </p>
+      )}
+    </Card>
   );
 }
 

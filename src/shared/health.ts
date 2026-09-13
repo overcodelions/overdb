@@ -72,6 +72,45 @@ export interface ScanRatio {
   estimatedRows: number | null;
 }
 
+/// A panel an engine fills in for itself.
+///
+/// The fixed fields of this snapshot are the questions every server-shaped
+/// engine answers the same way — who is connected, how much room is left,
+/// which tables are biggest. The rest is not shared and pretending it is
+/// produces the worst of both: a Postgres field left null on Redshift
+/// where the real answer is a different fact entirely (nothing is
+/// "unused index" on a database with no indexes; what bites you there is
+/// a table that has gone unsorted), and a renderer that grows a switch on
+/// engine and has to be edited to add one.
+///
+/// So an adapter describes its own panels and the pane draws them without
+/// knowing what it is drawing. Rows are deliberately the shape every card
+/// on this screen already has: a name, an optional second line, a number,
+/// and a bar when there is a ratio worth seeing.
+export interface HealthPanel {
+  key: string;
+  title: string;
+  rows: HealthPanelRow[];
+  /// The sentence under the rows. The same rule as everywhere in this
+  /// file: a number with nothing next to it is a number nobody acts on.
+  note?: string;
+  /// Shown in place of the rows when there are none, for a panel worth
+  /// keeping on screen to say that nothing is wrong.
+  empty?: string;
+}
+
+export interface HealthPanelRow {
+  label: string;
+  /// A second, quieter line — what the number is measured against, or
+  /// where the row came from.
+  sub?: string;
+  value: string;
+  /// 0..1, drawn as a bar. Omitted where a bar would imply a comparison
+  /// that is not there.
+  ratio?: number;
+  tone?: ReadingTone;
+}
+
 export interface HealthSnapshot {
   engine: Engine;
   capturedAt: string;
@@ -98,6 +137,9 @@ export interface HealthSnapshot {
   transactions: { committed: number; rolledBack: number } | null;
   /// Replication lag in bytes, per replica, when visible.
   replication: Array<{ client: string | null; state: string | null; lagBytes: number | null }>;
+  /// Panels this engine describes for itself — the facts that have no
+  /// equivalent on the others. Drawn after the built-in cards, in order.
+  panels: HealthPanel[];
   /// What this server would not say, and why. Shown rather than swallowed —
   /// "you need pg_stat_statements" is a more useful answer than a blank
   /// panel.
@@ -139,6 +181,10 @@ export function mergePulse(previous: HealthSnapshot, pulse: HealthSnapshot): Hea
     tables: previous.tables,
     unusedIndexes: previous.unusedIndexes,
     sequentialScans: previous.sequentialScans,
+    // A panel is whatever its adapter made it, and an adapter that had
+    // nothing to say on a pulse did not measure it again rather than
+    // finding it empty.
+    panels: pulse.panels.length > 0 ? pulse.panels : previous.panels,
     notes,
   };
 }
@@ -158,6 +204,7 @@ export function emptyHealth(engine: Engine): HealthSnapshot {
     sequentialScans: [],
     transactions: null,
     replication: [],
+    panels: [],
     notes: [],
   };
 }
