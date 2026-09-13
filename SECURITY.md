@@ -27,5 +27,10 @@ We'll acknowledge within a few days and keep you posted while we work on a fix.
 ## What overdb sends where
 
 - Every query runs directly against the database you selected, from an isolated child process. No data leaves your machine through overdb itself.
-- AI features pipe a prompt to whichever CLI you select, on stdin. That CLI inherits your shell environment (so any `*_API_KEY` / `*_TOKEN` vars in your shell are visible to it). Nothing else leaves overdb.
-- **Prompts never contain row data** — only identifiers, types, constraints, and query-plan statistics.
+- AI features pipe a prompt to whichever CLI you select, on stdin. That CLI inherits your shell environment (so any `*_API_KEY` / `*_TOKEN` vars in your shell are visible to it) and sends the prompt according to that tool's own terms and configuration.
+- Prompts can include your question, recent AI conversation, schema identifiers/types/constraints, editor or failed SQL, server error text, and query-plan statistics. Query result rows and bound parameter values are not intentionally included. SQL literals and values echoed in server errors are not redacted, so review sensitive SQL before invoking an AI action.
+
+## Read-only boundaries
+
+- Postgres and MySQL use read-only transactions, and SQLite uses the driver's read-only mode.
+- DynamoDB has no server-side read-only session. overdb blocks non-`SELECT` PartiQL locally and fails closed on unknown statements, but the durable protection is a read-only IAM policy on the credentials.

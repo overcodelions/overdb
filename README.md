@@ -18,8 +18,8 @@ The two concepts are **orthogonal** — the same connection lives in both at onc
 ### Four principles
 
 1. **Environments, not connections.** Fan a query out across an env set and get a per-connection outcome for each — never an abort on the first failure. Diff results. Detect schema drift against a baseline.
-2. **Overlay, not ownership.** Read-only by default. Enabling writes is per connection and persists, because "this is my local scratch database" is a durable fact rather than a mood — and turning it on for a `prod` connection asks you to type that connection's name, because the accident worth preventing is doing the right thing to the wrong server. Separately, a transaction is auto-commit or manual; manual holds one open across statements so a `DELETE` is reviewable before you commit, and rolls itself back after 90 seconds idle rather than leaving locks on a busy server. Read-only is enforced by the **server** (`BEGIN READ ONLY`, `START TRANSACTION READ ONLY`, SQLite's `readOnly` flag), not by parsing your SQL.
-3. **AI in the loop, on your own auth.** Ask questions in prose. NL→SQL, schema Q&A, explain-this-plan, performance advice — piped to whichever of `claude` / `codex` / `gemini` you already have installed, using your existing login. No API key, no subscription. Only identifiers, types, and plan statistics ever enter a prompt — **never your rows**. AI-proposed SQL is never executed; it lands in the editor for you to read and run.
+2. **Overlay, not ownership.** Read-only by default. Enabling writes is per connection and persists, because "this is my local scratch database" is a durable fact rather than a mood — and turning it on for a `prod` connection asks you to type that connection's name, because the accident worth preventing is doing the right thing to the wrong server. Separately, a transaction is auto-commit or manual; manual holds one open across statements so a `DELETE` is reviewable before you commit, and rolls itself back after 90 seconds idle rather than leaving locks on a busy server. Postgres, MySQL, and SQLite enforce read-only mode in the database or driver. DynamoDB has no equivalent session mode, so overdb fails closed using its local PartiQL classifier; use a read-only IAM policy as the durable boundary there.
+3. **AI in the loop, on your own auth.** Ask questions in prose. NL→SQL, schema Q&A, explain-this-plan, performance advice — piped to whichever of `claude` / `codex` / `gemini` you already have installed, using your existing login. No separate API key is required by overdb. Prompts can contain your question, recent AI conversation, schema metadata, query text, server error text, and query-plan statistics. Result rows and bound parameter values are not intentionally included, but literals already written in SQL or echoed by an error are sent verbatim. Review sensitive SQL before invoking AI. AI-proposed SQL is never executed; it lands in the editor for you to read and run.
 4. **Performance you can act on.** Not a prettier plan tree. Estimate-vs-actual as the primary signal, cross-environment plan divergence ("prod seq-scans where staging index-scans, and here's the missing index"), and what the server itself says it spends its time on.
 
 ## What's in it
@@ -47,6 +47,9 @@ Pre-v0.1, building in the open. See the CHANGELOG for what is built and what is 
 Electron + React + Tailwind + Vite + Zustand + TypeScript. Mirrors overgit's `src/{main,preload,renderer,shared}` layout, plus `src/db` (the engine layer, which never imports `electron`) and `src/dbhost` (one isolated process per open connection).
 
 ## Run it
+
+Requires Node.js 22.5 or newer. Released binaries are currently experimental and
+unsigned: macOS Gatekeeper and Windows SmartScreen may warn on first launch.
 
 ```bash
 npm install

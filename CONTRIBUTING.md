@@ -5,9 +5,9 @@ Thanks for your interest. overdb is small and opinionated; the bar for new behav
 ## Ground rules
 
 - **`src/db/` must never import `electron`.** The engine layer runs under Electron, under the CLI, and under tests. `noElectron.test.ts` enforces this and will fail your PR.
-- **Read-only is enforced by the server, never by parsing SQL.** `sqlGuard.ts` exists to give a friendly "that's a write — arm it?" prompt, not to be a security boundary. Don't let it become one.
+- **Read-only is enforced by the server or driver wherever the engine supports it.** `sqlGuard.ts` exists to give a friendly "that's a write — arm it?" prompt, not to be a security boundary. DynamoDB is the explicit exception: it has no read-only session, so the adapter fails closed locally and a read-only IAM policy is the durable boundary.
 - **Nothing executes SQL that the user didn't type or click.** AI output is a proposal that lands in the editor. There is no execute path from the AI layer, and a test asserts it.
-- **Row data never enters an AI prompt.** Identifiers, types, constraints, and plan statistics only.
+- **Query results and bound values must never enter an AI prompt.** Prompts do intentionally include user questions, recent AI conversation, schema metadata, SQL text, server errors, and plan statistics. Do not broaden that set without updating `SECURITY.md` and the UI disclosure.
 - New behavior needs a test. Pure logic (`src/shared/`) should be testable without a database.
 
 ## Getting set up

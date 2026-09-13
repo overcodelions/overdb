@@ -2,8 +2,16 @@ node_modules/
 dist/
 coverage/
 release/
-docs/
 .mender/
+
+# Local configuration may contain database credentials or provider tokens.
+.env
+.env.*
+!.env.example
+
+# Local design working files; published documentation can otherwise live in docs/.
+docs/PLAN.md
+docs/design/
 
 *.log
 npm-debug.log*

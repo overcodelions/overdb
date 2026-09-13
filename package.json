@@ -1,6 +1,7 @@
 {
   "name": "overdb",
   "version": "0.0.1",
+  "private": true,
   "description": "A multi-environment database client. Query, diff, and monitor the same database across local, staging, and prod at once.",
   "license": "Apache-2.0",
   "author": "Lionel Farr <lionel@codelionsllc.com>",
@@ -17,6 +18,13 @@
     "url": "https://github.com/overcodelions/overdb/issues"
   },
   "main": "dist/main/index.js",
+  "files": [
+    "dist/",
+    "build/",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
   "productName": "Overdb",
   "engines": {
     "node": ">=22.5"
@@ -26,10 +34,11 @@
     "dev:renderer": "vite",
     "dev:tsc": "tsc -p tsconfig.main.json --watch --preserveWatchOutput",
     "dev:electron": "wait-on http://localhost:5373 dist/main/index.js && cross-env VITE_DEV_SERVER_URL=http://localhost:5373 electron .",
-    "build": "npm run build:main && npm run build:renderer",
-    "build:main": "tsc -p tsconfig.main.json",
+    "build": "npm run build:main && npm run build:renderer && npm run check:dist",
+    "build:main": "node scripts/clean-dist.mjs && tsc -p tsconfig.main.json",
     "build:renderer": "vite build",
-    "start": "npm run build && electron .",
+    "check:dist": "node scripts/check-dist.mjs",
+    "start": "electron .",
     "dist": "npm run build && electron-builder",
     "dist:mac": "npm run build && electron-builder --mac",
     "dist:win": "npm run build && electron-builder --win",
@@ -47,7 +56,12 @@
       "buildResources": "build"
     },
     "files": [
-      "dist/**/*",
+      "dist/main/**/*",
+      "dist/preload/**/*",
+      "dist/shared/**/*",
+      "dist/db/**/*",
+      "dist/dbhost/**/*",
+      "dist/renderer/**/*",
       "package.json",
       "!**/*.map"
     ],
@@ -120,7 +134,7 @@
     "tailwindcss": "^3.4.16",
     "typescript": "^6.0.3",
     "vite": "^6.0.3",
-    "vitest": "4.1.7",
+    "vitest": "4.1.11",
     "wait-on": "^9.0.10"
   },
   "dependencies": {
