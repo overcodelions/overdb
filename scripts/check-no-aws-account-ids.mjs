@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { execFileSync } from 'node:child_process';
-import { lstatSync, readFileSync, readlinkSync } from 'node:fs';
+import { closeSync, constants, openSync, readFileSync, readlinkSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
 const ACCOUNT_ID = /(^|[^0-9])([0-9]{12})(?![0-9])/g;
@@ -46,6 +46,27 @@ function repositoryFiles() {
   return output.toString('utf8').split('\0').filter(Boolean);
 }
 
+// Read a file's bytes, or a symlink's target, without checking first and
+// reading second. The open itself decides: O_NOFOLLOW refuses a symlink
+// with ELOOP, so the same syscall that would read the file is the one that
+// says it is a link, and nothing can be swapped in between (CodeQL
+// js/file-system-race). Windows has no O_NOFOLLOW; there the flag is 0 and
+// symlinks are not how a checkout stores links anyway.
+function readEntry(file) {
+  let fd;
+  try {
+    fd = openSync(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  } catch (err) {
+    if (err.code === 'ELOOP' || err.code === 'EMLINK') return readlinkSync(file);
+    throw err;
+  }
+  try {
+    return readFileSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
 export function scanRepository() {
   let count = 0;
 
@@ -59,8 +80,7 @@ export function scanRepository() {
       );
     }
 
-    const stat = lstatSync(file);
-    const contents = stat.isSymbolicLink() ? readlinkSync(file) : readFileSync(file);
+    const contents = readEntry(file);
     for (const finding of findAwsAccountIds(contents)) {
       count += 1;
       console.error(
