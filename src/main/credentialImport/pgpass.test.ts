@@ -36,7 +36,10 @@ describe('parsePgpass', () => {
 
 describe('readPgpass on Windows', () => {
   it('ignores the mode gate, since Node reports 0o666 on Windows regardless of ACLs', () => {
-    const file = path.join(os.tmpdir(), `pgpass-win-${Date.now()}`);
+    // A directory only this process can enter, rather than a guessable name
+    // straight in the shared temp dir (CodeQL js/insecure-temporary-file).
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pgpass-win-'));
+    const file = path.join(dir, 'pgpass.conf');
     fs.writeFileSync(file, 'localhost:5432:app:me:secret\n', { mode: 0o644 });
     const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
     Object.defineProperty(process, 'platform', { value: 'win32' });
@@ -44,7 +47,7 @@ describe('readPgpass on Windows', () => {
       expect(readPgpass(file)).toMatchObject({ ok: true });
     } finally {
       Object.defineProperty(process, 'platform', platform);
-      fs.unlinkSync(file);
+      fs.rmSync(dir, { recursive: true, force: true });
     }
   });
 });
@@ -77,5 +80,24 @@ describe('scanEnvironment', () => {
       SOME_OTHER: 'postgres://me@h/nope',
     } as NodeJS.ProcessEnv);
     expect(found.map((f) => f.variable)).toEqual(['ANALYTICS_DATABASE_URL', 'DATABASE_URL']);
+  });
+});
+
+describe.skipIf(process.platform === 'win32')('readPgpass mode gate', () => {
+  it('refuses a file libpq would ignore, and reads it once it is 0600', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pgpass-mode-'));
+    const file = path.join(dir, '.pgpass');
+    try {
+      fs.writeFileSync(file, 'localhost:5432:app:me:secret\n', { mode: 0o644 });
+      fs.chmodSync(file, 0o644);
+      const refused = readPgpass(file);
+      expect(refused.ok).toBe(false);
+      expect(!refused.ok && refused.reason).toContain('chmod 600');
+
+      fs.chmodSync(file, 0o600);
+      expect(readPgpass(file)).toMatchObject({ ok: true, entries: [{ user: 'me' }] });
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

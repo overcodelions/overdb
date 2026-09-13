@@ -150,3 +150,12 @@ describe('markdown', () => {
     expect(formatRows([col('a', 'text')], [['a|b']], 'markdown')).toContain('a\\|b');
   });
 });
+
+describe('markdown escaping', () => {
+  it('escapes a backslash before the pipe, so a value cannot end a cell early', () => {
+    // Escaping only the pipe turned `\|` in a value into `\\|`: an escaped
+    // backslash followed by a live separator.
+    const out = formatRows([col('a', 'text')], [['back\\slash|pipe']], 'markdown');
+    expect(out).toContain('back\\\\slash\\|pipe');
+  });
+});
