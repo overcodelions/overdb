@@ -37,6 +37,7 @@ import {
   type HealthPanel,
   type HealthScope,
   type HealthSnapshot,
+  type PressureCounters,
 } from '../../shared/health';
 import type { SlowQuerySupport, StatementStat } from '../../shared/slowQueries';
 
@@ -970,6 +971,39 @@ export class PostgresAdapter implements DbAdapter {
       // 0% for one would read as a catastrophe rather than as silence.
       out.cacheHitRatio = hit + read > 0 ? hit / (hit + read) : null;
       out.transactions = { committed: n(row.xact_commit) ?? 0, rolledBack: n(row.xact_rollback) ?? 0 };
+    });
+
+    await attempt('pressure', async () => {
+      const r = await client.query(
+        `select (select count(*) from pg_stat_activity
+                  where backend_type = 'client backend' and state = 'active'
+                    and pid <> pg_backend_pid()) as running,
+                (select count(*) from pg_stat_activity
+                  where backend_type = 'client backend' and wait_event_type = 'Lock') as lock_waits,
+                (select extract(epoch from max(now() - xact_start)) from pg_stat_activity
+                  where backend_type = 'client backend' and pid <> pg_backend_pid()) as oldest,
+                d.xact_commit + d.xact_rollback as work, d.temp_files, d.deadlocks
+           from pg_stat_database d
+          where d.datname = current_database()`,
+      );
+      const row = r.rows[0] as Record<string, string | null> | undefined;
+      if (!row) return;
+      const counters: PressureCounters = {};
+      const work = n(row.work);
+      const tempToDisk = n(row.temp_files);
+      const deadlocks = n(row.deadlocks);
+      if (work !== null) counters.work = work;
+      if (tempToDisk !== null) counters.tempToDisk = tempToDisk;
+      if (deadlocks !== null) counters.deadlocks = deadlocks;
+      out.pressure = {
+        running: n(row.running) ?? 0,
+        lockWaits: n(row.lock_waits),
+        oldestTransactionSeconds: n(row.oldest),
+        // No undo log to back up: Postgres keeps old versions in the table,
+        // and what that costs shows as bloat, not as a queue.
+        undoBacklog: null,
+        counters,
+      };
     });
 
     // The storage half. Every one of these stats a file per relation or
