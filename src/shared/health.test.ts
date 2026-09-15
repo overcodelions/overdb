@@ -5,11 +5,17 @@ import {
   formatDuration,
   killSupport,
   mergePulse,
+  counterRates,
+  pressureFacts,
+  pushCounterSample,
   pushSample,
+  pushTxnSample,
   readings,
   sessionStates,
   splitReadings,
+  txnWindow,
   waitEvents,
+  windowRollbackRatio,
   seqScanOffenders,
   unusedIndexSummary,
   type HealthSnapshot,
@@ -91,8 +97,30 @@ describe('readings', () => {
   });
 
   it('reads a high rollback rate as something erroring in a loop', () => {
-    const h = health({ transactions: { committed: 80, rolledBack: 20 } });
-    expect(find(h, 'rollbacks')).toMatchObject({ value: '20.0%', tone: 'bad' });
+    const h = health({ transactions: { committed: 1080, rolledBack: 520 } });
+    const r = readings(h, { txns: { committed: 80, rolledBack: 20, seconds: 60 } }).find((x) => x.key === 'rollbacks');
+    expect(r).toMatchObject({ value: '20.0%', tone: 'bad' });
+    expect(r?.note).toMatch(/20 of 100 transactions in the last 1m 0s/);
+  });
+
+  it('does not colour a lifetime ratio as if it were now', () => {
+    // An old burst dominates a since-startup ratio long after it stopped.
+    const r = find(health({ transactions: { committed: 80, rolledBack: 20 } }), 'rollbacks');
+    expect(r).toMatchObject({ value: '20.0%', tone: 'unknown' });
+    expect(r?.note).toMatch(/since the counters were last reset/);
+  });
+
+  it('will not judge a window with a handful of transactions', () => {
+    const h = health({ transactions: { committed: 0, rolledBack: 0 } });
+    const r = readings(h, { txns: { committed: 2, rolledBack: 1, seconds: 5 } }).find((x) => x.key === 'rollbacks');
+    expect(r?.tone).toBe('unknown');
+    const quiet = readings(h, { txns: { committed: 0, rolledBack: 0, seconds: 5 } }).find((x) => x.key === 'rollbacks');
+    expect(quiet).toMatchObject({ value: 'none', tone: 'good' });
+  });
+
+  it('says MySQL only counts explicit statements', () => {
+    const h = { ...health({ transactions: { committed: 0, rolledBack: 0 } }), engine: 'mysql' as const };
+    expect(readings(h, { txns: { committed: 50, rolledBack: 0, seconds: 30 } })[0]?.note).toMatch(/explicit COMMIT\/ROLLBACK/);
   });
 
   it('is quiet about replicas that are keeping up', () => {
@@ -323,6 +351,84 @@ describe('waitEvents', () => {
       }),
     );
     expect(row).toEqual({ event: 'io: DataFileRead', count: 2, blocking: true });
+  });
+});
+
+describe('pushTxnSample', () => {
+  const t = (committed: number, rolledBack: number) => ({ committed, rolledBack });
+
+  it('turns lifetime counters into the change across the window', () => {
+    let s = pushTxnSample([], t(1000, 500), 0);
+    s = pushTxnSample(s, t(1090, 510), 30_000);
+    expect(txnWindow(s)).toEqual({ committed: 90, rolledBack: 10, seconds: 30 });
+    expect(windowRollbackRatio(txnWindow(s))).toBeCloseTo(0.1);
+  });
+
+  it('drops reads older than the window but keeps its full span', () => {
+    let s = pushTxnSample([], t(0, 0), 0, 60_000);
+    for (const at of [30_000, 60_000, 90_000, 120_000]) s = pushTxnSample(s, t(at, 0), at, 60_000);
+    expect(s.map((x) => x.at)).toEqual([60_000, 90_000, 120_000]);
+    expect(txnWindow(s)?.seconds).toBe(60);
+  });
+
+  it('starts over when a counter goes backwards', () => {
+    // A restart or stats reset; a negative difference is not a rate.
+    let s = pushTxnSample([], t(500, 50), 0);
+    s = pushTxnSample(s, t(3, 0), 1000);
+    expect(s).toHaveLength(1);
+    expect(txnWindow(s)).toBeNull();
+  });
+
+  it('records nothing when the server withheld the counters', () => {
+    expect(pushTxnSample([], null, 0)).toEqual([]);
+  });
+});
+
+describe('pressure', () => {
+  const pressure = (patch: Partial<NonNullable<HealthSnapshot['pressure']>> = {}) => ({
+    running: 3, lockWaits: 0, oldestTransactionSeconds: 2, undoBacklog: 500, counters: {}, ...patch,
+  });
+
+  it('turns lifetime counters into per-second rates', () => {
+    let s = pushCounterSample([], { work: 1000, deadlocks: 4 }, 0);
+    s = pushCounterSample(s, { work: 7000, deadlocks: 4 }, 60_000);
+    expect(counterRates(s)).toEqual({ work: 100, deadlocks: 0 });
+  });
+
+  it('starts over when any counter goes backwards', () => {
+    let s = pushCounterSample([], { work: 1000, tempToDisk: 50 }, 0);
+    s = pushCounterSample(s, { work: 1200, tempToDisk: 2 }, 1000);
+    expect(counterRates(s)).toBeNull();
+  });
+
+  it('is calm when nothing is queuing, however much is running', () => {
+    // Whether 40 running is a lot depends on cores SQL cannot see.
+    const r = find(health({ pressure: pressure({ running: 40 }) }), 'pressure');
+    expect(r).toMatchObject({ value: '40 running', tone: 'good' });
+  });
+
+  it('names the worst reason first', () => {
+    const h = health({
+      engine: 'mysql',
+      pressure: pressure({ lockWaits: 2, undoBacklog: 2_000_000, oldestTransactionSeconds: 4000 }),
+    });
+    const r = readings(h, { rates: { refused: 0.5 } }).find((x) => x.key === 'pressure');
+    expect(r?.tone).toBe('bad');
+    expect(r?.note).toMatch(/^[A-Z0-9]/);
+    expect(r?.note).toMatch(/waiting on locks/);
+    expect(r?.note?.indexOf('waiting on locks')).toBeGreaterThan(r?.note?.indexOf('refused') ?? -1);
+  });
+
+  it('labels throughput in the unit the engine counts', () => {
+    const mysql = pressureFacts(health({ engine: 'mysql', pressure: pressure() }), { work: 12 });
+    const pg = pressureFacts(health({ pressure: pressure() }), { work: 12 });
+    expect(mysql.find((f) => f.key === 'work')?.label).toBe('queries/s');
+    expect(pg.find((f) => f.key === 'work')?.label).toBe('txns/s');
+  });
+
+  it('leaves out what the server did not say', () => {
+    const facts = pressureFacts(health({ pressure: pressure({ undoBacklog: null, lockWaits: null }) }), null);
+    expect(facts.map((f) => f.key)).toEqual(['oldest']);
   });
 });
 

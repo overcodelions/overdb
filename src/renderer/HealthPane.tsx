@@ -5,13 +5,21 @@ import {
   formatDuration,
   killSupport,
   mergePulse,
+  counterRates,
+  pressureFacts,
+  pushCounterSample,
   pushSample,
+  pushTxnSample,
   readings,
   seqScanOffenders,
   sessionStates,
   splitReadings,
+  txnWindow,
   unusedIndexSummary,
   waitEvents,
+  windowRollbackRatio,
+  type CounterSample,
+  type TxnSample,
   type HealthPanel,
   type HealthScope,
   type HealthSnapshot,
@@ -75,6 +83,13 @@ interface Series {
   connections: number[];
   cache: number[];
   rollback: number[];
+  /// Raw counter reads across the rollback window. The counters are
+  /// lifetime totals; the rate is the difference across these.
+  txns: TxnSample[];
+  /// Statements running at each read.
+  running: number[];
+  /// Raw pressure counter reads across their window, for rates.
+  pressure: CounterSample[];
   since: number;
 }
 
@@ -82,6 +97,9 @@ const EMPTY_SERIES: Series = {
   connections: [],
   cache: [],
   rollback: [],
+  txns: [],
+  running: [],
+  pressure: [],
   since: Date.now(),
 };
 
@@ -255,7 +273,12 @@ export function HealthPane({
     });
   };
 
-  const rows = health ? readings(health) : [];
+  const rows = health
+    ? readings(health, {
+        txns: txnWindow(series.txns),
+        rates: counterRates(series.pressure),
+      })
+    : [];
   const { charted, counts } = splitReadings(rows);
   const states = health ? sessionStates(health) : null;
   const waits = health ? waitEvents(health) : [];
@@ -377,7 +400,9 @@ export function HealthPane({
                     </div>
                     {((r.key === "cache" && series.cache.length > 1) ||
                       (r.key === "rollbacks" &&
-                        series.rollback.length > 1)) && (
+                        series.rollback.length > 1) ||
+                      (r.key === "pressure" &&
+                        series.running.length > 1)) && (
                       <p className="mt-0.5 text-[9px] text-ink-faint">
                         since you opened this tab, {since}
                       </p>
@@ -656,8 +681,8 @@ export function HealthPane({
 /// zero is a reading nobody took, and on a cache-hit chart it is a reading
 /// that looks like an outage.
 function sample(prev: Series, snapshot: HealthSnapshot): Series {
-  const txns = snapshot.transactions;
-  const totalTxns = txns ? txns.committed + txns.rolledBack : 0;
+  const now = Date.now();
+  const txns = pushTxnSample(prev.txns, snapshot.transactions, now);
   return {
     since: prev.since,
     connections: pushSample(
@@ -665,9 +690,15 @@ function sample(prev: Series, snapshot: HealthSnapshot): Series {
       snapshot.connections?.used ?? null,
     ),
     cache: pushSample(prev.cache, snapshot.cacheHitRatio),
-    rollback: pushSample(
-      prev.rollback,
-      totalTxns > 0 ? txns!.rolledBack / totalTxns : null,
+    // The rate across the window at each read, not the lifetime ratio —
+    // that one is a flat line that only ever moves in the fourth decimal.
+    rollback: pushSample(prev.rollback, windowRollbackRatio(txnWindow(txns))),
+    txns,
+    running: pushSample(prev.running, snapshot.pressure?.running ?? null),
+    pressure: pushCounterSample(
+      prev.pressure,
+      snapshot.pressure?.counters ?? null,
+      now,
     ),
   };
 }
@@ -741,6 +772,38 @@ function Mark({
 
   if (reading === "rollbacks") {
     return <Sparkline series={series.rollback} tone={tone} height={height} />;
+  }
+
+  if (reading === "pressure") {
+    const facts = compact
+      ? []
+      : pressureFacts(health, counterRates(series.pressure));
+    return (
+      <div>
+        {/* From zero, so two running statements do not draw as a spike
+            over one. */}
+        <Sparkline
+          series={series.running}
+          tone={tone}
+          band={[0, Math.max(4, ...series.running)]}
+          height={height}
+        />
+        {facts.length > 0 && (
+          <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-0.5 text-[9px] text-ink-faint">
+            {facts.map((f) => (
+              <span key={f.key} className="tabular-nums">
+                <span
+                  className={f.tone === "good" ? "text-ink-muted" : TONE[f.tone]}
+                >
+                  {f.value}
+                </span>{" "}
+                {f.label}
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
+    );
   }
 
   if (reading === "size") {

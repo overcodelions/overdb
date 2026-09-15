@@ -36,7 +36,7 @@ import { tlsOptions } from '../tls';
 import { detectVariant } from '../../shared/engines';
 import type { Variant } from '../../shared/engines';
 import { classifyMysqlProbeError, digestTruncated } from '../../shared/slowQueries';
-import { emptyHealth, type HealthScope, type HealthSnapshot } from '../../shared/health';
+import { emptyHealth, type HealthScope, type HealthSnapshot, type PressureCounters } from '../../shared/health';
 import type { SlowQuerySupport, StatementStat } from '../../shared/slowQueries';
 
 /// mysql2 field type codes. Hardcoded rather than imported from
@@ -918,7 +918,9 @@ export class MysqlAdapter implements DbAdapter {
         conn,
         `show global status where Variable_name in
            ('Uptime','Threads_connected','Innodb_buffer_pool_read_requests',
-            'Innodb_buffer_pool_reads','Com_commit','Com_rollback')`,
+            'Innodb_buffer_pool_reads','Com_commit','Com_rollback',
+            'Threads_running','Questions','Innodb_row_lock_current_waits',
+            'Created_tmp_disk_tables','Connection_errors_max_connections')`,
       )) as Array<{ Variable_name: string; Value: string }>;
       const stat = new Map(rows.map((r) => [r.Variable_name, Number(r.Value)]));
 
@@ -934,6 +936,57 @@ export class MysqlAdapter implements DbAdapter {
       if (commit !== undefined && rollback !== undefined) {
         out.transactions = { committed: commit, rolledBack: rollback };
       }
+
+      const running = stat.get('Threads_running');
+      if (running !== undefined) {
+        const counters: PressureCounters = {};
+        const work = stat.get('Questions');
+        const tempToDisk = stat.get('Created_tmp_disk_tables');
+        const refused = stat.get('Connection_errors_max_connections');
+        if (work !== undefined) counters.work = work;
+        if (tempToDisk !== undefined) counters.tempToDisk = tempToDisk;
+        if (refused !== undefined) counters.refused = refused;
+        out.pressure = {
+          // This SHOW STATUS is one of them.
+          running: Math.max(0, running - 1),
+          lockWaits: stat.get('Innodb_row_lock_current_waits') ?? null,
+          oldestTransactionSeconds: null,
+          undoBacklog: null,
+          counters,
+        };
+      }
+    });
+
+    // Both of these need PROCESS, which an app user often lacks — so each
+    // is its own attempt, and the card shows whatever the other answered.
+    await attempt('undo backlog', async () => {
+      if (!out.pressure) return;
+      const rows = (await exec(
+        conn,
+        // A disabled metric reads 0 forever, which would claim "no
+        // deadlocks" rather than "not counted" — so only enabled ones.
+        `select NAME as name, COUNT as n
+           from information_schema.INNODB_METRICS
+          where NAME in ('trx_rseg_history_len','lock_deadlocks')
+            and STATUS = 'enabled'`,
+      )) as Array<{ name: string; n: number | string }>;
+      for (const row of rows) {
+        if (row.name === 'trx_rseg_history_len') out.pressure.undoBacklog = num(row.n);
+        if (row.name === 'lock_deadlocks') {
+          const d = num(row.n);
+          if (d !== null) out.pressure.counters.deadlocks = d;
+        }
+      }
+    });
+
+    await attempt('oldest transaction', async () => {
+      if (!out.pressure) return;
+      const rows = (await exec(
+        conn,
+        `select max(timestampdiff(second, trx_started, now())) as secs
+           from information_schema.INNODB_TRX`,
+      )) as Array<{ secs: number | string | null }>;
+      out.pressure.oldestTransactionSeconds = num(rows[0]?.secs ?? null);
     });
 
     await attempt('sessions', async () => {

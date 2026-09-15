@@ -134,7 +134,12 @@ export interface HealthSnapshot {
   /// Tables the planner keeps reading end to end.
   sequentialScans: ScanRatio[];
   /// Transactions committed vs rolled back since the counters were reset.
+  /// Cumulative — `pushTxnSample` and `txnWindow` turn reads of it into a
+  /// rate.
   transactions: { committed: number; rolledBack: number } | null;
+  /// Where work is queuing, as far as SQL can see. Null where the engine
+  /// has no such thing or would not say.
+  pressure: Pressure | null;
   /// Replication lag in bytes, per replica, when visible.
   replication: Array<{ client: string | null; state: string | null; lagBytes: number | null }>;
   /// Panels this engine describes for itself — the facts that have no
@@ -203,6 +208,7 @@ export function emptyHealth(engine: Engine): HealthSnapshot {
     unusedIndexes: [],
     sequentialScans: [],
     transactions: null,
+    pressure: null,
     replication: [],
     panels: [],
     notes: [],
@@ -227,7 +233,307 @@ export interface Reading {
   note: string;
 }
 
-export function readings(health: HealthSnapshot): Reading[] {
+/// One read of the transaction counters, and when it was taken.
+export interface TxnSample {
+  at: number;
+  committed: number;
+  rolledBack: number;
+}
+
+/// Commits and rollbacks between two reads of the counters.
+export interface TxnWindow {
+  committed: number;
+  rolledBack: number;
+  seconds: number;
+}
+
+/// How far back the rollback rate looks.
+///
+/// The counters run from server start, so their ratio is a lifetime
+/// average: a burst of failures from last month keeps it red long after
+/// it stopped. The difference across the last few minutes is what is
+/// happening now, and five is long enough that a one-second poll is not
+/// judging three transactions.
+export const ROLLBACK_WINDOW_MS = 5 * 60_000;
+
+/// Below this many transactions in the window, a percentage is noise.
+const TXNS_TO_JUDGE = 20;
+
+/// Add a counter reading, keeping just enough history to span the window.
+///
+/// A counter that went backwards was reset — a restart, a failover, a
+/// stats reset — and a difference across that would be negative nonsense,
+/// so history starts again from the new reading.
+export function pushTxnSample(
+  samples: TxnSample[],
+  transactions: HealthSnapshot['transactions'],
+  at: number,
+  windowMs = ROLLBACK_WINDOW_MS,
+): TxnSample[] {
+  if (!transactions) return samples;
+  const next = { at, ...transactions };
+  const last = samples[samples.length - 1];
+  if (last && (next.committed < last.committed || next.rolledBack < last.rolledBack)) return [next];
+  return trimToWindow([...samples, next], at, windowMs);
+}
+
+/// Keep the newest reading at or past the window's edge, so the window is
+/// always the full span rather than whatever fell just inside it.
+function trimToWindow<T extends { at: number }>(samples: T[], at: number, windowMs: number): T[] {
+  const out = [...samples];
+  while (out.length > 2 && out[1].at <= at - windowMs) out.shift();
+  return out;
+}
+
+export function txnWindow(samples: TxnSample[]): TxnWindow | null {
+  if (samples.length < 2) return null;
+  const first = samples[0];
+  const last = samples[samples.length - 1];
+  return {
+    committed: last.committed - first.committed,
+    rolledBack: last.rolledBack - first.rolledBack,
+    seconds: (last.at - first.at) / 1000,
+  };
+}
+
+/// The share of a window's transactions that rolled back, when there were
+/// enough of them to mean anything.
+export function windowRollbackRatio(window: TxnWindow | null): number | null {
+  if (!window) return null;
+  const total = window.committed + window.rolledBack;
+  return total >= TXNS_TO_JUDGE ? window.rolledBack / total : null;
+}
+
+function rollbackReading(health: HealthSnapshot, window: TxnWindow | null): Reading {
+  // MySQL's Com_commit and Com_rollback count the statements, so a
+  // statement run under autocommit is in neither. Postgres counts every
+  // transaction.
+  const counted = health.engine === 'mysql' ? 'explicit COMMIT/ROLLBACK statements' : 'transactions';
+  const toneOf = (ratio: number): ReadingTone => (ratio > 0.1 ? 'bad' : ratio > 0.02 ? 'watch' : 'good');
+  const pct = (ratio: number) => `${(ratio * 100).toFixed(1)}%`;
+
+  if (!window) {
+    const { committed, rolledBack } = health.transactions!;
+    const total = committed + rolledBack;
+    return {
+      key: 'rollbacks',
+      label: 'Rollback rate',
+      value: pct(total > 0 ? rolledBack / total : 0),
+      // A lifetime average is not a claim about now, so it is not coloured
+      // like one.
+      tone: 'unknown',
+      note: `All ${counted} since the counters were last reset. The current rate shows from the next read.`,
+    };
+  }
+
+  const { committed, rolledBack, seconds } = window;
+  const total = committed + rolledBack;
+  const span = `the last ${formatDuration(seconds)}`;
+  if (total === 0) {
+    return { key: 'rollbacks', label: 'Rollback rate', value: 'none', tone: 'good', note: `No ${counted} in ${span}.` };
+  }
+  const ratio = rolledBack / total;
+  const tally = `${rolledBack.toLocaleString()} of ${total.toLocaleString()} ${counted} in ${span}`;
+  if (total < TXNS_TO_JUDGE) {
+    return { key: 'rollbacks', label: 'Rollback rate', value: pct(ratio), tone: 'unknown', note: `${tally} — too few to call.` };
+  }
+  const tone = toneOf(ratio);
+  return {
+    key: 'rollbacks',
+    label: 'Rollback rate',
+    value: pct(ratio),
+    tone,
+    note:
+      (tone === 'bad'
+        ? 'More than one in ten is failing. Something is erroring in a loop. '
+        : tone === 'watch'
+          ? 'A noticeable share roll back. '
+          : 'Almost everything commits. ') + `${tally}.`,
+  };
+}
+
+/// Where the server is short of room, read without leaving SQL.
+///
+/// Every field is a view the server keeps in memory, so all of it rides the
+/// pulse. CPU and memory are missing on purpose: no SQL connection can see
+/// the host, and the only thing that can is the cloud provider's metrics.
+export interface Pressure {
+  /// Statements executing right now, our own read excluded.
+  running: number;
+  /// Sessions waiting on a lock right now.
+  lockWaits: number | null;
+  /// Age of the oldest open transaction.
+  oldestTransactionSeconds: number | null;
+  /// InnoDB's history list length: row versions kept because an open
+  /// transaction might still read them. MySQL only.
+  undoBacklog: number | null;
+  /// Lifetime counters. Reads of them become rates.
+  counters: PressureCounters;
+}
+
+/// `work` is queries on MySQL and transactions on Postgres — whichever the
+/// server counts.
+export type PressureCounters = Partial<Record<'work' | 'tempToDisk' | 'refused' | 'deadlocks', number>>;
+
+export interface CounterSample {
+  at: number;
+  values: PressureCounters;
+}
+
+/// Short enough that a rate reads as now, long enough that a one-second
+/// poll is not dividing by one.
+export const PRESSURE_WINDOW_MS = 60_000;
+
+/// Add a counter reading. Any counter that went backwards means a reset,
+/// and history starts again.
+export function pushCounterSample(
+  samples: CounterSample[],
+  values: PressureCounters | null,
+  at: number,
+  windowMs = PRESSURE_WINDOW_MS,
+): CounterSample[] {
+  if (!values) return samples;
+  const next = { at, values };
+  const last = samples[samples.length - 1];
+  const reset =
+    last &&
+    (Object.keys(values) as Array<keyof PressureCounters>).some((k) => {
+      const before = last.values[k];
+      return before !== undefined && values[k]! < before;
+    });
+  if (reset) return [next];
+  return trimToWindow([...samples, next], at, windowMs);
+}
+
+/// Per-second rates across the samples, for the counters both ends have.
+export function counterRates(samples: CounterSample[]): PressureCounters | null {
+  if (samples.length < 2) return null;
+  const first = samples[0];
+  const last = samples[samples.length - 1];
+  const seconds = (last.at - first.at) / 1000;
+  if (seconds <= 0) return null;
+  const out: PressureCounters = {};
+  for (const k of Object.keys(last.values) as Array<keyof PressureCounters>) {
+    const before = first.values[k];
+    if (before !== undefined) out[k] = (last.values[k]! - before) / seconds;
+  }
+  return out;
+}
+
+/// One line under the pressure card, and the phrase it contributes to the
+/// card's note when it is the reason for the tone.
+export interface PressureFact {
+  key: string;
+  label: string;
+  value: string;
+  tone: ReadingTone;
+  why: string | null;
+}
+
+export function pressureFacts(health: HealthSnapshot, rates: PressureCounters | null): PressureFact[] {
+  const p = health.pressure;
+  if (!p) return [];
+  const mysql = health.engine === 'mysql';
+  const perSecond = (v: number) =>
+    v === 0 ? '0' : v < 0.1 ? '<0.1' : v < 10 ? v.toFixed(1) : Math.round(v).toLocaleString();
+  const out: PressureFact[] = [];
+
+  if (rates?.work !== undefined) {
+    out.push({ key: 'work', label: mysql ? 'queries/s' : 'txns/s', value: perSecond(rates.work), tone: 'good', why: null });
+  }
+  if (p.lockWaits !== null) {
+    const w = p.lockWaits;
+    out.push({
+      key: 'locks',
+      label: 'waiting on locks',
+      value: w.toLocaleString(),
+      tone: w >= 5 ? 'bad' : w > 0 ? 'watch' : 'good',
+      why: w > 0 ? `${w.toLocaleString()} waiting on locks` : null,
+    });
+  }
+  if (p.oldestTransactionSeconds !== null) {
+    const s = p.oldestTransactionSeconds;
+    out.push({
+      key: 'oldest',
+      label: 'oldest transaction',
+      value: formatDuration(s),
+      tone: s > 3600 ? 'bad' : s > 300 ? 'watch' : 'good',
+      why: s > 300 ? `a transaction open for ${formatDuration(s)}` : null,
+    });
+  }
+  if (p.undoBacklog !== null) {
+    const u = p.undoBacklog;
+    out.push({
+      key: 'undo',
+      label: 'undo backlog',
+      value: u.toLocaleString(),
+      tone: u > 1_000_000 ? 'bad' : u > 100_000 ? 'watch' : 'good',
+      why: u > 100_000 ? `${u.toLocaleString()} old row versions held, slowing reads` : null,
+    });
+  }
+  if (rates?.tempToDisk !== undefined) {
+    const t = rates.tempToDisk;
+    out.push({
+      key: 'temp',
+      label: mysql ? 'temp tables to disk/s' : 'temp files/s',
+      value: perSecond(t),
+      tone: t > 5 ? 'watch' : 'good',
+      why: t > 5 ? 'sorts and joins spilling to disk' : null,
+    });
+  }
+  if (rates?.deadlocks !== undefined) {
+    const d = rates.deadlocks;
+    out.push({
+      key: 'deadlocks',
+      label: 'deadlocks/s',
+      value: perSecond(d),
+      tone: d > 0 ? 'watch' : 'good',
+      why: d > 0 ? 'deadlocks in the last minute' : null,
+    });
+  }
+  if (rates?.refused !== undefined) {
+    const r = rates.refused;
+    out.push({
+      key: 'refused',
+      label: 'refused/s',
+      value: perSecond(r),
+      tone: r > 0 ? 'bad' : 'good',
+      why: r > 0 ? 'connections refused at max_connections' : null,
+    });
+  }
+  return out;
+}
+
+const TONE_RANK: Record<ReadingTone, number> = { bad: 3, watch: 2, good: 1, unknown: 0 };
+
+function pressureReading(health: HealthSnapshot, rates: PressureCounters | null): Reading {
+  const flagged = pressureFacts(health, rates)
+    .filter((f) => f.why !== null)
+    .sort((a, b) => TONE_RANK[b.tone] - TONE_RANK[a.tone]);
+  const why = flagged.map((f) => f.why).join('; ');
+  return {
+    key: 'pressure',
+    label: 'Pressure',
+    value: `${health.pressure!.running.toLocaleString()} running`,
+    // Running statements alone never set the tone: whether twelve is a lot
+    // depends on the host's cores, which SQL cannot see.
+    tone: flagged[0]?.tone ?? 'good',
+    note:
+      why !== ''
+        ? `${why[0].toUpperCase()}${why.slice(1)}.`
+        : 'Nothing waiting on locks or held open long. Compare running statements with the instance’s vCPUs.',
+  };
+}
+
+/// What `readings()` needs beyond one snapshot: the change across recent
+/// reads. Without it — the first read — the rollback rate is the lifetime
+/// figure, said to be, and pressure has no rates.
+export interface ReadingContext {
+  txns?: TxnWindow | null;
+  rates?: PressureCounters | null;
+}
+
+export function readings(health: HealthSnapshot, context: ReadingContext = {}): Reading[] {
   const out: Reading[] = [];
 
   if (health.connections) {
@@ -310,23 +616,8 @@ export function readings(health: HealthSnapshot): Reading[] {
     });
   }
 
-  if (health.transactions) {
-    const { committed, rolledBack } = health.transactions;
-    const total = committed + rolledBack;
-    const ratio = total > 0 ? rolledBack / total : 0;
-    out.push({
-      key: 'rollbacks',
-      label: 'Rollback rate',
-      value: `${(ratio * 100).toFixed(1)}%`,
-      tone: ratio > 0.1 ? 'bad' : ratio > 0.02 ? 'watch' : 'good',
-      note:
-        ratio > 0.1
-          ? 'More than one transaction in ten is failing. Something is erroring in a loop.'
-          : ratio > 0.02
-            ? 'A noticeable share of transactions roll back.'
-            : 'Almost everything commits.',
-    });
-  }
+  if (health.transactions) out.push(rollbackReading(health, context.txns ?? null));
+  if (health.pressure) out.push(pressureReading(health, context.rates ?? null));
 
   if (health.databaseBytes !== null) {
     out.push({
@@ -355,22 +646,23 @@ export function readings(health: HealthSnapshot): Reading[] {
   return out;
 }
 
-/// The four readings that get a chart, in the order they are drawn.
+/// The readings that get a chart, in the order they are drawn.
 ///
-/// Not a styling decision. These are the four a server can be in trouble
+/// Not a styling decision. These are the ones a server can be in trouble
 /// over in a way a single number hides: a connection count means nothing
 /// without its ceiling, a ratio means nothing without the band it moves
-/// in, and a size means nothing without the split between the rows you
-/// keep and the indexes you pay for. Everything else `readings()` produces
+/// in, running statements mean nothing without their trend, and a size
+/// means nothing without the split between the rows you keep and the
+/// indexes you pay for. Everything else `readings()` produces
 /// is a count that is either zero or interesting, and a count reads fine
 /// as a count.
-const CHARTED = ['connections', 'cache', 'rollbacks', 'size'] as const;
+const CHARTED = ['connections', 'cache', 'rollbacks', 'pressure', 'size'] as const;
 
 /// Split the readings into the ones drawn as cards and the ones drawn as a
 /// strip of counts.
 ///
 /// Order is preserved within each half, and a charted reading the server
-/// withheld simply does not appear — the caller must not assume four.
+/// withheld simply does not appear — the caller must not assume how many.
 export function splitReadings(rows: Reading[]): { charted: Reading[]; counts: Reading[] } {
   const charted: Reading[] = [];
   const counts: Reading[] = [];
