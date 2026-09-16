@@ -37,7 +37,16 @@ export type SecretResult = { ok: true; value: string } | { ok: false; error: str
 /// is not installed. Adding the standard package-manager directories makes
 /// the Dock and the terminal behave the same way, which is the behaviour
 /// everyone already assumes.
-export function execEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+///
+/// None of that holds on Windows, where PATH is `;`-separated and every
+/// entry contains a colon of its own. Splitting `C:\Windows;C:\Windows\System32`
+/// on `:` shreds a working PATH into nonsense, so there we hand the
+/// environment back untouched.
+export function execEnv(
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): NodeJS.ProcessEnv {
+  if (platform === 'win32') return { ...env };
   const home = os.homedir();
   const extra = [
     '/opt/homebrew/bin',

@@ -16,7 +16,11 @@ function script(name: string, body: string): string {
   return p;
 }
 
-describe('runSecretCommand', () => {
+// These drive a real child process through `#!/bin/sh` helper scripts,
+// which Windows cannot spawn at all (EFTYPE — it has no shebang). The
+// behaviour under test is POSIX process behaviour; the Windows path is
+// covered by execEnv below.
+describe.skipIf(process.platform === 'win32')('runSecretCommand', () => {
   it('takes stdout as the password', async () => {
     const bin = script('ok.sh', 'printf "hunter2"');
     await expect(runSecretCommand([bin])).resolves.toEqual({ ok: true, value: 'hunter2' });
@@ -95,18 +99,25 @@ describe('execEnv', () => {
   // A Dock-launched app gets /usr/bin:/bin:/usr/sbin:/sbin, so `vault` and
   // `op` are missing and the error reads as "not installed".
   it('adds the directories package managers actually use', () => {
-    const p = execEnv({ PATH: '/usr/bin:/bin' }).PATH!.split(':');
+    const p = execEnv({ PATH: '/usr/bin:/bin' }, 'darwin').PATH!.split(':');
     expect(p.slice(0, 2)).toEqual(['/usr/bin', '/bin']);
     expect(p).toContain('/opt/homebrew/bin');
     expect(p).toContain('/usr/local/bin');
   });
 
   it('does not duplicate what is already there', () => {
-    const p = execEnv({ PATH: '/usr/local/bin' }).PATH!.split(':');
+    const p = execEnv({ PATH: '/usr/local/bin' }, 'darwin').PATH!.split(':');
     expect(p.filter((x) => x === '/usr/local/bin')).toHaveLength(1);
   });
 
   it('leaves the rest of the environment alone', () => {
-    expect(execEnv({ PATH: '/bin', HOME: '/Users/me' }).HOME).toBe('/Users/me');
+    expect(execEnv({ PATH: '/bin', HOME: '/Users/me' }, 'darwin').HOME).toBe('/Users/me');
+  });
+
+  // On Windows the separator is `;` and every entry has a colon in it, so
+  // the POSIX merge would turn `C:\Windows` into two bogus directories.
+  it('does not touch a Windows PATH', () => {
+    const env = { PATH: 'C:\\Windows;C:\\Windows\\System32', USERNAME: 'me' };
+    expect(execEnv(env, 'win32')).toEqual(env);
   });
 });
