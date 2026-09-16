@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Electron's V8 needs both of these to run under the hardened runtime. -->
+  <key>com.apple.security.cs.allow-jit</key>
+  <true/>
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+
+  <!-- overdb spawns processes it did not ship: the user's `claude` / `codex` /
+       `gemini` CLI (src/main/ai.ts), `ssh` for tunnels (src/main/tunnel.ts),
+       and credential-import commands (src/main/credentialImport/command.ts).
+       Inheriting the user's PATH so /opt/homebrew/bin/claude resolves the way
+       it does in their shell needs the dyld environment entitlement, and
+       running a binary Apple did not sign for us needs library validation
+       off. Neither widens what the app itself may do: every spawn is argv-in,
+       no shell (noShellExec.test.ts asserts it). -->
+  <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+  <true/>
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+
+  <!-- Database servers, AWS endpoints and SSH hosts. -->
+  <key>com.apple.security.network.client</key>
+  <true/>
+
+  <!-- SQLite files the user picks, and exported CSV / SVG / PNG. -->
+  <key>com.apple.security.files.user-selected.read-write</key>
+  <true/>
+  <key>com.apple.security.files.downloads.read-write</key>
+  <true/>
+</dict>
+</plist>
