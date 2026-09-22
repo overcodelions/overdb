@@ -96,7 +96,12 @@ jobs:
           if command -v sha256sum >/dev/null; then sha256sum "${files[@]}"; else shasum -a 256 "${files[@]}"; fi \
             > "SHA256SUMS-${{ matrix.os }}.txt"
 
-      - uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+      # Build attestations are not offered to private repositories on this
+      # plan: the step fails with "Feature not available for the
+      # overcodelions organization" and takes the whole release with it. It
+      # switches itself on when the repository goes public.
+      - if: ${{ github.event.repository.private == false }}
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
         with:
           subject-path: |
             release/*.dmg

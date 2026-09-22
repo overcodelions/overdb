@@ -79,7 +79,9 @@ describe('the connection-host import graph', () => {
   });
 
   it('reaches the real adapters, so the guard above is guarding something', () => {
-    const rel = [...graph.files].map((f) => path.relative(ROOT, f));
+    // path.relative gives backslashes on Windows; the expectations below are
+    // repo paths, which are written with forward slashes everywhere.
+    const rel = [...graph.files].map((f) => path.relative(ROOT, f).split(path.sep).join('/'));
     expect(rel).toContain('src/db/adapters/postgres.ts');
     expect(rel).toContain('src/db/adapters/mysql.ts');
     expect(rel).toContain('src/db/adapters/sqlite.ts');
@@ -87,7 +89,7 @@ describe('the connection-host import graph', () => {
 
   it('does not pull in the renderer or the main process', () => {
     const leaked = [...graph.files]
-      .map((f) => path.relative(ROOT, f))
+      .map((f) => path.relative(ROOT, f).split(path.sep).join('/'))
       .filter((f) => f.startsWith('src/renderer/') || f.startsWith('src/main/'));
     expect(leaked).toEqual([]);
   });
