@@ -7,6 +7,7 @@ import type {
   EnvKind,
   EnvSet,
   SchemaSnapshot,
+  Engine,
   StoreSnapshot,
 } from '@shared/types';
 import { DEFAULT_SETTINGS } from '@shared/types';
@@ -23,6 +24,7 @@ import {
 } from '@shared/params';
 import { buffersFor, nextBufferKey, ownsBuffer } from '@shared/buffers';
 import { copyName } from '@shared/copyName';
+import { SAMPLE_ENVS, SAMPLE_SET_NAME, sampleEnvOf } from '@shared/sample';
 
 /// Selectors that derive a list must never build a fresh array on every
 /// call — zustand compares by reference, so `[]` inline re-renders the
@@ -34,11 +36,17 @@ export function emptyList<T>(): readonly T[] {
 
 export type Sheet =
   | { kind: 'about' }
+  | { kind: 'basics' }
+  | { kind: 'shortcuts' }
   | { kind: 'settings' }
-  | { kind: 'newConnection' }
+  /// `found` is a server the welcome screen already discovered, so the form
+  /// opens with its engine, host and port filled rather than asking again.
+  | { kind: 'newConnection'; found?: { engine: Engine; host: string; port: number; version?: string } }
   | { kind: 'importConnections' }
   | { kind: 'editConnection'; id: string }
-  | { kind: 'newEnvSet' }
+  /// `suggested` pre-ticks members the app thinks are one database — the
+  /// set-up hint in the sidebar. Still a form: nothing is saved until Create.
+  | { kind: 'newEnvSet'; suggested?: { name: string; memberIds: string[]; baselineId: string } }
   | { kind: 'editEnvSet'; id: string }
   | { kind: 'pickTables'; connectionId: string };
 
@@ -250,6 +258,11 @@ interface State {
   syncSchema(connectionId: string): Promise<void>;
   toast(text: string, tone?: Toast['tone']): void;
   dismissToast(id: string): void;
+  /// Build the sample shop database and open it as an environment set —
+  /// or go to the one already made. See src/main/sample.ts.
+  openSample(): Promise<void>;
+  /// Close a one-time suggestion for good. See AppSettings.dismissedHints.
+  dismissHint(id: string): void;
 }
 
 export const useStore = create<State>((set, get) => ({
@@ -801,6 +814,64 @@ export const useStore = create<State>((set, get) => ({
       get().toast(`Asked for ${name}, but the session is on ${actual}.`, 'error');
     }
     await get().loadSchema(connectionId, { force: true });
+  },
+
+  async openSample() {
+    const { connections, envSets } = get();
+    const made = envSets.find(
+      (e) =>
+        !e.archived &&
+        e.memberIds.length > 0 &&
+        e.memberIds.every((id) => sampleEnvOf(connections.find((c) => c.id === id)?.file)),
+    );
+    if (made) {
+      set({ selection: { kind: 'envSet', id: made.id }, sheet: null });
+      return;
+    }
+
+    // Connections from an earlier sample whose set was deleted are reused,
+    // not duplicated — and their files are left alone, since a connection
+    // host may have them open.
+    const kept = new Map(
+      connections.flatMap((c) => {
+        const env = c.engine === 'sqlite' ? sampleEnvOf(c.file) : null;
+        return env ? [[env, c] as const] : [];
+      }),
+    );
+    const files = kept.size === SAMPLE_ENVS.length ? null : await window.overdb.invoke('app:createSample');
+    const members = SAMPLE_ENVS.map(
+      (env): Connection =>
+        kept.get(env) ?? {
+          id: crypto.randomUUID(),
+          name: `shop · ${env}`,
+          engine: 'sqlite',
+          variant: 'sqlite',
+          env,
+          file: files![env],
+          secretSource: 'none',
+        },
+    );
+    const added = members.filter((m) => !connections.includes(m));
+    if (added.length > 0) {
+      const next = [...connections, ...added];
+      set({ connections: next });
+      await window.overdb.invoke('store:saveConnections', next);
+    }
+
+    const id = crypto.randomUUID();
+    await get().saveEnvSet({
+      id,
+      name: SAMPLE_SET_NAME,
+      memberIds: members.map((m) => m.id),
+      // prod is the truth, which is the thing the baseline has to be.
+      baselineId: members[SAMPLE_ENVS.indexOf('prod')].id,
+    });
+    set({ selection: { kind: 'envSet', id }, sheet: null });
+  },
+
+  dismissHint(id) {
+    const seen = get().settings.dismissedHints;
+    if (!seen.includes(id)) get().saveSettings({ dismissedHints: [...seen, id] });
   },
 
   async importConnections(items) {

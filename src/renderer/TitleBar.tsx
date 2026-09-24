@@ -31,15 +31,20 @@ export function TitleBar(): JSX.Element {
       <div className="flex-1" />
 
       <button
-        onClick={() => setSheet({ kind: 'about' })}
+        onClick={() => setSheet({ kind: 'basics' })}
         className="no-drag p-1 mr-1 text-ink-muted hover:text-ink rounded hover:bg-card"
-        title="About overdb"
-        aria-label="About overdb"
+        title="How overdb works"
+        aria-label="Help: how overdb works"
       >
         <svg width="16" height="16" viewBox="0 0 20 20" fill="none">
           <circle cx="10" cy="10" r="7" stroke="currentColor" strokeWidth="1.4" />
-          <path d="M10 8v5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
-          <circle cx="10" cy="5.5" r="0.9" fill="currentColor" />
+          <path
+            d="M7.9 8a2.1 2.1 0 1 1 3 1.9c-.6.3-.9.8-.9 1.4v.3"
+            stroke="currentColor"
+            strokeWidth="1.4"
+            strokeLinecap="round"
+          />
+          <circle cx="10" cy="14.2" r="0.9" fill="currentColor" />
         </svg>
       </button>
       <button

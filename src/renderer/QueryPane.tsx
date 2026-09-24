@@ -5,6 +5,7 @@ import { Markdown } from './Markdown';
 import { LogView } from './LogView';
 import { SlowQueryPane } from './SlowQueryPane';
 import { TableBrowser } from './TableBrowser';
+import { Kbd } from './Help';
 import { Resizer } from './Resizer';
 
 /// Green reads, amber changes, red loses. Whole class strings so Tailwind
@@ -1022,6 +1023,21 @@ export function QueryPane(): JSX.Element {
     return () => window.removeEventListener('keydown', onKey, true);
   }, [running, cancel]);
 
+  // ⌘I opens and closes Ask, as the button's tooltip has always said.
+  // Capture phase, because inside the editor CodeMirror binds Mod-i to
+  // "select the enclosing syntax node" and would take it first.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || e.shiftKey || e.altKey || e.key.toLowerCase() !== 'i') return;
+      if (useStore.getState().sheet || useStore.getState().paletteOpen) return;
+      e.preventDefault();
+      e.stopPropagation();
+      setAskOpen((v) => !v);
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, []);
+
   useEffect(() => {
     useQuery.getState().reset();
   }, [selection?.kind, selection && 'id' in selection ? selection.id : null]);
@@ -1651,11 +1667,7 @@ export function QueryPane(): JSX.Element {
             tuning={askBusy}
           />
         ) : !current ? (
-          <div className="h-full flex items-center justify-center text-xs text-ink-faint">
-            ⌘↵ runs the statement at your cursor. ⇧⌘↵ runs all of them.
-            <br />
-            Or just ask in plain English — ⌘↵ turns it into {lang} for you to check.
-          </div>
+          <EmptyResults lang={lang} writes={Boolean(conn.writesEnabled)} />
         ) : current.status === 'error' ? (
           <QueryError
             conn={conn}
@@ -2085,5 +2097,40 @@ function RailPane({
     >
       {children}
     </button>
+  );
+}
+
+/// The results half before anything has run. The one moment someone is
+/// looking straight at the space where an answer will be and wondering how
+/// to get one, so it says exactly that and nothing else.
+function EmptyResults({ lang, writes }: { lang: string; writes: boolean }): JSX.Element {
+  const rows: [string, string][] = [
+    ['⌘↵', 'Run the statement at your cursor'],
+    ['⇧⌘↵', 'Run every statement'],
+    ['⌥↵', 'Plan it without running it'],
+    ['⌘I', 'Ask about this database'],
+  ];
+  return (
+    <div className="h-full flex items-center justify-center px-6">
+      <div className="max-w-[420px]">
+        <ul className="flex flex-col gap-1.5">
+          {rows.map(([keys, what]) => (
+            <li key={keys} className="flex items-center gap-3 text-xs text-ink-muted">
+              <span className="w-16 shrink-0 text-right">
+                <Kbd keys={keys} />
+              </span>
+              {what}
+            </li>
+          ))}
+        </ul>
+        <p className="mt-4 text-[11px] leading-relaxed text-ink-faint">
+          Or type a question in plain English — ⌘↵ turns it into {lang} for you to read before
+          anything runs.{' '}
+          {writes
+            ? 'Writes are on for this connection.'
+            : 'This connection is read-only until you turn writes on.'}
+        </p>
+      </div>
+    </div>
   );
 }

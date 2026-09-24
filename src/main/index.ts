@@ -6,6 +6,8 @@
 // `dbSupervisor` rather than importing `src/db` directly. `src/db` never
 // imports electron — see src/db/noElectron.test.ts for why that matters.
 
+// First, before anything can read the userData path. See devProfile.ts.
+import './devProfile';
 import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeTheme, shell } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs/promises';
@@ -37,6 +39,8 @@ import { classify } from '../shared/sqlGuard';
 import { bindFor } from '../shared/params';
 import * as writeGate from './writeGate';
 import { discoverLocal } from './discoverLocal';
+import { installMenu } from './menu';
+import { createSample } from './sample';
 import { detectTools, extractSql, runOneShot, type AiTool } from './ai';
 import { buildSchemaContext } from './schemaContext';
 import { askPrompt, explainPrompt, fasterPrompt, fixPrompt, refinePrompt, sqlPrompt } from './aiPrompts';
@@ -214,6 +218,10 @@ function registerIpc(): void {
     });
     return res.canceled || res.filePaths.length === 0 ? null : res.filePaths[0];
   });
+
+  ipcMain.handle('app:createSample', () =>
+    createSample(path.join(app.getPath('userData'), 'samples')),
+  );
 
   ipcMain.handle('app:copyText', (_e, text: string) => {
     clipboard.writeText(text);
@@ -1027,6 +1035,7 @@ app.whenReady().then(() => {
 
   registerIpc();
   createWindow();
+  installMenu((command) => mainWindow?.webContents.send('main:event', { kind: 'menu', command }));
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

@@ -343,6 +343,10 @@ export interface AppSettings {
   /// reason; the pane's own control docks it again when you want the
   /// query back in view.
   panesFull: boolean;
+  /// One-time suggestions someone has closed, by id. A suggestion that comes
+  /// back after "Not now" is nagging; one that never appears again after it
+  /// is the deal the button offered.
+  dismissedHints: string[];
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -357,6 +361,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   slowQueryMs: 1_000,
   formatStyle: 'default',
   panesFull: true,
+  dismissedHints: [],
 };
 
 /// One turn of an Ask thread, as persisted.
@@ -493,6 +498,9 @@ export interface IPCInvokeMap {
   /// itself; main returns only the chosen path.
   'app:pickSqliteFile': () => string | null;
   'app:pickFolder': () => string | null;
+  /// Build the sample shop database — three SQLite files, one per
+  /// environment — and return where each one is. See src/main/sample.ts.
+  'app:createSample': () => { local: string; staging: string; prod: string };
   /// Save something the renderer produced — a diagram, an exported result —
   /// to a file the user picks. Goes through main for the same reason the
   /// pickers do: the renderer never touches the filesystem, and a blob
@@ -755,4 +763,19 @@ export type MainToRendererEvent =
   | { kind: 'conn:state'; connectionId: string; state: 'open' | 'closed' | 'error' }
   /// An open transaction is state you must not have to remember, so it is
   /// pushed — including when the idle timeout rolls it back for you.
-  | { kind: 'txn:state'; connectionId: string; open: boolean; statements: number; expiresAt: number | null };
+  | { kind: 'txn:state'; connectionId: string; open: boolean; statements: number; expiresAt: number | null }
+  /// A menu item the window has to carry out — opening a help sheet, the
+  /// palette. See src/main/menu.ts.
+  | { kind: 'menu'; command: MenuCommand };
+
+/// What the application menu can ask the window to do.
+export type MenuCommand =
+  | 'basics'
+  | 'shortcuts'
+  | 'about'
+  | 'settings'
+  | 'palette'
+  | 'newConnection'
+  | 'importConnections'
+  | 'newEnvSet'
+  | 'sample';

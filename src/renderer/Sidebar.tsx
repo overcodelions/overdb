@@ -3,6 +3,7 @@ import type { Connection, EnvKind, EnvSet } from '@shared/types';
 import { variantLabel, variantTag } from '@shared/engines';
 import type { Variant } from '@shared/engines';
 import { useStore } from './store';
+import { EnvSetSuggestion } from './Welcome';
 import { middleTruncate, nameBudget } from '@shared/truncate';
 
 /// Which sections the user has folded away. Per-viewer convenience, so it
@@ -131,6 +132,11 @@ export function Sidebar(): JSX.Element {
       </div>
 
       <div className="flex-1 min-h-0 overflow-y-auto">
+        {/* Only while something is open: with nothing selected the main
+            pane shows the same suggestion, and twice on one screen is
+            nagging. */}
+        {!q && selection && <EnvSetSuggestion compact className="mx-3 mb-2" />}
+
         {nothingMatched && (
           <Empty>
             Nothing matches “{query}”. Search names, hosts, databases and engines.

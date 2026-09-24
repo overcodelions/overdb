@@ -76,8 +76,36 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - Cross-schema completion: one cheap catalog query indexes every table in
   every visible schema, so `other_db.<tab>` resolves. Columns for the active
   schema are loaded eagerly; the rest stay names until you open them.
+- A first run that explains itself. With no connections the main pane says
+  what overdb is for and offers four ways in: servers already answering on
+  this machine (one click fills the form), import from DataGrip, `.idea`,
+  `~/.pgpass` or `DATABASE_URL`-style variables, a blank connection, and a
+  sample. With connections but nothing selected it lists recent connections
+  and sets instead.
+- A sample database: one small shop in local, staging and prod as SQLite
+  files under the app's data folder, gathered into an environment set with
+  prod as the baseline. The three copies have drifted apart on purpose — a
+  missing index and an old price on staging, a column and a table still in
+  review on local — and the set offers starter statements that find them.
+- Help: "How overdb works" (the four nouns, what keeps a connection safe,
+  where things are, and which AI CLIs this machine has), "Keyboard
+  shortcuts", and a fuller About. Reached from a new Help menu, the ? in the
+  title bar, the command palette, and ⌘/.
+- An application menu of overdb's own, in place of Electron's default whose
+  Help linked to Electron. File holds new connection, import and new set;
+  ⌘, opens Settings.
+- A one-time suggestion, in the sidebar or on the start page, when two
+  connections look like the same database in different environments — the
+  same name once `staging`, `prod` and friends are taken out — with the set
+  already filled in. "Not now" is per suggestion and sticks.
+- The results pane before anything has run lists the four keys that get an
+  answer, and says whether the connection is read-only.
+- `OVERDB_PROFILE=<name> npm run dev` runs a dev build against its own data
+  folder, so a first run can be tried without touching real connections.
 
 ### Fixed
+- ⌘I did nothing, although the Ask button's tooltip has always offered it.
+  It now opens and closes Ask, including from inside the editor.
 - Row selection highlighted only the row number, not the row. Tailwind
   silently emits **no rule at all** for an opacity modifier applied to a
   colour defined as a bare `var(--x)`, and again for an off-scale value like
