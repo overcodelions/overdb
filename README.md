@@ -62,6 +62,7 @@ shortcuts. Both are in the command palette (⌘K) too.
 
 Requires Node.js 22.5 or newer. Released macOS builds are signed and notarized;
 Windows builds are not signed yet, so SmartScreen may warn on first launch.
+Released builds update themselves from GitHub Releases, from 0.1.1 on.
 
 ```bash
 npm install
