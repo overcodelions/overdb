@@ -1,6 +1,6 @@
 {
   "name": "overdb",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "private": true,
   "description": "A multi-environment database client. Query, diff, and monitor the same database across local, staging, and prod at once.",
   "license": "Apache-2.0",

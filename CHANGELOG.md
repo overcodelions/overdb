@@ -7,6 +7,8 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-09-23
+
 ### Added
 - Project scaffold: build config and CI/release workflows.
 - Engine layer (`src/db`) with a `DbAdapter` seam and SQLite, Postgres, and
@@ -137,8 +139,11 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - The MySQL adapter is exercised against MariaDB 10.8; real MySQL 8 is
   untested. The two diverge on performance-schema views, which will matter
   for the query-performance work, not for querying.
-- Release binaries are not yet code-signed or notarized. Release workflow
-  output remains a draft for maintainer review; nightly builds are explicitly
-  marked as unsigned prereleases.
+- Windows builds are not code-signed yet, so SmartScreen may warn on first
+  launch. macOS release builds are signed and notarized. Nightly builds are
+  explicitly marked as unsigned prereleases.
 - DynamoDB has no server-side read-only session. Use read-only IAM credentials
   for a durable production boundary.
+
+[Unreleased]: https://github.com/overcodelions/overdb/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/overcodelions/overdb/releases/tag/v0.1.0
