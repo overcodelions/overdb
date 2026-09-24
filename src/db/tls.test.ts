@@ -88,8 +88,10 @@ describe('tlsOptions', () => {
 
   it('names the file it could not read, and nothing else', () => {
     const missing = path.join(dir, 'nope.pem');
+    // A substring, not a RegExp: a Windows path's backslashes are regex
+    // escapes, and `C:\Users\…` stops matching itself.
     expect(() => tlsOptions({ ...base, ssl: 'verify-full', sslRootCert: missing })).toThrow(
-      new RegExp(`CA certificate file was not found at ${missing}`),
+      `CA certificate file was not found at ${missing}`,
     );
   });
 });

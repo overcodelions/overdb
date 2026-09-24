@@ -21,6 +21,15 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const ROOT = path.resolve(__dirname, '..', '..');
+
+/// A file's path from the repo root with `/` separators on every OS. On
+/// Windows `path.relative` answers with `\`, so a check written against
+/// 'src/db/…' would never match there — and the one looking for leaks would
+/// pass by finding nothing.
+function repoPath(file: string): string {
+  return path.relative(ROOT, file).split(path.sep).join('/');
+}
+
 const ENTRY = path.join(ROOT, 'src', 'dbhost', 'index.ts');
 
 const IMPORT_RE = /(?:^|\n)\s*(?:import|export)\s[^;]*?from\s+['"]([^'"]+)['"]/g;
@@ -51,7 +60,7 @@ function walk(entry: string): { files: Set<string>; bare: Map<string, string[]> 
     if (files.has(file)) continue;
     files.add(file);
     const body = fs.readFileSync(file, 'utf-8');
-    const rel = path.relative(ROOT, file);
+    const rel = repoPath(file);
     for (const spec of staticSpecifiersIn(body)) {
       const local = resolveLocal(file, spec);
       if (local) {
@@ -79,7 +88,7 @@ describe('the connection-host import graph', () => {
   });
 
   it('reaches the real adapters, so the guard above is guarding something', () => {
-    const rel = [...graph.files].map((f) => path.relative(ROOT, f));
+    const rel = [...graph.files].map(repoPath);
     expect(rel).toContain('src/db/adapters/postgres.ts');
     expect(rel).toContain('src/db/adapters/mysql.ts');
     expect(rel).toContain('src/db/adapters/sqlite.ts');
@@ -87,7 +96,7 @@ describe('the connection-host import graph', () => {
 
   it('does not pull in the renderer or the main process', () => {
     const leaked = [...graph.files]
-      .map((f) => path.relative(ROOT, f))
+      .map(repoPath)
       .filter((f) => f.startsWith('src/renderer/') || f.startsWith('src/main/'));
     expect(leaked).toEqual([]);
   });
