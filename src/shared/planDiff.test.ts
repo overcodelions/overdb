@@ -61,6 +61,14 @@ describe('planDiff', () => {
     expect(d.headline).toBe('other reads all of partner, where the baseline narrows it with an index.');
   });
 
+  // Plans carry connection ids; the headline has to name the server.
+  it('names the member the way the reader knows it, not by its id', () => {
+    const slow = plan('3f9c1d2e', [step('partner', 'ALL'), step('client', 'eq_ref', 'PRIMARY')]);
+    const names: Record<string, string> = { base: 'orders-db (staging)', '3f9c1d2e': 'orders-db (prod-us)' };
+    const d = planDiff([base, slow], 'base', (id) => names[id] ?? id);
+    expect(d.headline).toBe('orders-db (prod-us) reads all of partner, where the baseline narrows it with an index.');
+  });
+
   // A comparison that can only ever blame the far end is one you stop trusting.
   it('says when the member is the one doing less work', () => {
     const slowBase = plan('base', [step('partner', 'ALL')]);

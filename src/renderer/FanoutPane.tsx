@@ -924,7 +924,7 @@ function PlanTable({
     );
   }
 
-  const diff = planDiff(plans, baselineId);
+  const diff = planDiff(plans, baselineId, (id) => byId.get(id)?.name ?? id);
   const failed = diff.members.filter((m) => m.error);
   const maxTotal = Math.max(1, ...Object.values(diff.totals));
   const grid = {
