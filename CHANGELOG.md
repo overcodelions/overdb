@@ -128,7 +128,7 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   out DynamoDB's local read-only guard and IAM boundary.
 
 ### Changed
-- Default row limit is 1,000, not 100,000. The first thing you do with a
+- Default row limit is 10,000, not 100,000. The first thing you do with a
   table is look at it; fetching 100k to scroll past 40 taxes every
   exploratory query.
 - Softened the dark palette. Near-white text on near-black is the main
