@@ -8,19 +8,18 @@ Sibling project of [overcli](https://github.com/overcodelions/overcli) and [over
 
 TablePlus, DataGrip, Postico, and DBeaver are all one connection at a time. If your work spans local + staging + prod, or a dozen service databases, you end up running the same query four times in four tabs and eyeballing the difference. overdb makes that comparison the primary gesture.
 
-### Connection groups vs. environment sets
+### Environment sets
 
-The two concepts are **orthogonal** — the same connection lives in both at once:
+An **environment set** is the same logical database across environments, pinned to a baseline: "orders-db across local, staging, and prod, where prod is the truth." Run one query against all members, compare each result with the baseline, and see what's drifted. The sidebar lists every connection by its environment tag — local, staging, prod — so the set and the servers in it are always one glance apart.
 
-- **Connection group** — a durable grouping of connections. "These are Payments." Groups are the sidebar's collapsible sections and the target for bulk actions.
-- **Environment set** — the same logical database across environments, pinned to a baseline. "orders-db across local, staging, and prod, where prod is the truth." Run one query against all members, diff the results, and see what's drifted.
+*Connection groups* ("these are Payments") exist in the data model but can't be created from the UI yet, and there are no bulk actions on them.
 
 ### Four principles
 
-1. **Environments, not connections.** Fan a query out across an env set and get a per-connection outcome for each — never an abort on the first failure. Diff results. Detect schema drift against a baseline.
+1. **Environments, not connections.** Fan a query out across an env set and get a per-connection outcome for each — never an abort on the first failure. Compare each result with the baseline: missing or extra columns, changed types, row counts, and whether the rows match. Detect schema drift against a baseline.
 2. **Overlay, not ownership.** Read-only by default. Enabling writes is per connection and persists, because "this is my local scratch database" is a durable fact rather than a mood — and turning it on for a `prod` connection asks you to type that connection's name, because the accident worth preventing is doing the right thing to the wrong server. Separately, a transaction is auto-commit or manual; manual holds one open across statements so a `DELETE` is reviewable before you commit, and rolls itself back after 90 seconds idle rather than leaving locks on a busy server. Postgres, MySQL, and SQLite enforce read-only mode in the database or driver. DynamoDB has no equivalent session mode, so overdb fails closed using its local PartiQL classifier; use a read-only IAM policy as the durable boundary there.
 3. **AI in the loop, on your own auth.** Ask questions in prose. NL→SQL, schema Q&A, explain-this-plan, performance advice — piped to whichever of `claude` / `codex` / `gemini` you already have installed, using your existing login. No separate API key is required by overdb. Prompts can contain your question, recent AI conversation, schema metadata, query text, server error text, and query-plan statistics. Result rows and bound parameter values are not intentionally included, but literals already written in SQL or echoed by an error are sent verbatim. Review sensitive SQL before invoking AI. AI-proposed SQL is never executed; it lands in the editor for you to read and run.
-4. **Performance you can act on.** Not a prettier plan tree. Estimate-vs-actual as the primary signal, cross-environment plan divergence ("prod seq-scans where staging index-scans, and here's the missing index"), and what the server itself says it spends its time on.
+4. **Performance you can act on.** Not a prettier plan tree. The plan drawn as the work each step does — the planner's estimated rows with loops multiplied out, so the expensive step is a shape rather than a number to find. Cross-environment plan divergence ("prod reads all of orders, where staging narrows it with an index"), and what the server itself says it spends its time on. overdb runs a plain `EXPLAIN`: the counts are the planner's estimates, not measurements, and it never executes your query to profile it.
 
 ## What's in it
 
@@ -36,7 +35,7 @@ Beyond the editor, the virtualized grid and the fan-out:
 
 ## Engines
 
-Postgres, MySQL, SQLite, and DynamoDB. Deliberately not warehouses or document stores in general — a few engines done properly beats ten done shallowly. Postgres-compatible servers (Aurora, Redshift, CockroachDB, Timescale) are detected as *variants* and behave differently where they genuinely differ.
+Postgres, MySQL, SQLite, and DynamoDB. Deliberately not warehouses or document stores in general — four drivers done properly beat a long list done shallowly. On those four drivers overdb recognises ten servers — PostgreSQL, Redshift, Aurora PostgreSQL, CockroachDB, TimescaleDB, MySQL, MariaDB, Aurora MySQL, SQLite and DynamoDB — and detects which *variant* it is connected to, so each behaves differently where it genuinely differs.
 
 ## Status
 
