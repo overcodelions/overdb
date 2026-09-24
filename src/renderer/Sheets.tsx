@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { ConnectionForm } from './ConnectionForm';
 import { EnvSetForm } from './EnvSetForm';
+import { AboutSheet, BasicsSheet, ShortcutsSheet } from './Help';
 import { ImportSheet } from './ImportSheet';
 import { TablePicker } from './TablePicker';
 import { useStore } from './store';
@@ -32,21 +33,34 @@ export function SheetHost(): JSX.Element | null {
 
   if (!sheet) return null;
 
+  // The help sheets explain in paragraphs and two columns; at a form's
+  // width they would be a long thin scroll. One frame for all three, so
+  // following a footer link does not resize the sheet under the pointer.
+  const help = sheet.kind === 'about' || sheet.kind === 'basics' || sheet.kind === 'shortcuts';
+
   return (
     <div
-      className="fixed inset-0 z-40 flex items-start justify-center pt-24 bg-black/40"
+      className={`fixed inset-0 z-40 flex items-start justify-center bg-black/40 ${help ? 'pt-14' : 'pt-24'}`}
       onClick={() => setSheet(null)}
     >
       <div
-        className="w-[520px] max-h-[70vh] overflow-auto rounded-lg border border-card bg-surface-elevated shadow-2xl"
+        className={`${
+          help ? 'w-[760px] max-w-[calc(100vw-48px)] max-h-[80vh] overflow-hidden' : 'w-[520px] max-h-[70vh] overflow-auto'
+        } rounded-lg border border-card bg-surface-elevated shadow-2xl`}
         onClick={(e) => e.stopPropagation()}
       >
         {sheet.kind === 'about' && <AboutSheet />}
+        {sheet.kind === 'basics' && <BasicsSheet />}
+        {sheet.kind === 'shortcuts' && <ShortcutsSheet />}
         {sheet.kind === 'settings' && <SettingsSheet />}
-        {sheet.kind === 'newConnection' && <ConnectionForm onDone={() => setSheet(null)} />}
+        {sheet.kind === 'newConnection' && (
+          <ConnectionForm found={sheet.found} onDone={() => setSheet(null)} />
+        )}
         {sheet.kind === 'editConnection' && <EditConnectionSheet id={sheet.id} />}
         {sheet.kind === 'importConnections' && <ImportSheet />}
-        {sheet.kind === 'newEnvSet' && <EnvSetForm onDone={() => setSheet(null)} />}
+        {sheet.kind === 'newEnvSet' && (
+          <EnvSetForm suggested={sheet.suggested} onDone={() => setSheet(null)} />
+        )}
         {sheet.kind === 'editEnvSet' && (
           <EnvSetForm id={sheet.id} onDone={() => setSheet(null)} />
         )}
@@ -54,33 +68,6 @@ export function SheetHost(): JSX.Element | null {
           <TablePicker connectionId={sheet.connectionId} onClose={() => setSheet(null)} />
         )}
       </div>
-    </div>
-  );
-}
-
-function AboutSheet(): JSX.Element {
-  const [enc, setEnc] = useState<{ encrypted: boolean; backend: string } | null>(null);
-  useEffect(() => { void window.overdb.invoke('conn:secretsEncrypted').then(setEnc); }, []);
-
-  return (
-    <div className="p-5">
-      <h2 className="text-sm font-semibold text-ink mb-1">overdb</h2>
-      <p className="text-xs text-ink-muted leading-relaxed mb-3">
-        A database client built around environments rather than connections.
-        Sibling to overcli and overgit.
-      </p>
-      <p className="text-[11px] text-ink-faint leading-relaxed">
-        Read-only by default. {enc && !enc.encrypted
-          ? 'No OS keychain is available here, so a stored password is only base64 on disk — not encrypted. Use the env or 1Password secret source instead.'
-          : 'Credentials are encrypted with your OS keychain and never reach this window.'} AI features use your own installed CLI login, and
-        prompts never contain your rows.
-      </p>
-      <button
-        onClick={() => void window.overdb.invoke('app:openExternal', 'https://github.com/overcodelions/overdb')}
-        className="mt-4 text-xs text-accent hover:underline"
-      >
-        github.com/overcodelions/overdb
-      </button>
     </div>
   );
 }

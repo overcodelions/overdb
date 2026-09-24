@@ -17,15 +17,29 @@ import { useStore } from './store';
 
 const ENV_ORDER: EnvKind[] = ['local', 'dev', 'sandbox', 'staging', 'prod', 'other'];
 
-export function EnvSetForm({ id, onDone }: { id?: string; onDone(): void }): JSX.Element {
+export function EnvSetForm({
+  id,
+  suggested,
+  onDone,
+}: {
+  id?: string;
+  /// Members the sidebar's hint thinks are one database. A starting point,
+  /// not a decision: every box can still be changed before Create.
+  suggested?: { name: string; memberIds: string[]; baselineId: string };
+  onDone(): void;
+}): JSX.Element {
   const connections = useStore((s) => s.connections);
   const envSets = useStore((s) => s.envSets);
   const saveEnvSet = useStore((s) => s.saveEnvSet);
   const existing = id ? envSets.find((e) => e.id === id) : undefined;
 
-  const [name, setName] = useState(existing?.name ?? '');
-  const [memberIds, setMemberIds] = useState<string[]>(existing?.memberIds ?? []);
-  const [baselineId, setBaselineId] = useState(existing?.baselineId ?? '');
+  const [name, setName] = useState(existing?.name ?? suggested?.name ?? '');
+  const [memberIds, setMemberIds] = useState<string[]>(
+    existing?.memberIds ?? suggested?.memberIds ?? [],
+  );
+  const [baselineId, setBaselineId] = useState(
+    existing?.baselineId ?? suggested?.baselineId ?? '',
+  );
   const [saving, setSaving] = useState(false);
 
   const byEnv = useMemo(

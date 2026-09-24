@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { Cell, ColumnMeta, Engine, MainToRendererEvent } from '@shared/types';
+import type { Cell, ColumnMeta, Engine, MainToRendererEvent, MenuCommand } from '@shared/types';
 import { classify, splitStatements } from '@shared/sqlGuard';
 import { isSortable, type SortDirection } from '@shared/orderBy';
 import { deriveStatement, withFilter, type GridFilter } from '@shared/gridView';
@@ -764,12 +764,41 @@ export const useQuery = create<QueryState>((set, get) => ({
 }));
 
 /// Installed once from App. Returns the unsubscribe.
+/// The application menu's items, carried out in the window. See
+/// src/main/menu.ts.
+function runMenuCommand(command: MenuCommand): void {
+  const st = useStore.getState();
+  switch (command) {
+    case 'basics':
+    case 'shortcuts':
+    case 'about':
+    case 'settings':
+    case 'newConnection':
+    case 'importConnections':
+    case 'newEnvSet':
+      st.setPaletteOpen(false);
+      st.setSheet({ kind: command });
+      return;
+    case 'palette':
+      st.setSheet(null);
+      st.setPaletteOpen(!st.paletteOpen);
+      return;
+    case 'sample':
+      void st.openSample();
+      return;
+  }
+}
+
 export function subscribeToMainEvents(): () => void {
   return window.overdb.onMainEvent((event) => {
     // Connection lifecycle is app state, not query state — it goes to the
     // main store so the sidebar can render it.
     if (event.kind === 'conn:state') {
       useStore.getState().setConnState(event.connectionId, event.state);
+      return;
+    }
+    if (event.kind === 'menu') {
+      runMenuCommand(event.command);
       return;
     }
     if (event.kind === 'txn:state') {

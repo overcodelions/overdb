@@ -21,6 +21,7 @@ export function CommandPalette(): JSX.Element | null {
   const setOpen = useStore((s) => s.setPaletteOpen);
   const setActiveTab = useQuery((s) => s.setActive);
   const setSheet = useStore((s) => s.setSheet);
+  const openSample = useStore((s) => s.openSample);
   const select = useStore((s) => s.select);
   const connections = useStore((s) => s.connections);
   const envSets = useStore((s) => s.envSets);
@@ -123,7 +124,13 @@ export function CommandPalette(): JSX.Element | null {
       },
       { id: 'new-connection', label: 'New connection…', run: close(() => setSheet({ kind: 'newConnection' })) },
       { id: 'new-envset', label: 'New environment set…', run: close(() => setSheet({ kind: 'newEnvSet' })) },
+      { id: 'import', label: 'Import connections…', keywords: 'datagrip pgpass intellij', run: close(() => setSheet({ kind: 'importConnections' })) },
       { id: 'settings', label: 'Settings…', run: close(() => setSheet({ kind: 'settings' })) },
+      // Help. Worded as the question someone has when they reach for it.
+      { id: 'help-basics', label: 'How overdb works', hint: 'help', keywords: 'help environment set baseline drift', run: close(() => setSheet({ kind: 'basics' })) },
+      { id: 'help-shortcuts', label: 'Keyboard shortcuts', hint: 'help', keywords: 'keys hotkeys', run: close(() => setSheet({ kind: 'shortcuts' })) },
+      { id: 'help-sample', label: 'Try the sample database', hint: 'help', keywords: 'demo example', run: close(() => void openSample()) },
+      { id: 'help-about', label: 'About overdb', hint: 'help', run: close(() => setSheet({ kind: 'about' })) },
     ];
   }, [
     connections,
@@ -135,6 +142,7 @@ export function CommandPalette(): JSX.Element | null {
     setBuffer,
     select,
     setSheet,
+    openSample,
     setOpen,
     setActiveTab,
   ]);
@@ -164,7 +172,7 @@ export function CommandPalette(): JSX.Element | null {
         <input
           autoFocus
           value={query}
-          placeholder="Jump to a connection, env set or saved query…"
+          placeholder="Jump to a connection, env set or saved query — or type help…"
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === 'Escape') setOpen(false);

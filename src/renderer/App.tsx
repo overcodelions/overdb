@@ -10,6 +10,7 @@ import { TitleBar } from './TitleBar';
 import { subscribeToMainEvents } from './queryStore';
 import { useStore } from './store';
 import { useThemeEffect } from './useThemeEffect';
+import { Welcome } from './Welcome';
 
 export function App(): JSX.Element {
   const ready = useStore((s) => s.ready);
@@ -50,6 +51,13 @@ export function App(): JSX.Element {
       if (mod && e.key.toLowerCase() === 'k') {
         e.preventDefault();
         setPaletteOpen(!useStore.getState().paletteOpen);
+      } else if (mod && e.key === '/') {
+        // Inside the editor ⌘/ toggles a comment; everywhere else it is
+        // the shortcut list, which the Help menu advertises.
+        if ((e.target as HTMLElement | null)?.closest?.('.cm-editor')) return;
+        e.preventDefault();
+        const st = useStore.getState();
+        st.setSheet(st.sheet?.kind === 'shortcuts' ? null : { kind: 'shortcuts' });
       } else if (mod && e.key === '\\') {
         e.preventDefault();
         useStore.getState().toggleSidebar();
@@ -122,26 +130,5 @@ function SidebarWithResize(): JSX.Element {
         onChange={(w) => saveSettings({ sidebarWidth: w })}
       />
     </>
-  );
-}
-
-function Welcome(): JSX.Element {
-  const setSheet = useStore((s) => s.setSheet);
-  return (
-    <div className="h-full flex flex-col items-center justify-center gap-3 text-center px-8">
-      <h1 className="text-sm font-semibold text-ink">No connection selected</h1>
-      <p className="text-xs text-ink-muted max-w-sm leading-relaxed">
-        Add a Postgres, MySQL, or SQLite connection to get started. Group the same
-        database across local, staging, and prod into an environment set to query
-        them all at once.
-      </p>
-      <button
-        onClick={() => setSheet({ kind: 'newConnection' })}
-        className="mt-1 text-xs px-3 py-1.5 rounded bg-accent text-white hover:bg-accent-strong"
-      >
-        New connection
-      </button>
-      <p className="text-[11px] text-ink-faint mt-2">or press ⌘K</p>
-    </div>
   );
 }

@@ -18,11 +18,17 @@ import { useStore } from './store';
 /// One form for both creating and editing, so the two can't drift into
 /// offering different fields — the usual way an "edit" dialog ends up
 /// unable to express something the "new" dialog could.
+type LocalServer = { engine: Engine; host: string; port: number; version?: string };
+
 export function ConnectionForm({
   existing,
+  found: foundFirst,
   onDone,
 }: {
   existing?: Connection;
+  /// A server the welcome screen already found. Applied once, on open,
+  /// exactly as clicking its chip below would.
+  found?: LocalServer;
   onDone(): void;
 }): JSX.Element {
   const addConnection = useStore((s) => s.addConnection);
@@ -120,13 +126,24 @@ export function ConnectionForm({
 
   // Only offered on a NEW connection: an existing one already points
   // somewhere, and rewriting its host from under it would be a surprise.
-  const [found, setFound] = useState<
-    Array<{ engine: Engine; host: string; port: number; version?: string }> | null
-  >(null);
+  const [found, setFound] = useState<LocalServer[] | null>(null);
   useEffect(() => {
     if (existing) return;
     void window.overdb.invoke('conn:discoverLocal').then(setFound).catch(() => setFound([]));
   }, [existing]);
+
+  const applyFound = (s: LocalServer) => {
+    setVariant(s.engine as Variant);
+    applyHost(s.host);
+    setPort(String(s.port));
+    if (!name) setName(`${s.version?.replace(/^5\.5\.5-/, '') ?? s.engine} local`);
+    setEnv('local');
+  };
+  useEffect(() => {
+    if (foundFirst && !existing) applyFound(foundFirst);
+    // Once, on open: afterwards the fields are the user's.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const [busy, setBusy] = useState(false);
   const isSqlite = engine === 'sqlite';
@@ -377,13 +394,7 @@ export function ConnectionForm({
             {found.map((s) => (
               <button
                 key={`${s.engine}:${s.port}`}
-                onClick={() => {
-                  setVariant(s.engine as Variant);
-                  applyHost(s.host);
-                  setPort(String(s.port));
-                  if (!name) setName(`${s.version?.replace(/^5\.5\.5-/, '') ?? s.engine} local`);
-                  setEnv('local');
-                }}
+                onClick={() => applyFound(s)}
                 className="text-[11px] px-2 py-1 rounded border border-card hover:bg-card text-ink flex items-center gap-1.5"
               >
                 {/* The version the server volunteered, not the port's

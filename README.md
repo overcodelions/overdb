@@ -46,6 +46,19 @@ Pre-v0.1, building in the open. See the CHANGELOG for what is built and what is 
 
 Electron + React + Tailwind + Vite + Zustand + TypeScript. Mirrors overgit's `src/{main,preload,renderer,shared}` layout, plus `src/db` (the engine layer, which never imports `electron`) and `src/dbhost` (one isolated process per open connection).
 
+## First run
+
+Open overdb with no connections and it offers four ways in: a server it found
+answering on this machine, an import from DataGrip / IntelliJ / `~/.pgpass`,
+a blank connection form (paste a URL and it fills itself), or **the sample** —
+one small shop database in local, staging and prod, drifted apart on purpose,
+as SQLite files that never leave your machine. The sample is the fastest way
+to see what an environment set does.
+
+Help → How overdb Works explains the vocabulary (connection, environment set,
+baseline, group) and what keeps a connection safe; ⌘/ lists the keyboard
+shortcuts. Both are in the command palette (⌘K) too.
+
 ## Run it
 
 Requires Node.js 22.5 or newer. Released binaries are currently experimental and
@@ -56,4 +69,11 @@ npm install
 npm run dev          # Vite on :5373 + Electron
 # or
 npm run build && npm start
+```
+
+To see the first-run experience without touching your own connections, give
+the dev build a data folder of its own:
+
+```bash
+OVERDB_PROFILE=fresh npm run dev
 ```

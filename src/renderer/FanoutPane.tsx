@@ -23,6 +23,7 @@ import { ResultGrid } from './ResultGrid';
 import { Resizer } from './Resizer';
 import { MemberHealth } from './EnvSetPane';
 import { SchemaDriftView } from './SchemaDriftView';
+import { sampleEnvOf } from '@shared/sample';
 import { indexConsequence, indexMatrix } from '@shared/indexMatrix';
 
 /// Querying a whole environment set.
@@ -121,6 +122,12 @@ export function FanoutPane({ envSet }: { envSet: EnvSet }): JSX.Element {
   /// environment's value at once, which is where the spread belongs.
   const baselineMember = members.find((m) => m.id === envSet.baselineId) ?? members[0];
 
+  const [starter, setStarter] = useState<{ text: string; nonce: number; mode: 'replace' }>({
+    text: '',
+    nonce: 0,
+    mode: 'replace',
+  });
+
   const [openParam, setOpenParam] = useState<{ slot: ParamSlot; at: DOMRect } | null>(null);
 
   const go = () => {
@@ -218,6 +225,7 @@ export function FanoutPane({ envSet }: { envSet: EnvSet }): JSX.Element {
         <div style={{ height: split }} className="shrink-0 min-h-0 border-b border-card">
           <SqlEditor
             value={sql}
+            inject={starter.nonce ? starter : undefined}
             schema={catalog}
             activeSchema={
               envSet.baselineId
@@ -282,6 +290,18 @@ export function FanoutPane({ envSet }: { envSet: EnvSet }): JSX.Element {
                 </span>
                 .
               </p>
+              {members.length > 0 && members.every((m) => sampleEnvOf(m.file)) && (
+                <SampleStarters
+                  onPick={(text) => {
+                    // Into the editor as well as onto the members, so what
+                    // ran is on screen to read and change.
+                    setStarter((p) => ({ text, nonce: p.nonce + 1, mode: 'replace' }));
+                    setSql(text);
+                    void fanRun(envSet, text);
+                  }}
+                  onDrift={() => setMode('drift')}
+                />
+              )}
               <MemberHealth envSet={envSet} />
             </div>
           ) : (
@@ -1237,5 +1257,50 @@ function IndexRows({
         </p>
       )}
     </>
+  );
+}
+
+/// Statements that show the sample doing what it was built to show. Each one
+/// finds a difference the sample planted — see src/main/sample.ts — so the
+/// first run of the app is a comparison with something in it.
+const SAMPLE_STARTERS: { label: string; sql: string }[] = [
+  {
+    label: 'Orders by status',
+    sql: 'select status, count(*) as orders, sum(total_cents) / 100.0 as revenue\nfrom orders\ngroup by status\norder by status;',
+  },
+  {
+    label: 'Product prices',
+    sql: 'select sku, name, price_cents\nfrom products\norder by sku;',
+  },
+  {
+    label: 'Top customers',
+    sql: 'select c.name, c.region, count(o.id) as orders\nfrom customers c\njoin orders o on o.customer_id = c.id\ngroup by c.id\norder by orders desc\nlimit 10;',
+  },
+];
+
+function SampleStarters({ onPick, onDrift }: { onPick(sql: string): void; onDrift(): void }): JSX.Element {
+  return (
+    <div className="rounded-lg border border-accent/35 bg-accent/[0.05] p-3 max-w-[62ch]">
+      <p className="text-xs text-ink">This is the sample: one shop in three environments.</p>
+      <p className="mt-1 text-[11px] leading-relaxed text-ink-muted">
+        Run one of these — each environment answers, and whatever differs from prod is marked.
+        Staging has an old price; local has a column and a table still in review.
+      </p>
+      <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
+        {SAMPLE_STARTERS.map((s) => (
+          <button
+            key={s.label}
+            onClick={() => onPick(s.sql)}
+            className="rounded border border-card bg-surface px-2 py-1 text-[11px] text-ink hover:border-accent/60"
+          >
+            {s.label}
+          </button>
+        ))}
+        <span className="mx-1 text-[11px] text-ink-faint">or</span>
+        <button onClick={onDrift} className="text-[11px] text-accent hover:underline">
+          compare their schemas
+        </button>
+      </div>
+    </div>
   );
 }
