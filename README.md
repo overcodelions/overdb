@@ -40,7 +40,7 @@ Postgres, MySQL, SQLite, and DynamoDB. Deliberately not warehouses or document s
 
 ## Status
 
-Pre-v0.1, building in the open. See the CHANGELOG for what is built and what is not.
+Pre-1.0, building in the open. See the CHANGELOG for what is built and what is not.
 
 ## Stack
 
@@ -61,8 +61,8 @@ shortcuts. Both are in the command palette (⌘K) too.
 
 ## Run it
 
-Requires Node.js 22.5 or newer. Released binaries are currently experimental and
-unsigned: macOS Gatekeeper and Windows SmartScreen may warn on first launch.
+Requires Node.js 22.5 or newer. Released macOS builds are signed and notarized;
+Windows builds are not signed yet, so SmartScreen may warn on first launch.
 
 ```bash
 npm install
