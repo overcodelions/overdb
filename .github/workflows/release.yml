@@ -71,7 +71,11 @@ jobs:
             export CSC_IDENTITY_AUTO_DISCOVERY=false
             export CSC_LINK=""
           fi
-          npm run ${{ matrix.dist_script }}
+          # `--publish never`: package.json declares a GitHub publish target
+          # so electron-builder writes the latest*.yml update feed, but on a
+          # tag it would also try to upload on its own. The release steps
+          # below do the uploading.
+          npm run ${{ matrix.dist_script }} -- --publish never
 
       - name: Upload build artifacts (workflow run)
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -126,6 +130,7 @@ jobs:
             release/*.exe
             release/*.AppImage
             release/*.deb
+            release/latest*.yml
             release/SHA256SUMS-*.txt
 
 # Workflow registered on 2026-09-11.
@@ -203,6 +208,7 @@ jobs:
           builds are not signed yet — SmartScreen warns on first run:
           **More info → Run anyway**. The Linux AppImage needs `chmod +x`.
 
+          The `latest*.yml` files are the in-app updater's feed, not downloads.
           `SHA256SUMS*.txt` and the provenance attestation are for verification.
           EOF
           cat notes.md
