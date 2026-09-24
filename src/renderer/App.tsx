@@ -7,6 +7,7 @@ import { Resizer } from './Resizer';
 import { Sidebar } from './Sidebar';
 import { SheetHost } from './Sheets';
 import { TitleBar } from './TitleBar';
+import { UpdateToast } from './UpdateToast';
 import { subscribeToMainEvents } from './queryStore';
 import { useStore } from './store';
 import { useThemeEffect } from './useThemeEffect';
@@ -88,22 +89,21 @@ export function App(): JSX.Element {
       <SheetHost />
       <CommandPalette />
       <ConfirmHost />
-      {toasts.length > 0 && (
-        <div className="fixed bottom-4 right-4 z-50 flex flex-col gap-2">
-          {toasts.map((t) => (
-            <div
-              key={t.id}
-              className={`px-3 py-2 rounded border text-xs shadow-lg ${
-                t.tone === 'error'
-                  ? 'bg-bad/10 border-bad/40 text-bad-strong'
-                  : 'bg-surface-elevated border-card text-ink'
-              }`}
-            >
-              {t.text}
-            </div>
-          ))}
-        </div>
-      )}
+      <div className="fixed bottom-4 right-4 z-50 flex flex-col items-end gap-2">
+        <UpdateToast />
+        {toasts.map((t) => (
+          <div
+            key={t.id}
+            className={`px-3 py-2 rounded border text-xs shadow-lg ${
+              t.tone === 'error'
+                ? 'bg-bad/10 border-bad/40 text-bad-strong'
+                : 'bg-surface-elevated border-card text-ink'
+            }`}
+          >
+            {t.text}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

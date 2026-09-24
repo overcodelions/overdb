@@ -41,6 +41,7 @@ import * as writeGate from './writeGate';
 import { discoverLocal } from './discoverLocal';
 import { installMenu } from './menu';
 import { createSample } from './sample';
+import { initAutoUpdater, quitAndInstall } from './updater';
 import { detectTools, extractSql, runOneShot, type AiTool } from './ai';
 import { buildSchemaContext } from './schemaContext';
 import { askPrompt, explainPrompt, fasterPrompt, fixPrompt, refinePrompt, sqlPrompt } from './aiPrompts';
@@ -206,6 +207,8 @@ function registerIpc(): void {
   ipcMain.handle('app:openExternal', (_e, url: string) => {
     if (isSafeExternalUrl(url)) shell.openExternal(url);
   });
+
+  ipcMain.handle('update:quitAndInstall', () => quitAndInstall());
 
   ipcMain.handle('app:pickSqliteFile', async () => {
     const res = await dialog.showOpenDialog({
@@ -1036,6 +1039,7 @@ app.whenReady().then(() => {
   registerIpc();
   createWindow();
   installMenu((command) => mainWindow?.webContents.send('main:event', { kind: 'menu', command }));
+  initAutoUpdater(() => mainWindow);
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

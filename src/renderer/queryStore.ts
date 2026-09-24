@@ -801,6 +801,14 @@ export function subscribeToMainEvents(): () => void {
       runMenuCommand(event.command);
       return;
     }
+    // The restart prompt keeps its own subscription; see UpdateToast.
+    if (
+      event.kind === 'update:available' ||
+      event.kind === 'update:progress' ||
+      event.kind === 'update:downloaded'
+    ) {
+      return;
+    }
     if (event.kind === 'txn:state') {
       useStore.getState().setTxnState(event.connectionId, {
         open: event.open, statements: event.statements, expiresAt: event.expiresAt,

@@ -82,8 +82,13 @@ jobs:
 
       # Code signing / notarization is intentionally not configured (matches
       # release.yml); macOS Gatekeeper and Windows SmartScreen may warn.
+      #
+      # `--publish never` for the same reason as release.yml. Nightlies do not
+      # auto-update (see src/main/updater.ts), so their latest*.yml files are
+      # not uploaded — a nightly release carrying them would claim to be the
+      # stable feed.
       - name: Build distributables
-        run: npm run ${{ matrix.dist_script }}
+        run: npm run ${{ matrix.dist_script }} -- --publish never
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'

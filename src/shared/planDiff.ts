@@ -128,7 +128,13 @@ function tableSteps(rows: PlanRow[]): Map<string, PlanRow> {
   return out;
 }
 
-export function planDiff(plans: MemberPlan[], baselineId: string | null): PlanDiff {
+/// `nameOf` turns a connection id into what the reader calls that server.
+/// The plans only carry ids, and a headline naming a UUID answers nothing.
+export function planDiff(
+  plans: MemberPlan[],
+  baselineId: string | null,
+  nameOf: (connectionId: string) => string = (id) => id,
+): PlanDiff {
   const members = [...plans].sort(
     (a, b) => Number(b.connectionId === baselineId) - Number(a.connectionId === baselineId),
   );
@@ -201,7 +207,7 @@ export function planDiff(plans: MemberPlan[], baselineId: string | null): PlanDi
     members,
     rows: diffRows,
     matching,
-    headline: headlineFor(findings, members, baseline),
+    headline: headlineFor(findings, baseline, nameOf),
     totals,
     maxWork,
   };
@@ -209,12 +215,11 @@ export function planDiff(plans: MemberPlan[], baselineId: string | null): PlanDi
 
 function headlineFor(
   findings: Array<{ table: string; member: string; kind: ScanKind; baseKind: ScanKind }>,
-  members: MemberPlan[],
   baseline: MemberPlan | null,
+  name: (connectionId: string) => string,
 ): string | null {
   const worst = findings.find((f) => f.kind === 'full') ?? findings[0];
   if (!worst) return null;
-  const name = (id: string) => members.find((m) => m.connectionId === id)?.connectionId ?? id;
   const base = baseline ? 'the baseline' : 'the other member';
   if (worst.kind === 'full' && worst.baseKind !== 'full') {
     return `${name(worst.member)} reads all of ${worst.table}, where ${base} narrows it with an index.`;

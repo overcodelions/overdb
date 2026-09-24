@@ -494,6 +494,9 @@ export interface IPCInvokeMap {
   'store:saveParams': (params: ParamBinding[]) => void;
   'app:version': () => { app: string; electron: string; node: string; chrome: string };
   'app:openExternal': (url: string) => void;
+  /// Restart into an update that has finished downloading. Without this it
+  /// installs at the next quit anyway. See src/main/updater.ts.
+  'update:quitAndInstall': () => void;
   /// Native file picker for SQLite. The renderer cannot browse the disk
   /// itself; main returns only the chosen path.
   'app:pickSqliteFile': () => string | null;
@@ -766,7 +769,11 @@ export type MainToRendererEvent =
   | { kind: 'txn:state'; connectionId: string; open: boolean; statements: number; expiresAt: number | null }
   /// A menu item the window has to carry out — opening a help sheet, the
   /// palette. See src/main/menu.ts.
-  | { kind: 'menu'; command: MenuCommand };
+  | { kind: 'menu'; command: MenuCommand }
+  /// Auto-updater progress, for the restart prompt. See src/main/updater.ts.
+  | { kind: 'update:available'; version: string }
+  | { kind: 'update:progress'; percent: number }
+  | { kind: 'update:downloaded'; version: string };
 
 /// What the application menu can ask the window to do.
 export type MenuCommand =
