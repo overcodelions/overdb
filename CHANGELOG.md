@@ -7,6 +7,24 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-09-23
+
+### Added
+- The app updates itself from GitHub Releases. It checks shortly after
+  launch and every six hours, downloads in the background, and installs at
+  the next quit; once the download is done, a prompt offers to restart now.
+  It follows tagged releases only and never installs an older version.
+  0.1.0 has no updater, so moving from 0.1.0 to 0.1.1 is a manual download;
+  later releases arrive on their own.
+
+### Fixed
+- The plan comparison headline named a server by its connection id. It now
+  uses the connection's name.
+
+### Known gaps
+- Nightly builds do not update themselves. They are unsigned on macOS and
+  published under one moving `nightly` tag, so there is no feed for them yet.
+
 ## [0.1.0] - 2026-09-23
 
 ### Added
@@ -145,5 +163,6 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - DynamoDB has no server-side read-only session. Use read-only IAM credentials
   for a durable production boundary.
 
-[Unreleased]: https://github.com/overcodelions/overdb/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/overcodelions/overdb/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/overcodelions/overdb/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/overcodelions/overdb/releases/tag/v0.1.0
