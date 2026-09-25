@@ -7,26 +7,17 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
-### Fixed
-- The app icon is legible at 16 and 32 pixels. Finder's list view and the
-  sidebar mark now use a heavier drawing of the same three arcs, because the
-  full-size strokes broke up at those sizes. The Dock icon gains a light
-  shade, rim and drop shadow to sit with overcli and overgit.
-
-### Fixed
-- The app icon broke up at small sizes. Finder's list view, the Dock at its
-  smallest and the in-app mark below 64px now use a heavier cut of the
-  platter-stack mark, and the dock icon gains the family's shade, rim and
-  drop shadow.
-- The Import connections sheet kept Cancel and Import below the list, out
-  of sight once a machine turned up more than a handful of connections. The
-  buttons now stay pinned while the list scrolls.
-
 ### Added
 - Import connections from DBeaver. overdb reads the `data-sources.json` in
   each DBeaver project and keeps its folders, and a connection DBeaver marks
   as production is filed as prod. Passwords stay in DBeaver, as they do for
   DataGrip: you enter them once per connection.
+
+### Fixed
+- The app icon is legible at 16 and 32 pixels. Finder's list view and the
+  sidebar mark now use a heavier drawing of the same three arcs, because the
+  full-size strokes broke up at those sizes. The Dock icon gains a light
+  shade, rim and drop shadow to sit with overcli and overgit.
 
 ### Fixed
 - The app icon broke up at small sizes. Finder's list view, the Dock at its
