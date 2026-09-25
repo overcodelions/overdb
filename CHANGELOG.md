@@ -7,6 +7,12 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Fixed
+- The app icon broke up at small sizes. Finder's list view, the Dock at its
+  smallest and the in-app mark below 64px now use a heavier cut of the
+  platter-stack mark, and the dock icon gains the family's shade, rim and
+  drop shadow.
+
 ## [0.1.1] - 2026-09-23
 
 ### Added

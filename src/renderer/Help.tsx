@@ -19,16 +19,30 @@ export const isMac =
   typeof navigator !== 'undefined' && navigator.platform.toLowerCase().includes('mac');
 
 /// The app mark: three stacked arcs, a platter stack. Same drawing as
-/// build/icon.svg, so the window and the dock open the same way.
+/// build/icon.svg, minus the dock finish (shade, rim, drop shadow): in the
+/// UI a CSS shadow does that job. The viewBox is cropped to the tile so the
+/// shadow hugs it.
+/// Below 64px the dock drawing's strokes fall to about two device pixels
+/// on a 1x screen and break up, so small marks use a heavier cut of the
+/// same shape.
 export function Mark({ size = 38 }: { size?: number }): JSX.Element {
+  const small = size < 64;
   return (
-    <svg width={size} height={size} viewBox="0 0 1024 1024" className="shrink-0 rounded-[22%] shadow-sm" aria-label="overdb">
+    <svg width={size} height={size} viewBox="100 100 824 824" className="shrink-0 rounded-[22%] shadow-sm" aria-label="overdb">
       <rect x="100" y="100" width="824" height="824" rx="185" ry="185" fill="#ffffff" />
-      <g fill="none" stroke="#000000" strokeWidth="50" strokeLinecap="round">
-        <path d="M332 302 Q 512 462 692 302" />
-        <path d="M332 472 Q 512 632 692 472" />
-        <path d="M332 642 Q 512 802 692 642" />
-      </g>
+      {small ? (
+        <g fill="none" stroke="#111113" strokeWidth="72" strokeLinecap="round">
+          <path d="M322 300 Q 512 466 702 300" />
+          <path d="M322 474 Q 512 640 702 474" />
+          <path d="M322 648 Q 512 814 702 648" />
+        </g>
+      ) : (
+        <g fill="none" stroke="#111113" strokeWidth="50" strokeLinecap="round">
+          <path d="M332 302 Q 512 462 692 302" />
+          <path d="M332 472 Q 512 632 692 472" />
+          <path d="M332 642 Q 512 802 692 642" />
+        </g>
+      )}
     </svg>
   );
 }
