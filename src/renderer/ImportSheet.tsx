@@ -80,101 +80,107 @@ export function ImportSheet(): JSX.Element {
 
   const total = sources?.reduce((n, s) => n + s.candidates.length, 0) ?? 0;
 
+  // Header and footer stay put while the list scrolls between them, so
+  // Import is reachable however many candidates a machine turns up.
   return (
-    <div className="p-5">
-      <h2 className="text-sm font-semibold text-ink mb-1">Import connections</h2>
-      <p className="text-[11px] text-ink-faint leading-snug mb-4">
-        Read from the tools already on this machine. Nothing is modified, and nothing is
-        imported until you tick it.
-      </p>
-
-      {sources === null ? (
-        <p className="text-xs text-ink-muted">Scanning…</p>
-      ) : total === 0 ? (
-        <p className="text-xs text-ink-muted">
-          Nothing found. overdb looks at JetBrains IDE and DBeaver configs, <span className="font-mono">~/.pgpass</span>,
-          and connection URLs in its own environment.
+    <div className="flex flex-col max-h-[70vh]">
+      <div className="px-5 pt-5 pb-3 shrink-0">
+        <h2 className="text-sm font-semibold text-ink mb-1">Import connections</h2>
+        <p className="text-[11px] text-ink-faint leading-snug">
+          Read from the tools already on this machine. Nothing is modified, and nothing is
+          imported until you tick it.
         </p>
-      ) : (
-        sources.map((source) => (
-          <div key={source.id} className="mb-4">
-            <div className="flex items-baseline gap-2 mb-1">
-              <span className="text-[10px] uppercase tracking-wider text-ink-faint">
-                {source.label}
-              </span>
-              <button
-                onClick={() =>
-                  setPicked((prev) => {
-                    const next = new Set(prev);
-                    const ids = source.candidates.filter((c) => c.engine).map((c) => c.sourceId);
-                    const allOn = ids.every((id) => next.has(id));
-                    for (const id of ids) (allOn ? next.delete(id) : next.add(id));
-                    return next;
-                  })
-                }
-                className="text-[10px] text-accent hover:underline"
-              >
-                toggle all
-              </button>
-            </div>
-            <p className="text-[10px] text-ink-faint mb-1.5">{source.detail}</p>
+      </div>
 
-            <div className="rounded border border-card divide-y divide-card">
-              {source.candidates.map((c) => {
-                const have = alreadyHave(existing, c);
-                const disabled = !c.engine;
-                return (
-                  <label
-                    key={c.sourceId}
-                    className={`flex items-start gap-2 px-2 py-1.5 ${
-                      disabled ? 'opacity-50' : 'hover:bg-card cursor-pointer'
-                    }`}
-                  >
-                    <input
-                      type="checkbox"
-                      disabled={disabled}
-                      checked={picked.has(c.sourceId)}
-                      onChange={(e) =>
-                        setPicked((prev) => {
-                          const next = new Set(prev);
-                          if (e.target.checked) next.add(c.sourceId);
-                          else next.delete(c.sourceId);
-                          return next;
-                        })
-                      }
-                      className="mt-0.5"
-                    />
-                    <span className="min-w-0 flex-1">
-                      <span className="flex items-baseline gap-1.5">
-                        <span className="text-xs text-ink truncate">{c.name}</span>
-                        <span
-                          className={`text-[9px] uppercase tracking-wider px-1 rounded ${
-                            c.env === 'prod'
-                              ? 'bg-warn/10 text-warn/90 border border-warn/25'
-                              : 'text-ink-faint'
-                          }`}
-                        >
-                          {c.env}
+      <div className="flex-1 min-h-0 overflow-y-auto px-5 pb-1">
+        {sources === null ? (
+          <p className="text-xs text-ink-muted">Scanning…</p>
+        ) : total === 0 ? (
+          <p className="text-xs text-ink-muted">
+            Nothing found. overdb looks at JetBrains IDE and DBeaver configs, <span className="font-mono">~/.pgpass</span>,
+            and connection URLs in its own environment.
+          </p>
+        ) : (
+          sources.map((source) => (
+            <div key={source.id} className="mb-4">
+              <div className="flex items-baseline gap-2 mb-1">
+                <span className="text-[10px] uppercase tracking-wider text-ink-faint">
+                  {source.label}
+                </span>
+                <button
+                  onClick={() =>
+                    setPicked((prev) => {
+                      const next = new Set(prev);
+                      const ids = source.candidates.filter((c) => c.engine).map((c) => c.sourceId);
+                      const allOn = ids.every((id) => next.has(id));
+                      for (const id of ids) (allOn ? next.delete(id) : next.add(id));
+                      return next;
+                    })
+                  }
+                  className="text-[10px] text-accent hover:underline"
+                >
+                  toggle all
+                </button>
+              </div>
+              <p className="text-[10px] text-ink-faint mb-1.5">{source.detail}</p>
+
+              <div className="rounded border border-card divide-y divide-card">
+                {source.candidates.map((c) => {
+                  const have = alreadyHave(existing, c);
+                  const disabled = !c.engine;
+                  return (
+                    <label
+                      key={c.sourceId}
+                      className={`flex items-start gap-2 px-2 py-1.5 ${
+                        disabled ? 'opacity-50' : 'hover:bg-card cursor-pointer'
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        disabled={disabled}
+                        checked={picked.has(c.sourceId)}
+                        onChange={(e) =>
+                          setPicked((prev) => {
+                            const next = new Set(prev);
+                            if (e.target.checked) next.add(c.sourceId);
+                            else next.delete(c.sourceId);
+                            return next;
+                          })
+                        }
+                        className="mt-0.5"
+                      />
+                      <span className="min-w-0 flex-1">
+                        <span className="flex items-baseline gap-1.5">
+                          <span className="text-xs text-ink truncate">{c.name}</span>
+                          <span
+                            className={`text-[9px] uppercase tracking-wider px-1 rounded ${
+                              c.env === 'prod'
+                                ? 'bg-warn/10 text-warn/90 border border-warn/25'
+                                : 'text-ink-faint'
+                            }`}
+                          >
+                            {c.env}
+                          </span>
+                          {have && <span className="text-[9px] text-ink-faint">already added</span>}
                         </span>
-                        {have && <span className="text-[9px] text-ink-faint">already added</span>}
+                        <span className="block text-[10px] text-ink-faint font-mono truncate">
+                          {c.engine ?? c.driver}
+                          {c.host ? ` · ${c.host}` : ''}
+                          {c.database ? `/${c.database}` : ''}
+                          {c.user ? ` · ${c.user}` : ''}
+                        </span>
+                        {c.note && <span className="block text-[10px] text-ink-muted">{c.note}</span>}
                       </span>
-                      <span className="block text-[10px] text-ink-faint font-mono truncate">
-                        {c.engine ?? c.driver}
-                        {c.host ? ` · ${c.host}` : ''}
-                        {c.database ? `/${c.database}` : ''}
-                        {c.user ? ` · ${c.user}` : ''}
-                      </span>
-                      {c.note && <span className="block text-[10px] text-ink-muted">{c.note}</span>}
-                    </span>
-                  </label>
-                );
-              })}
+                    </label>
+                  );
+                })}
+              </div>
             </div>
-          </div>
-        ))
-      )}
+          ))
+        )}
+      </div>
 
-      <div className="flex items-center gap-2 mt-4">
+      <div className="shrink-0 border-t border-card px-5 py-3 flex items-center gap-2">
         <button
           onClick={() => void chooseFolder()}
           className="text-[11px] text-ink-faint hover:text-accent"

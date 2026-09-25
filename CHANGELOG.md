@@ -18,6 +18,9 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   smallest and the in-app mark below 64px now use a heavier cut of the
   platter-stack mark, and the dock icon gains the family's shade, rim and
   drop shadow.
+- The Import connections sheet kept Cancel and Import below the list, out
+  of sight once a machine turned up more than a handful of connections. The
+  buttons now stay pinned while the list scrolls.
 
 ## [0.1.1] - 2026-09-23
 
