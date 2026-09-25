@@ -92,7 +92,7 @@ export function ImportSheet(): JSX.Element {
         <p className="text-xs text-ink-muted">Scanning…</p>
       ) : total === 0 ? (
         <p className="text-xs text-ink-muted">
-          Nothing found. overdb looks at JetBrains IDE configs, <span className="font-mono">~/.pgpass</span>,
+          Nothing found. overdb looks at JetBrains IDE and DBeaver configs, <span className="font-mono">~/.pgpass</span>,
           and connection URLs in its own environment.
         </p>
       ) : (

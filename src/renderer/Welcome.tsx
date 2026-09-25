@@ -108,7 +108,7 @@ function FirstRun(): JSX.Element {
 
           <Tile
             title="Import what you already have"
-            body="From DataGrip, DataSpell or IntelliJ, a project's .idea folder, ~/.pgpass, or DATABASE_URL-style variables. Nothing is created until you pick."
+            body="From DataGrip, DataSpell, IntelliJ or DBeaver, a project's .idea folder, ~/.pgpass, or DATABASE_URL-style variables. Nothing is created until you pick."
             onClick={() => setSheet({ kind: 'importConnections' })}
             icon={<Glyph d="M8 2.5v7m0 0L5.2 6.7M8 9.5l2.8-2.8M3 10.5v1.5a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1v-1.5" />}
           />

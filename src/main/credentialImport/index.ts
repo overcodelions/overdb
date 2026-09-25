@@ -4,6 +4,7 @@
 // application's files, and nothing is imported without the user ticking it.
 
 import { scanJetBrains, scanJetBrainsProjects, type ImportCandidate } from './jetbrains';
+import { scanDbeaver } from './dbeaver';
 import { readPgpass } from './pgpass';
 import { scanEnvironment } from './envUrl';
 
@@ -55,6 +56,16 @@ export function scanAll(projectRoot?: string): ImportScan {
         candidates: extra,
       });
     }
+  }
+
+  const dbeaver = scanDbeaver();
+  if (dbeaver.length > 0) {
+    sources.push({
+      id: 'dbeaver',
+      label: 'DBeaver',
+      detail: 'Passwords stay in DBeaver — you supply those once per connection.',
+      candidates: dbeaver,
+    });
   }
 
   const pgpass = readPgpass();

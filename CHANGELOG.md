@@ -7,6 +7,12 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+- Import connections from DBeaver. overdb reads the `data-sources.json` in
+  each DBeaver project and keeps its folders, and a connection DBeaver marks
+  as production is filed as prod. Passwords stay in DBeaver, as they do for
+  DataGrip: you enter them once per connection.
+
 ### Fixed
 - The app icon broke up at small sizes. Finder's list view, the Dock at its
   smallest and the in-app mark below 64px now use a heavier cut of the

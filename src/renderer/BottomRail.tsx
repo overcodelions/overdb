@@ -47,7 +47,7 @@ export function BottomRail(): JSX.Element {
             <div className="flex-1" />
             <button
               onClick={() => setSheet({ kind: 'importConnections' })}
-              title="Import from DataGrip, DataSpell, IntelliJ or ~/.pgpass"
+              title="Import from DataGrip, DataSpell, IntelliJ, DBeaver or ~/.pgpass"
               className="hover:text-accent"
             >
               Import
