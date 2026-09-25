@@ -124,7 +124,7 @@ export function CommandPalette(): JSX.Element | null {
       },
       { id: 'new-connection', label: 'New connection…', run: close(() => setSheet({ kind: 'newConnection' })) },
       { id: 'new-envset', label: 'New environment set…', run: close(() => setSheet({ kind: 'newEnvSet' })) },
-      { id: 'import', label: 'Import connections…', keywords: 'datagrip pgpass intellij', run: close(() => setSheet({ kind: 'importConnections' })) },
+      { id: 'import', label: 'Import connections…', keywords: 'datagrip dbeaver pgpass intellij', run: close(() => setSheet({ kind: 'importConnections' })) },
       { id: 'settings', label: 'Settings…', run: close(() => setSheet({ kind: 'settings' })) },
       // Help. Worded as the question someone has when they reach for it.
       { id: 'help-basics', label: 'How overdb works', hint: 'help', keywords: 'help environment set baseline drift', run: close(() => setSheet({ kind: 'basics' })) },

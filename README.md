@@ -48,7 +48,7 @@ Electron + React + Tailwind + Vite + Zustand + TypeScript. Mirrors overgit's `sr
 ## First run
 
 Open overdb with no connections and it offers four ways in: a server it found
-answering on this machine, an import from DataGrip / IntelliJ / `~/.pgpass`,
+answering on this machine, an import from DataGrip / IntelliJ / DBeaver / `~/.pgpass`,
 a blank connection form (paste a URL and it fills itself), or **the sample** —
 one small shop database in local, staging and prod, drifted apart on purpose,
 as SQLite files that never leave your machine. The sample is the fastest way

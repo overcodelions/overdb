@@ -1,10 +1,6 @@
 <svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
-  <!-- Family shell: the same white rounded square (a top-to-bottom
-       shade, a rim lit from above and soft drop shadow) and near-black round-capped
-       strokes as overcli (a `>` prompt) and overgit (a branch graph).
-       overdb's mark is three arcs stacked vertically — a rotated `)))`,
-       the silhouette of a database platter stack. Three reads as a stack;
-       two read as a doubled stroke. -->
+  <!-- icon.svg redrawn for 16-32px: heavier arcs, spaced so the gap
+       between them stays as wide as a stroke once downscaled. -->
   <defs>
     <linearGradient id="plate" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#ffffff"/>
@@ -22,9 +18,9 @@
   <rect x="100" y="122" width="824" height="824" rx="185" ry="185" fill="#000000" fill-opacity="0.32" filter="url(#shadow)"/>
   <rect x="100" y="100" width="824" height="824" rx="185" ry="185" fill="url(#plate)"/>
   <rect x="102" y="102" width="820" height="820" rx="183" ry="183" fill="none" stroke="url(#rim)" stroke-width="4"/>
-  <g fill="none" stroke="#111113" stroke-width="50" stroke-linecap="round">
-    <path d="M332 302 Q 512 462 692 302"/>
-    <path d="M332 472 Q 512 632 692 472"/>
-    <path d="M332 642 Q 512 802 692 642"/>
+  <g fill="none" stroke="#111113" stroke-width="90" stroke-linecap="round">
+    <path d="M300 270 Q 512 430 724 270"/>
+    <path d="M300 460 Q 512 620 724 460"/>
+    <path d="M300 650 Q 512 810 724 650"/>
   </g>
 </svg>
