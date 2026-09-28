@@ -1,5 +1,8 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { envForGroup } from './jetbrains';
+import { envForGroup, scanJetBrainsProjects } from './jetbrains';
 
 describe('envForGroup', () => {
   it('files a sandbox as a sandbox, not as dev', () => {
@@ -26,5 +29,36 @@ describe('envForGroup', () => {
 
   it('falls back to other rather than guessing', () => {
     expect(envForGroup(undefined, 'reporting')).toBe('other');
+  });
+});
+
+describe('scanJetBrainsProjects', () => {
+  it('finds a nested .idea/dataSources.xml without blocking synchronously', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'overdb-jetbrains-'));
+    try {
+      const dir = path.join(root, 'service-a', '.idea');
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(
+        path.join(dir, 'dataSources.xml'),
+        `<?xml version="1.0" encoding="UTF-8"?>
+        <project version="4">
+          <component name="DataSourceManagerImpl">
+            <data-source uuid="u1" name="orders">
+              <jdbc-url>jdbc:postgresql://localhost:5432/orders</jdbc-url>
+            </data-source>
+          </component>
+        </project>`,
+      );
+
+      const pending = scanJetBrainsProjects(root);
+      // The walk is async now: the promise must not already carry a
+      // resolved value on the same tick it was created.
+      expect(pending).toBeInstanceOf(Promise);
+
+      const candidates = await pending;
+      expect(candidates.map((c) => c.name)).toEqual(['orders']);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 });

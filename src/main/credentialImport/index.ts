@@ -28,7 +28,13 @@ export interface ImportScan {
   }>;
 }
 
-export function scanAll(projectRoot?: string): ImportScan {
+// Bumped on every call, so an older scan that is still awaiting the (now
+// async) project walk can tell it has been superseded and must not clobber
+// a newer scan's `scanned` entries when it resumes.
+let scanGen = 0;
+
+export async function scanAll(projectRoot?: string): Promise<ImportScan> {
+  const gen = ++scanGen;
   scanned.clear();
   const sources: ImportScan['sources'] = [];
 
@@ -43,7 +49,8 @@ export function scanAll(projectRoot?: string): ImportScan {
   }
 
   if (projectRoot) {
-    const projects = scanJetBrainsProjects(projectRoot);
+    const projects = await scanJetBrainsProjects(projectRoot);
+    if (gen !== scanGen) return { sources: [] };
     // The same connection often exists globally and per-project; only show
     // the ones the global scan didn't already cover.
     const known = new Set(jetbrains.map((c) => c.sourceId));

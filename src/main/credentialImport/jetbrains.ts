@@ -182,15 +182,15 @@ export function scanJetBrains(): ImportCandidate[] {
 /// Project-level configs: `<repo>/.idea/dataSources.xml`. These hold the
 /// connections someone actually uses for that service, and are often richer
 /// than the global list.
-export function scanJetBrainsProjects(root: string, maxDepth = 3): ImportCandidate[] {
+export async function scanJetBrainsProjects(root: string, maxDepth = 3): Promise<ImportCandidate[]> {
   const found: ImportCandidate[] = [];
   let visited = 0;
   const MAX_DIRS = 4_000;
-  const walk = (dir: string, depth: number): void => {
+  const walk = async (dir: string, depth: number): Promise<void> => {
     if (depth > maxDepth || visited++ > MAX_DIRS) return;
     let entries: fs.Dirent[];
     try {
-      entries = fs.readdirSync(dir, { withFileTypes: true });
+      entries = await fs.promises.readdir(dir, { withFileTypes: true });
     } catch {
       return;
     }
@@ -202,26 +202,23 @@ export function scanJetBrainsProjects(root: string, maxDepth = 3): ImportCandida
       const child = path.join(dir, entry.name);
       if (entry.name === '.idea') {
         const file = path.join(child, 'dataSources.xml');
-        if (fs.existsSync(file)) {
+        try {
+          const xml = await fs.promises.readFile(file, 'utf-8');
+          let localXml = '';
           try {
-            const localFile = path.join(child, 'dataSources.local.xml');
-            const localXml = fs.existsSync(localFile) ? fs.readFileSync(localFile, 'utf-8') : '';
-            found.push(
-              ...parseDataSources(
-                fs.readFileSync(file, 'utf-8'),
-                localXml,
-                path.basename(dir),
-              ),
-            );
+            localXml = await fs.promises.readFile(path.join(child, 'dataSources.local.xml'), 'utf-8');
           } catch {
-            // One unreadable project should not stop the scan.
+            // Usernames are optional; the connection still imports without one.
           }
+          found.push(...parseDataSources(xml, localXml, path.basename(dir)));
+        } catch {
+          // No dataSources.xml, or an unreadable one — either way, skip it.
         }
         continue;
       }
-      walk(child, depth + 1);
+      await walk(child, depth + 1);
     }
   };
-  walk(root, 0);
+  await walk(root, 0);
   return found;
 }
