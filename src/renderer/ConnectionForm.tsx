@@ -14,6 +14,7 @@ import { parseConnectionUrl } from '@shared/connectionUrl';
 import { formatArgv, parseArgv } from '@shared/argv';
 import { validateTunnel } from '@shared/sshTunnel';
 import { useStore } from './store';
+import { ENV_DOT, TAG_DOT, TAG_TEXT } from './engineTags';
 
 /// One form for both creating and editing, so the two can't drift into
 /// offering different fields — the usual way an "edit" dialog ends up
@@ -23,9 +24,14 @@ type LocalServer = { engine: Engine; host: string; port: number; version?: strin
 export function ConnectionForm({
   existing,
   found: foundFirst,
+  failure,
   onDone,
 }: {
   existing?: Connection;
+  /// A connect attempt that failed outside the form. Shown as if Test had
+  /// just returned it, so the explanation and its fix buttons are the
+  /// first thing on screen.
+  failure?: string;
   /// A server the welcome screen already found. Applied once, on open,
   /// exactly as clicking its chip below would.
   found?: LocalServer;
@@ -121,8 +127,15 @@ export function ConnectionForm({
   /// the same panel as Test: a failed save IS a failed connection, and
   /// sending one to a toast and the other to a panel would mean the useful
   /// half — what to change — only ever appeared for one of them.
-  const [attempt, setAttempt] = useState<ConnectionTestResult | null>(null);
+  const [attempt, setAttempt] = useState<ConnectionTestResult | null>(
+    failure ? { ok: false, error: failure } : null,
+  );
   const [testing, setTesting] = useState(false);
+  /// How long the last successful Test took, round trip. A connection that
+  /// answers in 900 ms is a VPN hop or a region away, and worth knowing
+  /// before it is the one every query waits on.
+  const [testMs, setTestMs] = useState<number | null>(null);
+  const [showPassword, setShowPassword] = useState(false);
 
   // Only offered on a NEW connection: an existing one already points
   // somewhere, and rewriting its host from under it would be a surprise.
@@ -279,6 +292,8 @@ export function ConnectionForm({
   const test = async () => {
     setTesting(true);
     setAttempt(null);
+    setTestMs(null);
+    const started = performance.now();
     try {
       const result = await window.overdb.invoke('conn:test', {
         ...shape(),
@@ -288,6 +303,7 @@ export function ConnectionForm({
         password: secretSource === 'stored' && password ? password : undefined,
       });
       setAttempt(result);
+      if (result.ok) setTestMs(Math.round(performance.now() - started));
       // The server is the authority on what it is. If it says Redshift and
       // the picker says Postgres, the picker was wrong — adopt it, so what
       // gets saved matches what answered.
@@ -300,6 +316,7 @@ export function ConnectionForm({
   const save = async () => {
     setBusy(true);
     setAttempt(null);
+    setTestMs(null);
     try {
       const draft = shape();
       const result = editing
@@ -381,649 +398,812 @@ export function ConnectionForm({
     setSsl(loopback ? 'disable' : variantDefaults(variant).ssl ?? 'verify-full');
   };
 
+  /// Read once for both the panel and the fields it blames: a fix that
+  /// changes the TLS mode should also mark the TLS control, so the eye goes
+  /// from the explanation to the thing it is about.
+  const diagnosis = attempt && !attempt.ok
+    ? diagnose({
+        engine,
+        error: attempt.error ?? '',
+        ssl,
+        secretSource: isDynamo ? undefined : secretSource,
+        host,
+        port: Number(port) || undefined,
+        user,
+        database,
+      })
+    : null;
+  const blamed = new Set(diagnosis?.fixes.flatMap((f) => Object.keys(f.set ?? {})) ?? []);
+  const blame = (key: string) => (blamed.has(key) ? ' !border-bad ring-2 ring-bad/25' : '');
+
+  const saveDisabled =
+    busy || (isSqlite && !file) || (isDynamo && !region.trim()) || !!commandError || !!tunnelError;
+
   return (
-    <div className="p-5">
-      <h2 className="text-sm font-semibold text-ink mb-4">
-        {editing ? `Edit ${existing.name}` : 'New connection'}
-      </h2>
-
-      {found && found.length > 0 && (
-        <div className="mb-3">
-          <span className="block text-[11px] text-ink-muted mb-1.5">Running on this machine</span>
-          <div className="flex flex-wrap gap-1.5">
-            {found.map((s) => (
-              <button
-                key={`${s.engine}:${s.port}`}
-                onClick={() => applyFound(s)}
-                className="text-[11px] px-2 py-1 rounded border border-card hover:bg-card text-ink flex items-center gap-1.5"
-              >
-                {/* The version the server volunteered, not the port's
-                    reputation — 3306 answering does not prove MySQL. */}
-                <span>{s.version?.replace(/^5\.5\.5-/, '') ?? s.engine}</span>
-                <span className="text-ink-faint font-mono">:{s.port}</span>
-              </button>
-            ))}
-          </div>
-          <p className="mt-1.5 text-[10px] text-ink-faint leading-snug">
-            Found by asking each port what it is. Fills in the engine, host and port — the database
-            and password are still yours to supply.
-          </p>
+    <div
+      className="flex flex-col min-h-0"
+      onKeyDown={(e) => {
+        // ⌘↵ from any field, the same chord that runs a query. The sheet
+        // already owns Escape, so the two ways out are both on the keyboard.
+        if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !saveDisabled) {
+          e.preventDefault();
+          void save();
+        }
+      }}
+    >
+      <div className="shrink-0 flex items-start gap-3 px-6 pt-5 pb-4 border-b border-card">
+        <div className="flex-1 min-w-0">
+          <h2 className="text-[15px] font-semibold text-ink">
+            {editing ? 'Edit connection' : 'New connection'}
+          </h2>
+          {editing ? (
+            <p className="mt-1 flex items-center gap-2 text-xs text-ink-muted min-w-0">
+              <span className={`shrink-0 text-[9.5px] font-semibold ${TAG_TEXT[variant]}`}>
+                {VARIANTS[variant].tag.toUpperCase()}
+              </span>
+              <span className="truncate">{existing.name}</span>
+              <span className="shrink-0 text-ink-faint">· Saving reconnects its open tabs</span>
+            </p>
+          ) : (
+            <p className="mt-1 text-xs text-ink-muted">
+              Nothing is saved until you add it. New connections open read-only.
+            </p>
+          )}
         </div>
-      )}
-
-      {/* Everyone already has one of these in a .env or a runbook, and
-          retyping it into six boxes is where the typo comes from. */}
-      <Field label="Paste a connection URL">
-        <div className="flex gap-2">
-          <input
-            className="field px-2 py-1 text-xs flex-1 font-mono"
-            value={urlText}
-            onChange={(e) => setUrlText(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && parseConnectionUrl(urlText)) {
-                e.preventDefault();
-                applyUrl();
-              }
-            }}
-            placeholder="postgres://user:pass@host:5432/orders?sslmode=require"
-            spellCheck={false}
-          />
-          <button
-            onClick={applyUrl}
-            disabled={!parseConnectionUrl(urlText)}
-            className="text-xs px-2 py-1 rounded border border-card hover:bg-card disabled:opacity-40"
-          >
-            Fill in
-          </button>
-        </div>
-      </Field>
-      <UrlPreview text={urlText} />
-
-      <Field label="Type">
-        <select
-          className="field px-2 py-1 text-xs w-full"
-          value={variant}
-          onChange={(e) => {
-            const next = e.target.value as Variant;
-            setVariant(next);
-            setAttempt(null);
-            // Picking a type is an explicit statement about what is at the
-            // other end, so its defaults apply — including to a connection
-            // being edited, which is exactly the case where you are fixing
-            // one that was set up as plain Postgres by mistake.
-            const d = variantDefaults(next);
-            if (d.port) setPort(String(d.port));
-            if (d.ssl) setSsl(d.ssl);
-          }}
-        >
-          {VARIANT_ORDER.map((v) => (
-            <option key={v} value={v}>
-              {VARIANTS[v].label}
-            </option>
-          ))}
-        </select>
-      </Field>
-
-      <div className="flex gap-2">
-        <div className="flex-1">
-          <Field label="Name">
-            <input className="field px-2 py-1 text-xs w-full" value={name}
-                   onChange={(e) => setName(e.target.value)} placeholder="orders-db local" />
-          </Field>
-        </div>
-        <div className="w-32">
-          <Field label="Environment">
-            <select className="field px-2 py-1 text-xs w-full" value={env}
-                    onChange={(e) => setEnv(e.target.value as EnvKind)}>
-              <option value="local">local</option>
-              <option value="dev">dev</option>
-              <option value="sandbox">sandbox</option>
-              <option value="staging">staging</option>
-              <option value="prod">prod</option>
-              <option value="other">other</option>
-            </select>
-          </Field>
-        </div>
+        <CloseButton onClick={onDone} />
       </div>
 
-      {isDynamo ? (
-        <>
-          <div className="flex gap-2">
-            <div className="flex-1">
-              <Field label="Region">
-                <input className="field px-2 py-1 text-xs w-full" value={region}
-                       onChange={(e) => setRegion(e.target.value)} placeholder="us-east-1" />
-              </Field>
+      <div className="flex-1 min-h-0 overflow-y-auto px-6 pt-4 pb-5 flex flex-col gap-5">
+        {found && found.length > 0 && (
+          <div>
+            <span className="block text-[11px] text-ink-muted mb-1.5">Running on this machine</span>
+            <div className="flex flex-wrap gap-2">
+              {found.map((s) => (
+                <button
+                  key={`${s.engine}:${s.port}`}
+                  onClick={() => applyFound(s)}
+                  className="h-[30px] px-3 rounded-[5px] border border-card bg-card hover:bg-wash-strong text-[12.5px] text-ink flex items-center gap-2"
+                >
+                  <span className={`w-[7px] h-[7px] rounded-full ${TAG_DOT[s.engine as Variant] ?? 'bg-ink-faint'}`} />
+                  {/* The version the server volunteered, not the port's
+                      reputation — 3306 answering does not prove MySQL. */}
+                  <span>
+                    {VARIANTS[s.engine as Variant]?.label ?? s.engine}
+                    {s.version ? ` ${s.version.replace(/^5\.5\.5-/, '')}` : ''}
+                  </span>
+                  <span className="text-ink-muted font-mono text-[11.5px]">:{s.port}</span>
+                </button>
+              ))}
             </div>
-            <div className="flex-1">
-              <Field label="AWS profile">
-                <input className="field px-2 py-1 text-xs w-full" value={awsProfile}
-                       onChange={(e) => setAwsProfile(e.target.value)}
-                       placeholder="default — or leave blank for the usual chain" />
-              </Field>
-            </div>
-          </div>
-          <label className="block mb-2.5">
-            <span className="flex items-baseline justify-between gap-3 mb-1">
-              <span className="text-[10px] uppercase tracking-wider text-ink-faint">Tables</span>
-              <span className="text-[10px] text-ink-faint">
-                DynamoDB has no schemas — names are the only namespace
-              </span>
-            </span>
-            <input
-              className="field px-2 py-1 text-xs w-full font-mono"
-              value={tableFilter}
-              onChange={(e) => setTableFilter(e.target.value)}
-              placeholder="all tables — try LOCAL. or !PROD."
-            />
-          </label>
-
-          <FilterPreview connectionId={existing?.id} filter={tableFilter} />
-
-          {/* A pattern language is a LOOKUP: you come back to check one row,
-              not to read a paragraph. So it is a two-column key, not prose. */}
-          <div className="mb-3 rounded border border-card px-3 py-2.5 grid grid-cols-[104px_1fr] gap-x-3 gap-y-1.5 items-baseline">
-            <code className="font-mono text-[11px] text-ink">LOCAL.</code>
-            <span className="text-[11px] text-ink-muted leading-snug">
-              Prefix. Everything whose name starts with it.
-            </span>
-            <code className="font-mono text-[11px] text-ink">*evt* log?</code>
-            <span className="text-[11px] text-ink-muted leading-snug">
-              Wildcards, anywhere — any run, any single character.
-            </span>
-            <code className="font-mono text-[11px] text-ink">!PROD.</code>
-            <span className="text-[11px] text-ink-muted leading-snug">
-              Exclude. Keeps everything else.
-            </span>
-            <code className="font-mono text-[11px] text-ink">a, b</code>
-            <span className="text-[11px] text-ink-muted leading-snug">
-              Several at once. Case is ignored. Blank shows all.
-            </span>
-          </div>
-
-          <div className="flex gap-2 mb-2">
-            <KeyIcon />
-            <p className="text-[11px] text-ink-muted leading-snug">
-              Credentials come from your AWS setup — environment variables, an SSO session, or the
-              profile above. overdb stores nothing.
+            <p className="mt-1.5 text-[11px] text-ink-faint leading-snug">
+              Found by asking each port what it is. Fills in the engine, host and port.
             </p>
           </div>
-          {/* The filter caveat and the read-only caveat were two paragraphs
-              making one point: overdb's checks run locally and IAM is the
-              boundary. Said once, it is read; said twice, neither is. */}
-          <div className="flex gap-2 mb-3">
-            <WarnIcon />
-            <p className="text-[11px] text-warn/90 leading-snug">
-              <span className="font-semibold">Both limits above are local.</span> This filter and
-              overdb&#39;s refusal to write both run here, not at AWS — a hidden table is still
-              queryable by name, and the durable boundary is the IAM policy on these credentials.
-            </p>
+        )}
+
+        {/* Everyone already has one of these in a .env or a runbook, and
+            retyping it into six boxes is where the typo comes from. */}
+        {!isDynamo && (
+          <div>
+            <label className="block text-[11px] text-ink-muted mb-1.5" htmlFor="conn-url">
+              Paste a connection URL{' '}
+              <span className="text-ink-faint">— optional, fills in the fields below</span>
+            </label>
+            <div className="flex gap-2">
+              <div className="relative flex-1">
+                <LinkIcon />
+                <input
+                  id="conn-url"
+                  className="field pl-8 pr-2.5 h-[30px] text-xs w-full font-mono"
+                  value={urlText}
+                  onChange={(e) => setUrlText(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.metaKey && !e.ctrlKey && parseConnectionUrl(urlText)) {
+                      e.preventDefault();
+                      applyUrl();
+                    }
+                  }}
+                  placeholder={urlPlaceholder(variant)}
+                  spellCheck={false}
+                />
+              </div>
+              <button onClick={applyUrl} disabled={!parseConnectionUrl(urlText)} className={BTN}>
+                Fill in
+              </button>
+            </div>
+            <UrlPreview text={urlText} />
           </div>
-        </>
-      ) : isSqlite ? (
-        <Field label="File">
-          <div className="flex gap-2">
-            <input readOnly className="field px-2 py-1 text-xs flex-1" value={file}
-                   placeholder="Choose a .sqlite file…" />
-            <button onClick={() => void pick()}
-                    className="text-xs px-2 py-1 rounded border border-card hover:bg-card">
-              Browse…
-            </button>
-          </div>
-        </Field>
-      ) : (
-        <>
-          <div className="flex gap-2">
-            <div className="flex-1">
-              <Field label="Host">
-                <input className="field px-2 py-1 text-xs w-full" value={host}
-                       onChange={(e) => applyHost(e.target.value)} />
-              </Field>
-            </div>
-            <div className="w-24">
-              <Field label="Port">
-                <input className="field px-2 py-1 text-xs w-full" value={port}
-                       onChange={(e) => setPort(e.target.value)} />
-              </Field>
-            </div>
-          </div>
-          <div className="flex gap-2">
-            <div className="flex-1">
-              <Field label="Database">
-                <input className="field px-2 py-1 text-xs w-full" value={database}
-                       onChange={(e) => setDatabase(e.target.value)} />
-              </Field>
-            </div>
-            <div className="flex-1">
-              <Field label="User">
-                <input className="field px-2 py-1 text-xs w-full" value={user}
-                       onChange={(e) => setUser(e.target.value)} />
-              </Field>
-            </div>
+        )}
+
+        <Section title="Connection">
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Type">
+              <div className="relative">
+                <span className={`pointer-events-none absolute left-2.5 top-[11px] w-2 h-2 rounded-full ${TAG_DOT[variant]}`} />
+                <select
+                  className={`${INPUT} pl-7`}
+                  value={variant}
+                  onChange={(e) => {
+                    const next = e.target.value as Variant;
+                    setVariant(next);
+                    setAttempt(null);
+                    // Picking a type is an explicit statement about what is at the
+                    // other end, so its defaults apply — including to a connection
+                    // being edited, which is exactly the case where you are fixing
+                    // one that was set up as plain Postgres by mistake.
+                    const d = variantDefaults(next);
+                    if (d.port) setPort(String(d.port));
+                    // Except on loopback, unless you chose TLS yourself: a
+                    // stock local server has none configured, so the type's
+                    // verify-full default made every new local connection
+                    // fail on a certificate it was never going to have.
+                    const loopback = host === 'localhost' || host === '127.0.0.1' || host === '::1';
+                    if (loopback && !sslTouched) setSsl('disable');
+                    else if (d.ssl) setSsl(d.ssl);
+                  }}
+                >
+                  {VARIANT_ORDER.map((v) => (
+                    <option key={v} value={v}>
+                      {VARIANTS[v].label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </Field>
+            <Field label="Environment">
+              <div className="relative">
+                <span className={`pointer-events-none absolute left-2.5 top-[11px] w-2 h-2 rounded-full ${ENV_DOT[env]}`} />
+                <select className={`${INPUT} pl-7`} value={env}
+                        onChange={(e) => setEnv(e.target.value as EnvKind)}>
+                  <option value="local">local</option>
+                  <option value="dev">dev</option>
+                  <option value="sandbox">sandbox</option>
+                  <option value="staging">staging</option>
+                  <option value="prod">prod</option>
+                  <option value="other">other</option>
+                </select>
+              </div>
+            </Field>
           </div>
 
-          <Field label="Authentication">
-            <select
-              className="field px-2 py-1 text-xs w-full"
-              value={secretSource}
-              onChange={(e) => {
-                setSecretSource(e.target.value as SecretSource);
-                setProbe(null);
-              }}
-            >
-              <option value="none">No password (trust / socket auth)</option>
-              <option value="stored">Password, stored in the OS keychain</option>
-              <option value="env">Environment variable</option>
-              <option value="op">1Password reference</option>
-              <option value="command">Command that prints the password</option>
-              <option value="aws-iam">AWS IAM token (RDS, Aurora, Redshift)</option>
-            </select>
+          <Field label="Name">
+            <input className={INPUT} value={name} onChange={(e) => setName(e.target.value)}
+                   placeholder="orders-db local" />
           </Field>
 
-          {secretSource === 'stored' && (
+          {isDynamo ? (
             <>
-              <Field label={editing ? 'New password' : 'Password'}>
-                <input type="password" className="field px-2 py-1 text-xs w-full" value={password}
-                       onChange={(e) => setPassword(e.target.value)}
-                       placeholder={editing ? 'Leave blank to keep the current one' : ''} />
-              </Field>
-              <Note>
-                {enc && !enc.encrypted
-                  ? 'No OS keychain is available here, so a stored password is only base64 on disk — not encrypted. Use the env or 1Password secret source instead.'
-                  : 'Encrypted with your OS keychain and stored apart from everything else.'}{' '}
-                This window can write it and can never read it back — which is why
-                editing can&#39;t show you the current one.
-              </Note>
-            </>
-          )}
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="Region">
+                  <input className={INPUT} value={region}
+                         onChange={(e) => setRegion(e.target.value)} placeholder="us-east-1" />
+                </Field>
+                <Field label="AWS profile">
+                  <input className={INPUT} value={awsProfile}
+                         onChange={(e) => setAwsProfile(e.target.value)}
+                         placeholder="the usual chain" />
+                </Field>
+              </div>
+              <label className="block">
+                <span className="flex items-baseline justify-between gap-3 mb-1.5">
+                  <span className="text-[11px] text-ink-muted">Tables</span>
+                  <span className="text-[11px] text-ink-faint">
+                    DynamoDB has no schemas — names are the only namespace
+                  </span>
+                </span>
+                <input
+                  className={`${INPUT} font-mono`}
+                  value={tableFilter}
+                  onChange={(e) => setTableFilter(e.target.value)}
+                  placeholder="all tables — try LOCAL. or !PROD."
+                />
+              </label>
 
-          {secretSource === 'env' && (
-            <>
-              <Field label="Variable name">
-                <div className="flex gap-2">
-                  <input className="field px-2 py-1 text-xs flex-1 font-mono" value={envVar}
-                         onChange={(e) => { setEnvVar(e.target.value); setProbe(null); }}
-                         placeholder="PGPASSWORD" />
-                  <button onClick={() => void runProbe()}
-                          className="text-xs px-2 py-1 rounded border border-card hover:bg-card">
-                    Check
-                  </button>
-                </div>
-              </Field>
-              <Field label="Fall back to a file (optional)">
-                <div className="flex gap-2">
-                  <input className="field px-2 py-1 text-xs flex-1 font-mono" value={envFile}
-                         onChange={(e) => { setEnvFile(e.target.value); setProbe(null); }}
-                         placeholder="~/work/orders/.env" />
-                  <button onClick={() => void pickPath('envfile', setEnvFile)}
-                          className="text-xs px-2 py-1 rounded border border-card hover:bg-card">
-                    Browse…
-                  </button>
-                </div>
-              </Field>
-              <Note>
-                Read from overdb&#39;s own environment when connecting, so rotating the
-                variable rotates the credential. A GUI app launched from the Dock does not
-                inherit your shell profile — which is what the file is for: only its path is
-                stored, and the variable is read out of it at connect time.
-              </Note>
-            </>
-          )}
+              <FilterPreview connectionId={existing?.id} filter={tableFilter} />
 
-          {secretSource === 'command' && (
-            <>
-              <Field label="Command">
-                <div className="flex gap-2">
-                  <input className="field px-2 py-1 text-xs flex-1 font-mono" value={commandLine}
-                         onChange={(e) => { setCommandLine(e.target.value); setProbe(null); }}
-                         placeholder="vault kv get -field=password secret/orders/prod"
-                         spellCheck={false} />
-                  <button onClick={() => void runProbe()} disabled={!commandArgv}
-                          className="text-xs px-2 py-1 rounded border border-card hover:bg-card disabled:opacity-40">
-                    Check
-                  </button>
-                </div>
-              </Field>
-              {commandError && (
-                <p className="text-[11px] text-warn/90 leading-snug mb-3 -mt-1">{commandError}</p>
-              )}
-              <Note>
-                Whatever it prints on stdout is the password — Vault, Secrets Manager,
-                <span className="font-mono"> pass</span>, or your own wrapper. It is run
-                directly, never through a shell, so pipes and{' '}
-                <span className="font-mono">$(…)</span> are refused rather than quietly passed
-                along as arguments. Only the command is stored — and it is stored in plain
-                settings, so put the <em>lookup</em> here, never the secret itself.
-              </Note>
-            </>
-          )}
+              {/* A pattern language is a LOOKUP: you come back to check one row,
+                  not to read a paragraph. So it is a two-column key, not prose. */}
+              <div className="rounded-md border border-card px-3 py-2.5 grid grid-cols-[104px_1fr] gap-x-3 gap-y-1.5 items-baseline">
+                <code className="font-mono text-[11px] text-ink">LOCAL.</code>
+                <span className="text-[11px] text-ink-muted leading-snug">
+                  Prefix. Everything whose name starts with it.
+                </span>
+                <code className="font-mono text-[11px] text-ink">*evt* log?</code>
+                <span className="text-[11px] text-ink-muted leading-snug">
+                  Wildcards, anywhere — any run, any single character.
+                </span>
+                <code className="font-mono text-[11px] text-ink">!PROD.</code>
+                <span className="text-[11px] text-ink-muted leading-snug">
+                  Exclude. Keeps everything else.
+                </span>
+                <code className="font-mono text-[11px] text-ink">a, b</code>
+                <span className="text-[11px] text-ink-muted leading-snug">
+                  Several at once. Case is ignored. Blank shows all.
+                </span>
+              </div>
 
-          {secretSource === 'aws-iam' && (
-            <>
               <div className="flex gap-2">
-                <div className="flex-1">
+                <KeyIcon />
+                <p className="text-[11px] text-ink-muted leading-snug">
+                  Credentials come from your AWS setup — environment variables, an SSO session, or the
+                  profile above. overdb stores nothing.
+                </p>
+              </div>
+              {/* The filter caveat and the read-only caveat were two paragraphs
+                  making one point: overdb's checks run locally and IAM is the
+                  boundary. Said once, it is read; said twice, neither is. */}
+              <div className="flex gap-2">
+                <WarnIcon />
+                <p className="text-[11px] text-warn/90 leading-snug">
+                  <span className="font-semibold">Both limits above are local.</span> This filter and
+                  overdb&#39;s refusal to write both run here, not at AWS — a hidden table is still
+                  queryable by name, and the durable boundary is the IAM policy on these credentials.
+                </p>
+              </div>
+            </>
+          ) : isSqlite ? (
+            <Field label="File">
+              <div className="flex gap-2">
+                <input readOnly className={`${INPUT} flex-1 font-mono`} value={file}
+                       placeholder="Choose a .sqlite file…" />
+                <button onClick={() => void pick()} className={BTN}>
+                  Browse…
+                </button>
+              </div>
+            </Field>
+          ) : (
+            <>
+              <div className="grid grid-cols-[minmax(0,1fr)_96px] gap-3">
+                <Field label="Host">
+                  <input className={INPUT} value={host} spellCheck={false}
+                         onChange={(e) => applyHost(e.target.value)} />
+                </Field>
+                <Field label="Port">
+                  <input className={`${INPUT} font-mono${blame('port')}`} value={port} inputMode="numeric"
+                         onChange={(e) => setPort(e.target.value)} />
+                </Field>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label="Database">
+                  <input className={INPUT} value={database} spellCheck={false}
+                         onChange={(e) => setDatabase(e.target.value)} />
+                </Field>
+                <Field label="User">
+                  <input className={INPUT} value={user} spellCheck={false}
+                         onChange={(e) => setUser(e.target.value)} />
+                </Field>
+              </div>
+              {/* On MySQL a schema IS a database, and credentials.ts only
+                  falls back to this when Database is blank — so it is offered
+                  there only to someone who already relies on it. */}
+              {(engine === 'postgres' || defaultSchema) && (
+                <Field label={engine === 'postgres' ? 'Search path' : 'Default schema'}>
+                  <input className={INPUT} value={defaultSchema} spellCheck={false}
+                         onChange={(e) => setDefaultSchema(e.target.value)} placeholder="public" />
+                </Field>
+              )}
+            </>
+          )}
+        </Section>
+
+        {isNetworkSql && (
+          <Section title="Sign-in">
+            <Field label="Password from">
+              <select
+                className={`${INPUT}${blame('secretSource')}`}
+                value={secretSource}
+                onChange={(e) => {
+                  setSecretSource(e.target.value as SecretSource);
+                  setProbe(null);
+                }}
+              >
+                <option value="none">Nowhere — trust or socket auth</option>
+                <option value="stored">Stored password, in the OS keychain</option>
+                <option value="env">Environment variable</option>
+                <option value="op">1Password reference</option>
+                <option value="command">Command that prints it</option>
+                <option value="aws-iam">AWS IAM token — RDS, Aurora, Redshift</option>
+              </select>
+            </Field>
+
+            {secretSource === 'stored' && (
+              <div>
+                <Field label={editing ? 'New password' : 'Password'}>
+                  <div className="relative">
+                    <input type={showPassword ? 'text' : 'password'} className={`${INPUT} pr-9`}
+                           value={password}
+                           onChange={(e) => setPassword(e.target.value)}
+                           placeholder={editing ? 'Leave blank to keep the current one' : ''} />
+                    <button
+                      type="button"
+                      onClick={() => setShowPassword((v) => !v)}
+                      aria-label={showPassword ? 'Hide password' : 'Show password'}
+                      title={showPassword ? 'Hide password' : 'Show password'}
+                      className="absolute right-1 top-[3px] w-6 h-6 flex items-center justify-center rounded text-ink-muted hover:text-ink"
+                    >
+                      <EyeIcon off={showPassword} />
+                    </button>
+                  </div>
+                </Field>
+                {enc && !enc.encrypted ? (
+                  <p className="mt-1.5 text-[11px] text-warn/90 leading-snug">
+                    No OS keychain is available here, so a stored password is only base64 on disk —
+                    not encrypted. Use an environment variable or 1Password instead.
+                  </p>
+                ) : (
+                  <Note>
+                    Encrypted by your OS keychain. overdb can write it and never read it back
+                    {editing ? ', which is why the current one isn’t shown' : ''}.
+                  </Note>
+                )}
+              </div>
+            )}
+
+            {secretSource === 'env' && (
+              <>
+                <Field label="Variable name">
+                  <div className="flex gap-2">
+                    <input className={`${INPUT} flex-1 font-mono`} value={envVar}
+                           onChange={(e) => { setEnvVar(e.target.value); setProbe(null); }}
+                           placeholder="PGPASSWORD" />
+                    <button onClick={() => void runProbe()} className={BTN}>
+                      Check
+                    </button>
+                  </div>
+                </Field>
+                <div>
+                  <Field label="Fall back to a file (optional)">
+                    <div className="flex gap-2">
+                      <input className={`${INPUT} flex-1 font-mono`} value={envFile}
+                             onChange={(e) => { setEnvFile(e.target.value); setProbe(null); }}
+                             placeholder="~/work/orders/.env" />
+                      <button onClick={() => void pickPath('envfile', setEnvFile)} className={BTN}>
+                        Browse…
+                      </button>
+                    </div>
+                  </Field>
+                  <Note>
+                    Read when connecting, so rotating the variable rotates the credential. An app
+                    launched from the Dock doesn’t inherit your shell profile — that’s what the file
+                    is for. Only its path is stored.
+                  </Note>
+                </div>
+              </>
+            )}
+
+            {secretSource === 'command' && (
+              <div>
+                <Field label="Command">
+                  <div className="flex gap-2">
+                    <input className={`${INPUT} flex-1 font-mono`} value={commandLine}
+                           onChange={(e) => { setCommandLine(e.target.value); setProbe(null); }}
+                           placeholder="vault kv get -field=password secret/orders/prod"
+                           spellCheck={false} />
+                    <button onClick={() => void runProbe()} disabled={!commandArgv} className={BTN}>
+                      Check
+                    </button>
+                  </div>
+                </Field>
+                {commandError && (
+                  <p className="mt-1.5 text-[11px] text-warn/90 leading-snug">{commandError}</p>
+                )}
+                <Note>
+                  Whatever it prints on stdout is the password — Vault, Secrets Manager,
+                  <span className="font-mono"> pass</span>, or your own wrapper. It runs directly,
+                  never through a shell, so pipes and <span className="font-mono">$(…)</span> are
+                  refused. The command is stored in plain settings: put the <em>lookup</em> here,
+                  never the secret.
+                </Note>
+              </div>
+            )}
+
+            {secretSource === 'aws-iam' && (
+              <div>
+                <div className="grid grid-cols-2 gap-3">
                   <Field label="Region (optional)">
-                    <input className="field px-2 py-1 text-xs w-full font-mono" value={iamRegion}
+                    <input className={`${INPUT} font-mono`} value={iamRegion}
                            onChange={(e) => { setIamRegion(e.target.value); setProbe(null); }}
                            placeholder="read from the endpoint" />
                   </Field>
-                </div>
-                <div className="flex-1">
                   <Field label="AWS profile (optional)">
                     <div className="flex gap-2">
-                      <input className="field px-2 py-1 text-xs flex-1" value={iamProfile}
+                      <input className={`${INPUT} flex-1`} value={iamProfile}
                              onChange={(e) => { setIamProfile(e.target.value); setProbe(null); }}
                              placeholder="the usual chain" />
-                      <button onClick={() => void runProbe()}
-                              className="text-xs px-2 py-1 rounded border border-card hover:bg-card">
+                      <button onClick={() => void runProbe()} className={BTN}>
                         Check
                       </button>
                     </div>
                   </Field>
                 </div>
+                <Note>
+                  A signed token, minted on every connect and good for fifteen minutes — nothing
+                  is stored. Needs <span className="font-mono">rds-db:connect</span> on your IAM
+                  principal and a database user granted <span className="font-mono">rds_iam</span>.
+                  Always sent over TLS, whatever is set below: the token is a bearer credential.
+                </Note>
               </div>
-              <Note>
-                A signed token, minted fresh on every connect and good for fifteen minutes —
-                there is no stored secret at all. Needs{' '}
-                <span className="font-mono">rds-db:connect</span> on your IAM principal and a
-                database user granted{' '}
-                <span className="font-mono">rds_iam</span>. The connection is encrypted whether
-                or not SSL is set below: the token is a bearer credential and overdb will not
-                put one on a plaintext socket.
-              </Note>
-            </>
-          )}
+            )}
 
-          {secretSource === 'op' && (
-            <>
-              <Field label="Reference">
-                <div className="flex gap-2">
-                  <input className="field px-2 py-1 text-xs flex-1 font-mono" value={opRef}
-                         onChange={(e) => { setOpRef(e.target.value); setProbe(null); }}
-                         placeholder="op://Private/orders-db/password" />
-                  <button onClick={() => void runProbe()}
-                          className="text-xs px-2 py-1 rounded border border-card hover:bg-card">
-                    Check
+            {secretSource === 'op' && (
+              <div>
+                <Field label="Reference">
+                  <div className="flex gap-2">
+                    <input className={`${INPUT} flex-1 font-mono`} value={opRef}
+                           onChange={(e) => { setOpRef(e.target.value); setProbe(null); }}
+                           placeholder="op://Private/orders-db/password" />
+                    <button onClick={() => void runProbe()} className={BTN}>
+                      Check
+                    </button>
+                  </div>
+                </Field>
+                <Note>
+                  Resolved with <span className="font-mono">op read</span> when connecting, using
+                  your existing session. Only the reference is stored — rotate the secret in
+                  1Password and nothing here changes.
+                </Note>
+              </div>
+            )}
+
+            {probe && (
+              <p className={`-mt-1 text-[11px] ${probe.ok ? 'text-good' : 'text-bad'}`}>
+                {probe.detail}
+              </p>
+            )}
+          </Section>
+        )}
+
+        {isNetworkSql && (
+          <Section title="Security">
+            <div>
+              <span className="block text-[11px] text-ink-muted mb-1.5" id="tls-label">TLS</span>
+              <div
+                role="radiogroup"
+                aria-labelledby="tls-label"
+                className={`grid grid-cols-4 gap-0.5 p-0.5 rounded-md border border-card bg-card${blame('ssl')}`}
+              >
+                {SSL_MODES.map((m) => (
+                  <button
+                    key={m.value}
+                    type="button"
+                    role="radio"
+                    aria-checked={ssl === m.value}
+                    onClick={() => { setSsl(m.value); setSslTouched(true); setAttempt(null); }}
+                    className={`h-[26px] rounded text-xs transition-colors ${
+                      ssl === m.value
+                        ? 'bg-surface-elevated text-ink shadow-sm ring-1 ring-card'
+                        : 'text-ink-muted hover:text-ink'
+                    }`}
+                  >
+                    {m.label}
                   </button>
-                </div>
-              </Field>
-              <Note>
-                Resolved by running <span className="font-mono">op read</span> at connect
-                time using your existing session. The reference is stored, never the
-                secret — rotate it in 1Password and nothing here needs changing.
-              </Note>
-            </>
-          )}
-
-          {probe && (
-            <p className={`text-[11px] mb-3 ${probe.ok ? 'text-good' : 'text-bad'}`}>
-              {probe.detail}
-            </p>
-          )}
-
-          <div className="flex gap-2">
-            <div className="flex-1">
-              <Field label="SSL">
-                <select className="field px-2 py-1 text-xs w-full" value={ssl}
-                        onChange={(e) => { setSsl(e.target.value as SslMode); setSslTouched(true); }}>
-                  <option value="disable">Disable</option>
-                  <option value="require">Require (no cert check)</option>
-                  <option value="verify-ca">Verify CA (chain, not hostname)</option>
-                  <option value="verify-full">Verify full</option>
-                </select>
-              </Field>
-            </div>
-            <div className="flex-1">
-              <Field label={engine === 'postgres' ? 'Search path' : 'Default schema'}>
-                <input className="field px-2 py-1 text-xs w-full" value={defaultSchema}
-                       onChange={(e) => setDefaultSchema(e.target.value)} placeholder="public" />
-              </Field>
-            </div>
-          </div>
-
-          {ssl !== 'disable' && (
-            <details className="mb-3 rounded border border-card px-3 py-2" open={!!(sslRootCert || sslCert || sslKey)}>
-              <summary className="text-[11px] text-ink-muted cursor-pointer select-none">
-                Certificates
-                {sslRootCert || sslCert ? (
-                  <span className="ml-2 text-[10px] text-good/90">
-                    {sslCert ? 'client certificate' : 'custom CA'}
-                  </span>
-                ) : null}
-              </summary>
-              <div className="mt-2">
-                <PathField label="CA certificate" value={sslRootCert}
-                           onChange={setSslRootCert}
-                           onBrowse={() => void pickPath('ca', setSslRootCert)}
-                           placeholder="the system trust store" />
-                <PathField label="Client certificate" value={sslCert}
-                           onChange={setSslCert}
-                           onBrowse={() => void pickPath('cert', setSslCert)}
-                           placeholder="none" />
-                <PathField label="Client key" value={sslKey}
-                           onChange={setSslKey}
-                           onBrowse={() => void pickPath('key', setSslKey)}
-                           placeholder="none" />
-                <p className="text-[11px] text-ink-faint leading-snug">
-                  {ssl === 'require'
-                    ? 'On Require these are still sent, but nothing about the server is checked. Verify CA or Verify full is what makes a CA mean anything.'
-                    : 'A CA is what lets Verify full succeed against a private root instead of being switched off. A client certificate and key are how CockroachDB and mutual-TLS Postgres identify you — often instead of a password.'}
-                  {' '}Paths only: the files are read when connecting and never stored here.
-                </p>
+                ))}
               </div>
-            </details>
-          )}
+              <Note>{SSL_MODES.find((m) => m.value === ssl)?.hint}</Note>
+            </div>
 
-          <details className="mb-3 rounded border border-card px-3 py-2" open={tunnelOn}>
-            <summary className="text-[11px] text-ink-muted cursor-pointer select-none">
-              SSH tunnel
-              {tunnelOn && tunnelTarget.trim() ? (
-                <span className="ml-2 text-[10px] font-mono text-good/90">{tunnelTarget.trim()}</span>
-              ) : null}
-            </summary>
-            <div className="mt-2">
-              <label className="flex items-center gap-2 mb-2.5 text-[11px] text-ink">
-                <input type="checkbox" checked={tunnelOn}
-                       onChange={(e) => { setTunnelOn(e.target.checked); setAttempt(null); }} />
-                Reach this database through a bastion
+            {ssl !== 'disable' && (
+              <details className="rounded-md border border-card px-3 py-2" open={!!(sslRootCert || sslCert || sslKey)}>
+                <summary className="text-xs text-ink-muted cursor-pointer select-none">
+                  Certificates
+                  {sslRootCert || sslCert ? (
+                    <span className="ml-2 text-[11px] text-good/90">
+                      {sslCert ? 'client certificate' : 'custom CA'}
+                    </span>
+                  ) : null}
+                </summary>
+                <div className="mt-3 flex flex-col gap-3">
+                  <PathField label="CA certificate" value={sslRootCert}
+                             onChange={setSslRootCert}
+                             onBrowse={() => void pickPath('ca', setSslRootCert)}
+                             placeholder="the system trust store" />
+                  <PathField label="Client certificate" value={sslCert}
+                             onChange={setSslCert}
+                             onBrowse={() => void pickPath('cert', setSslCert)}
+                             placeholder="none" />
+                  <PathField label="Client key" value={sslKey}
+                             onChange={setSslKey}
+                             onBrowse={() => void pickPath('key', setSslKey)}
+                             placeholder="none" />
+                  <p className="text-[11px] text-ink-faint leading-snug">
+                    {ssl === 'require'
+                      ? 'On Require these are still sent, but nothing about the server is checked. Verify CA or Verify full is what makes a CA mean anything.'
+                      : 'A CA is what lets Verify full succeed against a private root instead of being switched off. A client certificate and key are how CockroachDB and mutual-TLS Postgres identify you — often instead of a password.'}
+                    {' '}Paths only: the files are read when connecting and never stored here.
+                  </p>
+                </div>
+              </details>
+            )}
+
+            <div className="rounded-md border border-card">
+              <label className="flex items-center gap-3 px-3 py-2.5 cursor-pointer">
+                <TerminalIcon />
+                <span className="flex-1 min-w-0">
+                  <span className="block text-[12.5px] text-ink">Connect through SSH</span>
+                  <span className="block text-[11.5px] text-ink-muted truncate">
+                    {tunnelOn && tunnelTarget.trim() ? (
+                      <span className="font-mono">via {tunnelTarget.trim()}</span>
+                    ) : (
+                      'Tunnel via a bastion, using your own ssh and ~/.ssh/config'
+                    )}
+                  </span>
+                </span>
+                <Switch
+                  checked={tunnelOn}
+                  label="Connect through SSH"
+                  onChange={(on) => { setTunnelOn(on); setAttempt(null); }}
+                />
               </label>
               {tunnelOn && (
-                <>
-                  <div className="flex gap-2">
-                    <div className="flex-1">
-                      <Field label="SSH host">
-                        <input className="field px-2 py-1 text-xs w-full font-mono" value={tunnelTarget}
-                               onChange={(e) => { setTunnelTarget(e.target.value); setAttempt(null); }}
-                               placeholder="ec2-user@bastion.example.com" spellCheck={false} />
-                      </Field>
-                    </div>
-                    <div className="w-20">
-                      <Field label="Port">
-                        <input className="field px-2 py-1 text-xs w-full" value={tunnelPort}
-                               onChange={(e) => setTunnelPort(e.target.value)} placeholder="22" />
-                      </Field>
-                    </div>
+                <div className="border-t border-card px-3 pt-3 pb-3 flex flex-col gap-3">
+                  <div className="grid grid-cols-[minmax(0,1fr)_80px] gap-3">
+                    <Field label="SSH host">
+                      <input className={`${INPUT} font-mono`} value={tunnelTarget}
+                             onChange={(e) => { setTunnelTarget(e.target.value); setAttempt(null); }}
+                             placeholder="ec2-user@bastion.example.com" spellCheck={false} />
+                    </Field>
+                    <Field label="Port">
+                      <input className={`${INPUT} font-mono`} value={tunnelPort}
+                             onChange={(e) => setTunnelPort(e.target.value)} placeholder="22" />
+                    </Field>
                   </div>
                   <PathField label="Key file (optional)" value={tunnelIdentity}
                              onChange={setTunnelIdentity}
                              onBrowse={() => void pickPath('identity', setTunnelIdentity)}
                              placeholder="your agent and ~/.ssh/config" />
-                  <div className="flex gap-2">
-                    <div className="flex-1">
-                      <Field label="Database host, from the bastion">
-                        <input className="field px-2 py-1 text-xs w-full font-mono" value={tunnelRemoteHost}
-                               onChange={(e) => setTunnelRemoteHost(e.target.value)}
-                               placeholder={host || 'the host above'} spellCheck={false} />
-                      </Field>
-                    </div>
-                    <div className="w-20">
-                      <Field label="Port">
-                        <input className="field px-2 py-1 text-xs w-full" value={tunnelRemotePort}
-                               onChange={(e) => setTunnelRemotePort(e.target.value)}
-                               placeholder={port || ''} />
-                      </Field>
-                    </div>
+                  <div className="grid grid-cols-[minmax(0,1fr)_80px] gap-3">
+                    <Field label="Database host, from the bastion">
+                      <input className={`${INPUT} font-mono`} value={tunnelRemoteHost}
+                             onChange={(e) => setTunnelRemoteHost(e.target.value)}
+                             placeholder={host || 'the host above'} spellCheck={false} />
+                    </Field>
+                    <Field label="Port">
+                      <input className={`${INPUT} font-mono`} value={tunnelRemotePort}
+                             onChange={(e) => setTunnelRemotePort(e.target.value)}
+                             placeholder={port || ''} />
+                    </Field>
                   </div>
                   {tunnelError && (
-                    <p className="text-[11px] text-warn/90 leading-snug mb-2">{tunnelError}</p>
+                    <p className="text-[11px] text-warn/90 leading-snug">{tunnelError}</p>
                   )}
                   <p className="text-[11px] text-ink-faint leading-snug">
-                    overdb runs your own <span className="font-mono">ssh</span>, so{' '}
-                    <span className="font-mono">~/.ssh/config</span> aliases, ProxyJump and your
-                    agent all apply — and no private key is ever handled here. It will not answer
-                    a passphrase or accept an unknown host key on your behalf: if{' '}
+                    overdb runs your own <span className="font-mono">ssh</span>, so aliases,
+                    ProxyJump and your agent all apply, and no private key is handled here. It won’t
+                    answer a passphrase or accept an unknown host key for you: if{' '}
                     <span className="font-mono">ssh {tunnelTarget.trim() || '<host>'}</span> works
                     in a terminal, this works. The forwarded port is bound to 127.0.0.1 only.
                   </p>
-                </>
+                </div>
               )}
             </div>
-          </details>
-        </>
+          </Section>
+        )}
+      </div>
+
+      {/* Pinned with the buttons rather than scrolled with the fields: it is
+          the answer to the button just pressed, so it appears where the eye
+          already is. */}
+      {attempt && !attempt.ok && diagnosis && (
+        <Diagnosis
+          diagnosis={diagnosis}
+          error={attempt.error}
+          onFix={applyFix}
+          onDismiss={() => setAttempt(null)}
+        />
       )}
 
-      <Attempt
-        result={attempt}
-        engine={engine}
-        variant={variant}
-        ssl={ssl}
-        secretSource={isDynamo ? undefined : secretSource}
-        host={host}
-        port={Number(port) || undefined}
-        user={user}
-        database={database}
-        onFix={applyFix}
-      />
-
-      <div className="flex items-center gap-2 mt-4">
+      <div className="shrink-0 border-t border-card bg-surface-muted/60 px-6 py-3 flex items-center gap-2.5">
         {/* Test sits apart from the two decision buttons: it changes
             nothing, and pressing it should never feel like committing. */}
         <button onClick={() => void test()} disabled={testing || busy || !!commandError || !!tunnelError}
-                className="text-xs px-3 py-1.5 rounded border border-card hover:bg-card disabled:opacity-40">
-          {testing ? 'Testing…' : 'Test connection'}
+                className={BTN}>
+          Test
         </button>
+        <TestStatus
+          testing={testing}
+          busy={busy}
+          attempt={attempt}
+          ms={testMs}
+          label={VARIANTS[attempt?.variant ?? variant].label}
+        />
+        <div className="flex-1" />
         {editing && (
           <button onClick={() => void duplicate()} disabled={testing || busy}
                   title="Save these settings as a new connection, leaving this one unchanged"
-                  className="text-xs px-3 py-1.5 rounded border border-card hover:bg-card disabled:opacity-40">
+                  className="h-[30px] px-2.5 rounded-[5px] text-[12.5px] text-ink-muted hover:text-ink hover:bg-card disabled:opacity-40">
             Duplicate
           </button>
         )}
-        <div className="flex-1" />
-        <button onClick={onDone}
-                className="text-xs px-3 py-1.5 rounded border border-card hover:bg-card">
+        <button onClick={onDone} className={BTN}>
           Cancel
         </button>
-        <button onClick={() => void save()}
-                disabled={
-                  busy ||
-                  (isSqlite && !file) ||
-                  (isDynamo && !region.trim()) ||
-                  !!commandError ||
-                  !!tunnelError
-                }
-                className="text-xs px-3 py-1.5 rounded bg-accent text-white hover:bg-accent-strong disabled:opacity-40">
+        <button onClick={() => void save()} disabled={saveDisabled} className={PRIMARY} title="⌘↵">
           {busy ? 'Connecting…' : editing ? 'Save & reconnect' : 'Add & connect'}
+          {/* Only where it fits: editing adds Duplicate to the same row. */}
+          {!busy && !editing && <span className="text-[11px] opacity-70">⌘↵</span>}
         </button>
       </div>
     </div>
   );
 }
 
-/// The outcome of a connection attempt, and what to do about it.
+const INPUT = 'field px-2.5 h-[30px] text-[12.5px] w-full';
+const BTN =
+  'h-[30px] px-3 rounded-[5px] border border-card bg-card hover:bg-wash-strong text-[12.5px] text-ink disabled:opacity-40 inline-flex items-center gap-1.5 shrink-0';
+/// accent-strong, not accent: white on the dark theme's accent is 3.9:1,
+/// under the 4.5 a button label needs. The strong step clears it on both.
+const PRIMARY =
+  'h-[30px] px-3 rounded-[5px] bg-accent-strong hover:bg-accent-strong/90 text-white text-[12.5px] font-medium disabled:opacity-40 inline-flex items-center gap-2 shrink-0';
+
+const SSL_MODES: { value: SslMode; label: string; hint: string }[] = [
+  { value: 'disable', label: 'Off', hint: 'Unencrypted. Fine for localhost; anywhere else, traffic crosses the network in the clear.' },
+  { value: 'require', label: 'Require', hint: 'Encrypted, but the server’s certificate is not checked.' },
+  { value: 'verify-ca', label: 'Verify CA', hint: 'Encrypted, and the certificate chain is checked — but not the hostname.' },
+  { value: 'verify-full', label: 'Verify full', hint: 'Encrypted, and the certificate must be valid for this exact host.' },
+];
+
+/// The example URL speaks the dialect of the type already chosen: a
+/// postgres:// placeholder over a MySQL form reads like the form is wrong.
+function urlPlaceholder(variant: Variant): string {
+  const port = variantDefaults(variant).port;
+  switch (variant) {
+    case 'sqlite':
+      return 'sqlite:///path/to/orders.db';
+    case 'redshift':
+      return `redshift://user:pass@cluster.redshift.amazonaws.com:${port}/dev`;
+    case 'cockroach':
+      return `cockroachdb://user:pass@host:${port}/orders?sslmode=verify-full`;
+    case 'mariadb':
+      return `mariadb://user:pass@host:${port}/orders`;
+    case 'mysql':
+    case 'aurora-mysql':
+      return `mysql://user:pass@host:${port}/orders`;
+    default:
+      return `postgres://user:pass@host:${port}/orders?sslmode=require`;
+  }
+}
+
+function Section({ title, children }: { title: string; children: React.ReactNode }): JSX.Element {
+  return (
+    <section className="flex flex-col gap-3">
+      <div className="flex items-center gap-2.5">
+        <h3 className="text-[11px] font-semibold uppercase tracking-[0.06em] text-ink-muted">{title}</h3>
+        <span className="flex-1 h-px bg-rule" />
+      </div>
+      {children}
+    </section>
+  );
+}
+
+/// What Test (or a failed Save) came back with, in a word, next to the
+/// button that asked. The detail, when there is any, is in the panel above.
+function TestStatus({
+  testing,
+  busy,
+  attempt,
+  ms,
+  label,
+}: {
+  testing: boolean;
+  busy: boolean;
+  attempt: ConnectionTestResult | null;
+  ms: number | null;
+  label: string;
+}): JSX.Element | null {
+  if (testing) {
+    return (
+      <span role="status" className="flex items-center gap-1.5 text-xs text-ink-muted">
+        <Spinner /> Testing…
+      </span>
+    );
+  }
+  if (busy || !attempt) return null;
+  if (attempt.ok) {
+    const version = attempt.serverVersion?.split(/\s+on\s+|,/)[0];
+    return (
+      <span role="status" className="flex items-center gap-1.5 min-w-0 text-xs text-good"
+            title={attempt.serverVersion ?? label}>
+        <CheckIcon />
+        <span className="whitespace-nowrap">Connected</span>
+        <span className="truncate font-mono text-[11.5px] text-ink-muted">
+          {version ?? label}
+          {ms != null ? ` · ${ms} ms` : ''}
+        </span>
+      </span>
+    );
+  }
+  return (
+    <span role="status" className="flex items-center gap-1.5 min-w-0 text-xs text-bad" title="Couldn’t connect — the reason is above">
+      <CrossIcon /> <span className="truncate">Failed</span>
+    </span>
+  );
+}
+
+/// The outcome of a failed attempt, and what to do about it.
 ///
 /// A driver error alone is a dead end for anyone who did not write the
 /// driver: "no pg_hba.conf entry for host ..., SSL off" is Redshift saying
-/// "turn on TLS", and says so nowhere. The message is still shown — it is
-/// the ground truth, and someone will paste it into a ticket — but it is
-/// shown UNDER the sentence that explains it and the buttons that fix it.
-function Attempt({
-  result,
-  engine,
-  variant,
-  ssl,
-  secretSource,
-  host,
-  port,
-  user,
-  database,
+/// "turn on TLS", and says so nowhere. The message is still here — it is
+/// the ground truth, and someone will paste it into a ticket — but folded
+/// UNDER the sentence that explains it and the buttons that fix it.
+function Diagnosis({
+  diagnosis: d,
+  error,
   onFix,
+  onDismiss,
 }: {
-  result: ConnectionTestResult | null;
-  engine: Engine;
-  variant: Variant;
-  ssl?: SslMode;
-  secretSource?: SecretSource;
-  host?: string;
-  port?: number;
-  user?: string;
-  database?: string;
+  diagnosis: ReturnType<typeof diagnose>;
+  error?: string;
   onFix(fix: ConnectFix): void;
-}): JSX.Element | null {
-  if (!result) return null;
-
-  if (result.ok) {
-    return (
-      <div className="mt-3 rounded border border-good/30 bg-good/5 px-3 py-2.5">
-        <p className="text-[11px] text-good font-semibold">
-          Connected to {VARIANTS[result.variant ?? variant].label}.
-        </p>
-        {result.serverVersion && (
-          // What the server volunteered, verbatim. It is the only proof on
-          // screen that this is the database you meant.
-          <p className="mt-1 font-mono text-[10.5px] text-ink-muted leading-snug break-words">
-            {result.serverVersion}
-          </p>
-        )}
-      </div>
-    );
-  }
-
-  const d = diagnose({
-    engine,
-    error: result.error ?? '',
-    ssl,
-    secretSource,
-    host,
-    port,
-    user,
-    database,
-  });
-
+  onDismiss(): void;
+}): JSX.Element {
+  const actionable = d.fixes.filter((f) => f.set);
+  const advice = d.fixes.filter((f) => !f.set);
   return (
-    <div className="mt-3 rounded border border-bad/30 bg-bad/5 px-3 py-2.5">
-      <p className="text-[11px] text-bad-strong font-semibold leading-snug">{d.cause}</p>
+    <div role="alert"
+         className="shrink-0 mx-4 mb-3 max-h-[40%] overflow-y-auto rounded-lg border border-bad/30 bg-bad/5 px-3.5 py-3 flex flex-col gap-2.5">
+      <div className="flex items-start gap-2.5">
+        <AlertIcon />
+        <p className="flex-1 text-[12.5px] font-semibold text-bad-strong leading-snug">{d.cause}</p>
+        <button onClick={onDismiss} aria-label="Dismiss"
+                className="shrink-0 -mt-0.5 w-5 h-5 flex items-center justify-center rounded text-ink-muted hover:text-ink">
+          <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+               strokeWidth="1.8" strokeLinecap="round" aria-hidden>
+            <path d="M4 4l8 8M12 4l-8 8" />
+          </svg>
+        </button>
+      </div>
 
-      {d.fixes.length > 0 && (
-        <ul className="mt-2 space-y-1.5">
-          {d.fixes.map((fix) => (
-            <li key={fix.label}>
-              {fix.set ? (
-                <button
-                  onClick={() => onFix(fix)}
-                  className="w-full text-left rounded border border-card hover:bg-card px-2 py-1.5"
-                >
-                  <span className="block text-[11px] text-ink font-medium">{fix.label}</span>
-                  <span className="block text-[10.5px] text-ink-faint leading-snug">{fix.detail}</span>
-                </button>
-              ) : (
-                // No `set` means the remedy is outside this dialog — a VPN,
-                // a GRANT, an IAM policy. Shown, but not as a button that
-                // would do nothing.
-                <div className="px-2 py-1.5">
-                  <span className="block text-[11px] text-ink-muted font-medium">{fix.label}</span>
-                  <span className="block text-[10.5px] text-ink-faint leading-snug">{fix.detail}</span>
-                </div>
-              )}
+      {/* The likeliest fix first, as a button; the alternatives after it
+          as a line of links. Five equal buttons for "where should the
+          password come from" read as five things to do. */}
+      {actionable.length > 0 && (
+        <div className="pl-[26px] flex flex-col gap-1.5">
+          <div className="flex flex-wrap gap-2">
+            {actionable.slice(0, actionable.length > 2 ? 1 : 2).map((fix) => (
+              <button key={fix.label} onClick={() => onFix(fix)} title={fix.detail}
+                      className="h-7 px-2.5 rounded-[5px] border border-card bg-surface-elevated hover:bg-card text-xs text-ink">
+                {fix.label}
+              </button>
+            ))}
+          </div>
+          {actionable.length > 2 && (
+            <p className="text-[11.5px] text-ink-muted leading-relaxed">
+              Or:{' '}
+              {actionable.slice(1).map((fix, i) => (
+                <span key={fix.label}>
+                  {i > 0 && <span className="text-ink-faint"> · </span>}
+                  <button onClick={() => onFix(fix)} title={fix.detail}
+                          className="text-accent hover:underline">
+                    {fix.label.charAt(0).toLowerCase() + fix.label.slice(1)}
+                  </button>
+                </span>
+              ))}
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* No `set` means the remedy is outside this dialog — a VPN, a GRANT,
+          an IAM policy. Shown, but not as a button that would do nothing. */}
+      {advice.length > 0 && (
+        <ul className="pl-[26px] flex flex-col gap-1.5">
+          {advice.map((fix) => (
+            <li key={fix.label} className="text-[11.5px] leading-snug">
+              <span className="text-ink">{/[.?!]$/.test(fix.label) ? fix.label : `${fix.label}.`}</span>{' '}
+              <span className="text-ink-muted">{fix.detail}</span>
             </li>
           ))}
         </ul>
       )}
 
-      {result.error && (
-        <p className="mt-2 font-mono text-[10.5px] text-ink-faint leading-snug break-words">
-          {result.error}
-        </p>
+      {error && (
+        <details className="pl-[26px]">
+          <summary className="text-[11px] text-ink-muted cursor-pointer select-none">Driver message</summary>
+          <p className="mt-1.5 font-mono text-[10.5px] text-ink-muted leading-snug break-words select-text">
+            {error}
+          </p>
+        </details>
       )}
     </div>
   );
@@ -1048,16 +1228,15 @@ function PathField({
   return (
     <Field label={label}>
       <div className="flex gap-2">
-        <input className="field px-2 py-1 text-xs flex-1 font-mono" value={value}
+        <input className={`${INPUT} flex-1 font-mono`} value={value}
                onChange={(e) => onChange(e.target.value)} placeholder={placeholder}
                spellCheck={false} />
-        <button onClick={onBrowse}
-                className="text-xs px-2 py-1 rounded border border-card hover:bg-card">
+        <button onClick={onBrowse} className={BTN}>
           Browse…
         </button>
         {value && (
-          <button onClick={() => onChange('')} title="Clear"
-                  className="text-xs px-2 py-1 rounded border border-card hover:bg-card text-ink-faint">
+          <button onClick={() => onChange('')} title="Clear" aria-label="Clear"
+                  className={`${BTN} text-ink-muted`}>
             ×
           </button>
         )}
@@ -1076,13 +1255,13 @@ function UrlPreview({ text }: { text: string }): JSX.Element | null {
   const parsed = parseConnectionUrl(text);
   if (!parsed) {
     return (
-      <p className="text-[11px] text-ink-faint leading-snug mb-3 -mt-1">
+      <p className="mt-1.5 text-[11px] text-ink-faint leading-snug">
         Not a connection URL yet — postgres://, mysql://, or a jdbc: one.
       </p>
     );
   }
   return (
-    <p className="text-[11px] text-ink-muted leading-snug mb-3 -mt-1">
+    <p className="mt-1.5 text-[11px] text-ink-muted leading-snug">
       {VARIANTS[parsed.variant ?? (parsed.engine as Variant)].label}
       {parsed.host ? ` · ${parsed.host}${parsed.port ? `:${parsed.port}` : ''}` : ''}
       {parsed.database ? ` · ${parsed.database}` : ''}
@@ -1096,15 +1275,15 @@ function UrlPreview({ text }: { text: string }): JSX.Element | null {
 
 function Field({ label, children }: { label: string; children: React.ReactNode }): JSX.Element {
   return (
-    <label className="block mb-3">
-      <span className="block text-[10px] uppercase tracking-wider text-ink-faint mb-1">{label}</span>
+    <label className="block min-w-0">
+      <span className="block text-[11px] text-ink-muted mb-1.5">{label}</span>
       {children}
     </label>
   );
 }
 
 function Note({ children }: { children: React.ReactNode }): JSX.Element {
-  return <p className="text-[11px] text-ink-faint leading-snug mb-3 -mt-1">{children}</p>;
+  return <p className="mt-1.5 text-[11px] text-ink-muted leading-snug">{children}</p>;
 }
 
 /// What the filter you are typing would actually select.
@@ -1152,7 +1331,7 @@ function FilterPreview({
 
   const all = result.matched === result.total;
   return (
-    <div className="mb-3 rounded border border-card px-2.5 py-2">
+    <div className="rounded-md border border-card px-2.5 py-2">
       <div className="flex items-baseline gap-1.5 text-[11px]">
         <span className={all ? 'text-ink-muted' : 'text-good/90'}>
           {result.matched.toLocaleString()} of {result.total.toLocaleString()} tables
@@ -1203,6 +1382,113 @@ function WarnIcon(): JSX.Element {
       <path d="M10.3 3.9 1.9 18a2 2 0 0 0 1.7 3h16.8a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z" />
       <path d="M12 9v4" />
       <path d="M12 17h.01" />
+    </svg>
+  );
+}
+
+function CloseButton({ onClick }: { onClick(): void }): JSX.Element {
+  return (
+    <button onClick={onClick} aria-label="Close" title="Close (Esc)"
+            className="shrink-0 -mr-1.5 w-7 h-7 flex items-center justify-center rounded-[5px] text-ink-muted hover:text-ink hover:bg-card">
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+           strokeWidth="1.6" strokeLinecap="round" aria-hidden>
+        <path d="M4 4l8 8M12 4l-8 8" />
+      </svg>
+    </button>
+  );
+}
+
+/// A checkbox that looks like what it is — on or off, taking effect at
+/// once — rather than a tick that reads as "include this".
+function Switch({
+  checked,
+  onChange,
+  label,
+}: {
+  checked: boolean;
+  onChange(on: boolean): void;
+  label: string;
+}): JSX.Element {
+  return (
+    <span className="relative shrink-0 inline-flex">
+      <input type="checkbox" role="switch" aria-label={label} checked={checked}
+             onChange={(e) => onChange(e.target.checked)}
+             className="peer absolute inset-0 opacity-0 cursor-pointer" />
+      <span className={`w-[30px] h-[18px] rounded-full transition-colors peer-focus-visible:ring-2 peer-focus-visible:ring-accent/60 ${
+        checked ? 'bg-accent-strong' : 'bg-wash-strong border border-card'
+      }`} />
+      <span className={`pointer-events-none absolute top-[3px] w-3 h-3 rounded-full bg-white shadow transition-transform ${
+        checked ? 'translate-x-[15px]' : 'translate-x-[3px]'
+      }`} />
+    </span>
+  );
+}
+
+function LinkIcon(): JSX.Element {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+         strokeWidth="1.5" strokeLinecap="round" aria-hidden
+         className="pointer-events-none absolute left-2.5 top-2 text-ink-faint">
+      <path d="M6.5 9.5l3-3M7 4.5l1-1a3 3 0 014.2 4.2l-1 1M9 11.5l-1 1a3 3 0 01-4.2-4.2l1-1" />
+    </svg>
+  );
+}
+
+function EyeIcon({ off }: { off: boolean }): JSX.Element {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+         strokeWidth="1.4" strokeLinecap="round" aria-hidden>
+      <path d="M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z" />
+      <circle cx="8" cy="8" r="2" />
+      {off && <path d="M2.5 13.5l11-11" />}
+    </svg>
+  );
+}
+
+function TerminalIcon(): JSX.Element {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+         strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden
+         className="shrink-0 text-ink-muted">
+      <rect x="1.5" y="3" width="13" height="10" rx="1.5" />
+      <path d="M4.5 6.5l2 1.5-2 1.5M8.5 10h3" />
+    </svg>
+  );
+}
+
+function CheckIcon(): JSX.Element {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+         strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden className="shrink-0">
+      <path d="M3.5 8.5l3 3 6-7" />
+    </svg>
+  );
+}
+
+function CrossIcon(): JSX.Element {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+         strokeWidth="1.8" strokeLinecap="round" aria-hidden className="shrink-0">
+      <path d="M4.5 4.5l7 7M11.5 4.5l-7 7" />
+    </svg>
+  );
+}
+
+function AlertIcon(): JSX.Element {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+         strokeWidth="1.6" strokeLinecap="round" aria-hidden className="shrink-0 mt-px text-bad">
+      <circle cx="8" cy="8" r="6.5" />
+      <path d="M8 4.8v3.8M8 11.2v.01" />
+    </svg>
+  );
+}
+
+function Spinner(): JSX.Element {
+  return (
+    <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden className="animate-spin">
+      <circle cx="8" cy="8" r="6" stroke="currentColor" strokeOpacity="0.25" strokeWidth="2" />
+      <path d="M14 8a6 6 0 00-6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
     </svg>
   );
 }

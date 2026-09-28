@@ -4,6 +4,7 @@ import { variantLabel, variantTag } from '@shared/engines';
 import type { Variant } from '@shared/engines';
 import { useStore } from './store';
 import { EnvSetSuggestion } from './Welcome';
+import { TAG_DOT, TAG_TEXT } from './engineTags';
 import { middleTruncate, nameBudget } from '@shared/truncate';
 
 /// Which sections the user has folded away. Per-viewer convenience, so it
@@ -321,40 +322,6 @@ function EnvSetRow({
     />
   );
 }
-
-/// Written out as whole class strings, never interpolated. Tailwind scans
-/// source text for class names, so `text-${colour}-300/70` emits no CSS at
-/// all — the badge would render in the inherited colour and look broken.
-///
-/// The muting that keeps the badge below the connection's own name lives
-/// in the token, not in an opacity modifier here: how far a hue has to be
-/// pulled back to sit under the name is not the same on both grounds.
-const TAG_TEXT: Record<Variant, string> = {
-  postgres: 'text-tag-sky',
-  redshift: 'text-tag-rose',
-  'aurora-postgres': 'text-tag-cyan',
-  cockroach: 'text-tag-violet',
-  timescale: 'text-tag-indigo',
-  mysql: 'text-tag-amber',
-  mariadb: 'text-tag-orange',
-  'aurora-mysql': 'text-tag-cyan',
-  sqlite: 'text-tag-emerald',
-  dynamodb: 'text-tag-blue',
-};
-
-/// The same colours as a dot, for widths too narrow to spell the name.
-const TAG_DOT: Record<Variant, string> = {
-  postgres: 'bg-tag-sky',
-  redshift: 'bg-tag-rose',
-  'aurora-postgres': 'bg-tag-cyan',
-  cockroach: 'bg-tag-violet',
-  timescale: 'bg-tag-indigo',
-  mysql: 'bg-tag-amber',
-  mariadb: 'bg-tag-orange',
-  'aurora-mysql': 'bg-tag-cyan',
-  sqlite: 'bg-tag-emerald',
-  dynamodb: 'bg-tag-blue',
-};
 
 /// Below this the badge drops its word and keeps its colour. Spelling
 /// "DynamoDB" in a 180px row leaves nothing for the name, which is the

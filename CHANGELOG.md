@@ -12,6 +12,23 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   each DBeaver project and keeps its folders, and a connection DBeaver marks
   as production is filed as prod. Passwords stay in DBeaver, as they do for
   DataGrip: you enter them once per connection.
+- A connection that fails to open now says why, above the editor, instead of
+  a four-second toast with the driver's raw message. The banner names the
+  likely fixes, and Fix connection… opens the connection with the same
+  explanation and its fix buttons already showing.
+
+### Changed
+- The New and Edit connection sheet is regrouped into Connection, Sign-in
+  and Security. TLS is a four-way switch with a line on what each mode
+  checks, the SSH tunnel is a switch that expands in place, and the example
+  URL matches the chosen engine. Test reports in the footer, with the
+  server version and round-trip time, and a failure is explained just above
+  the buttons. ⌘↵ saves.
+- The Import connections sheet is wider, filters by name, host or
+  environment, groups each source into a card with its own select-all, and
+  shows each connection's engine the way the sidebar will.
+- Building from source needs Node.js 22.12 or newer, and `npm run dev`
+  builds the main process before it starts.
 
 ### Fixed
 - The app icon broke up at small sizes. Finder's list view, the Dock at its
@@ -21,6 +38,13 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - The Import connections sheet kept Cancel and Import below the list, out
   of sight once a machine turned up more than a handful of connections. The
   buttons now stay pinned while the list scrolls.
+- The connection sheet's Test and Save buttons scrolled out of view the same
+  way. They are pinned too.
+- Form sheets showed a second scrollbar around their own.
+- Changing a new connection's type turned on Verify full TLS even for
+  localhost, so a stock local server failed on a certificate it never had.
+- A connection set to a stored password with none saved was told to try a
+  different password source. It now asks for the password again.
 
 ## [0.1.1] - 2026-09-23
 

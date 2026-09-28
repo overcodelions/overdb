@@ -66,7 +66,7 @@ export function TablePicker({
   const total = tables?.length ?? 0;
 
   return (
-    <div className="p-4 flex flex-col gap-3 max-h-[70vh]">
+    <div className="p-4 flex flex-col gap-3 min-h-0">
       <div>
         <h2 className="text-sm font-semibold text-ink">Tables the AI sees</h2>
         <p className="mt-1 text-[11px] text-ink-faint leading-relaxed">
