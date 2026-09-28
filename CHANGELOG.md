@@ -7,6 +7,8 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-09-27
+
 ### Added
 - Import connections from DBeaver. overdb reads the `data-sources.json` in
   each DBeaver project and keeps its folders, and a connection DBeaver marks
@@ -45,6 +47,9 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   localhost, so a stock local server failed on a certificate it never had.
 - A connection set to a stored password with none saved was told to try a
   different password source. It now asks for the password again.
+- Scanning a broad folder for JetBrains projects froze the whole app,
+  queries in flight included, until the scan finished. The scan now runs
+  in the background.
 
 ## [0.1.1] - 2026-09-23
 
@@ -202,6 +207,7 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - DynamoDB has no server-side read-only session. Use read-only IAM credentials
   for a durable production boundary.
 
-[Unreleased]: https://github.com/overcodelions/overdb/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/overcodelions/overdb/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/overcodelions/overdb/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/overcodelions/overdb/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/overcodelions/overdb/releases/tag/v0.1.0
