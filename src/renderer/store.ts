@@ -43,7 +43,9 @@ export type Sheet =
   /// opens with its engine, host and port filled rather than asking again.
   | { kind: 'newConnection'; found?: { engine: Engine; host: string; port: number; version?: string } }
   | { kind: 'importConnections' }
-  | { kind: 'editConnection'; id: string }
+  /// `failure` is the error from a connect attempt made outside the form,
+  /// so the form opens already showing what went wrong and how to fix it.
+  | { kind: 'editConnection'; id: string; failure?: string }
   /// `suggested` pre-ticks members the app thinks are one database — the
   /// set-up hint in the sidebar. Still a form: nothing is saved until Create.
   | { kind: 'newEnvSet'; suggested?: { name: string; memberIds: string[]; baselineId: string } }
@@ -83,6 +85,11 @@ interface State {
   /// this made a broken schema look exactly like a working one with no
   /// completions.
   schemaError: Record<string, string | undefined>;
+  /// The last failed attempt to OPEN each connection, verbatim from the
+  /// driver. Kept apart from schemaError: "couldn't reach the server" and
+  /// "reached it, couldn't read the catalog" have different fixes, and the
+  /// first used to be reported as the second ("no schema — retry").
+  connectError: Record<string, string | undefined>;
   /// Every schema/database the connection could switch to, and which one is
   /// currently active.
   schemaList: Record<string, string[]>;
@@ -207,6 +214,7 @@ interface State {
   /// Environment sets: the same logical database in several places. Created
   /// and edited here rather than by hand-editing a config file, which is
   /// what "the + button opens a placeholder" amounted to.
+  setConnectError(connectionId: string, error: string | undefined): void;
   setConnState(connectionId: string, state: 'open' | 'closed' | 'error'): void;
   /// Replace what the window believes about every connection with what main
   /// actually has open. Called once on mount: the pushes that built this up
@@ -277,6 +285,7 @@ export const useStore = create<State>((set, get) => ({
   schemas: {},
   schemaLoading: {},
   schemaError: {},
+  connectError: {},
   schemaList: {},
   buffers: {},
   activeBuffer: {},
@@ -578,8 +587,12 @@ export const useStore = create<State>((set, get) => ({
     try {
       if (!(await window.overdb.invoke('conn:isOpen', connectionId))) {
         const opened = await window.overdb.invoke('conn:open', connectionId);
-        if (!opened.ok) throw new Error(opened.error ?? 'Could not connect.');
+        if (!opened.ok) {
+          get().setConnectError(connectionId, opened.error ?? 'Could not connect.');
+          return;
+        }
       }
+      get().setConnectError(connectionId, undefined);
       const snapshot = await window.overdb.invoke('conn:introspect', { connectionId });
 
       // Then the cheap part: names of every table in every visible schema,
@@ -780,7 +793,7 @@ export const useStore = create<State>((set, get) => ({
     if (!(await window.overdb.invoke('conn:isOpen', connectionId))) {
       const opened = await window.overdb.invoke('conn:open', connectionId);
       if (!opened.ok) {
-        get().toast(opened.error ?? 'Could not connect.', 'error');
+        get().setConnectError(connectionId, opened.error ?? 'Could not connect.');
         return;
       }
     }
@@ -901,8 +914,17 @@ export const useStore = create<State>((set, get) => ({
     return created.length;
   },
 
+  setConnectError(connectionId, error) {
+    set((st) => ({ connectError: { ...st.connectError, [connectionId]: error } }));
+  },
+
   setConnState(connectionId, state) {
-    set((st) => ({ connState: { ...st.connState, [connectionId]: state } }));
+    set((st) => ({
+      connState: { ...st.connState, [connectionId]: state },
+      // However it came up — Run, Connect, a save in the form — an open
+      // connection answers the last failure.
+      ...(state === 'open' ? { connectError: { ...st.connectError, [connectionId]: undefined } } : {}),
+    }));
   },
 
   seedConnStates(openIds) {

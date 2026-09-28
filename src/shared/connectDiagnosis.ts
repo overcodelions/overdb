@@ -200,6 +200,21 @@ export function diagnose(input: DiagnosisInput): ConnectDiagnosis {
   // --- Who you are -----------------------------------------------------
   if (/password authentication failed|Access denied for user|ER_ACCESS_DENIED_ERROR|authentication failed for user/i.test(e)) {
     const sentNothing = /using password: NO/i.test(e) || (input.secretSource ?? 'none') === 'none';
+    // Set to a stored password, and still nothing went: the keychain has no
+    // entry for this connection (a reinstall, a migrated machine, a copy
+    // that never had one). Other sources are not the answer; typing the
+    // password again is.
+    if (sentNothing && input.secretSource === 'stored') {
+      return {
+        cause: `This connection uses a stored password, but none is saved for it — so nothing was sent for ${input.user ?? 'this user'}.`,
+        fixes: [
+          {
+            label: 'Enter the password again',
+            detail: 'Type it into Password and save; it goes back into your OS keychain.',
+          },
+        ],
+      };
+    }
     return {
       cause: sentNothing
         ? `The server wants a password for ${input.user ?? 'this user'} and none was sent.`

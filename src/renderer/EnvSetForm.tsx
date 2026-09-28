@@ -90,7 +90,7 @@ export function EnvSetForm({
         e.preventDefault();
         void submit();
       }}
-      className="flex flex-col max-h-[70vh]"
+      className="flex flex-col min-h-0"
     >
       <div className="px-5 pt-5 pb-4 flex flex-col gap-3 shrink-0">
         <div>
