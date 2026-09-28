@@ -236,6 +236,7 @@ export const useQuery = create<QueryState>((set, get) => ({
     if (!(await window.overdb.invoke('conn:isOpen', connectionId))) {
       const opened = await window.overdb.invoke('conn:open', connectionId);
       if (!opened.ok) {
+        useStore.getState().setConnectError(connectionId, opened.error ?? 'Could not connect.');
         set((st) => ({
           running: false,
           tabs: st.tabs.map((t, i) =>

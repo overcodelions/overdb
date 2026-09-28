@@ -117,6 +117,12 @@ describe('authentication', () => {
     expect(none.cause).toMatch(/none was sent/);
   });
 
+  it('asks for the password again when a stored one is missing', () => {
+    const d = diagnose({ ...my, secretSource: 'stored', error: "Access denied for user 'app'@'localhost' (using password: NO)" });
+    expect(d.cause).toMatch(/none is saved/);
+    expect(labels(d)).toEqual(['Enter the password again']);
+  });
+
   it('offers every OTHER source, never the one already chosen', () => {
     const d = diagnose({ ...pg, secretSource: 'env', error: 'password authentication failed for user "app"' });
     const sources = d.fixes.map((f) => f.set?.secretSource).filter(Boolean);

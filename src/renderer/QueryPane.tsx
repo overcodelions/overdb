@@ -78,6 +78,7 @@ import {
   useQuery,
   type ResultTab,
 } from './queryStore';
+import { ConnectFailure } from './ConnectFailure';
 import { useStore } from './store';
 import { useFanout } from './fanoutStore';
 import type { AiTool, Connection, EnvSet } from '@shared/types';
@@ -435,6 +436,8 @@ export function QueryPane(): JSX.Element {
     [sql, conn?.engine],
   );
   const schemaError = useStore((s) => (conn ? s.schemaError[conn.id] : undefined));
+  const connectError = useStore((s) => (conn ? s.connectError[conn.id] : undefined));
+  const setConnectError = useStore((s) => s.setConnectError);
   const schemaLoading = useStore((s) => (conn ? s.schemaLoading[conn.id] : false));
   const loadSchema = useStore((s) => s.loadSchema);
   const loadSchemaList = useStore((s) => s.loadSchemaList);
@@ -457,7 +460,7 @@ export function QueryPane(): JSX.Element {
       // catalog was read from a session that no longer exists.
       const opened = await window.overdb.invoke('conn:open', conn.id);
       if (!opened.ok) {
-        toast(opened.error ?? 'Could not connect.', 'error');
+        setConnectError(conn.id, opened.error ?? 'Could not connect.');
         return;
       }
       // A reconnected session has no catalog and no schema selected, and
@@ -1125,7 +1128,7 @@ export function QueryPane(): JSX.Element {
           </span>
         )}
         <WriteControls conn={conn} />
-        {schemaError ? (
+        {connectError ? null : schemaError ? (
           <button
             onClick={() => void loadSchema(conn.id, { force: true })}
             title={`Completion is off because the catalog could not be read: ${schemaError}`}
@@ -1265,6 +1268,11 @@ export function QueryPane(): JSX.Element {
           </>
         )}
       </div>
+
+      {connectError && (
+        <ConnectFailure conn={conn} error={connectError} retrying={connecting}
+                        onRetry={() => void connect()} />
+      )}
 
       {dynamoAccess && dynamoAccess.path !== 'unknown' && (
         <div

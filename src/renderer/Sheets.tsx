@@ -45,7 +45,9 @@ export function SheetHost(): JSX.Element | null {
     >
       <div
         className={`${
-          help ? 'w-[760px] max-w-[calc(100vw-48px)] max-h-[80vh] overflow-hidden' : 'w-[520px] max-h-[70vh] overflow-auto'
+          help
+            ? 'w-[760px] max-w-[calc(100vw-48px)] max-h-[80vh] overflow-hidden'
+            : `${sheet.kind === 'importConnections' ? 'w-[680px]' : 'w-[520px]'} max-w-[calc(100vw-48px)] max-h-[70vh] flex flex-col overflow-hidden`
         } rounded-lg border border-card bg-surface-elevated shadow-2xl`}
         onClick={(e) => e.stopPropagation()}
       >
@@ -56,7 +58,7 @@ export function SheetHost(): JSX.Element | null {
         {sheet.kind === 'newConnection' && (
           <ConnectionForm found={sheet.found} onDone={() => setSheet(null)} />
         )}
-        {sheet.kind === 'editConnection' && <EditConnectionSheet id={sheet.id} />}
+        {sheet.kind === 'editConnection' && <EditConnectionSheet id={sheet.id} failure={sheet.failure} />}
         {sheet.kind === 'importConnections' && <ImportSheet />}
         {sheet.kind === 'newEnvSet' && (
           <EnvSetForm suggested={sheet.suggested} onDone={() => setSheet(null)} />
@@ -95,7 +97,7 @@ function SettingsSheet(): JSX.Element {
   const tool: AiTool = draft.aiTool ?? installed[0] ?? 'claude';
 
   return (
-    <div className="flex flex-col max-h-[70vh]">
+    <div className="flex flex-col min-h-0">
       <div className="px-5 pt-5 pb-3 border-b border-card shrink-0">
         <h2 className="text-sm font-semibold text-ink">Settings</h2>
       </div>
@@ -288,7 +290,7 @@ function PlaceholderSheet({ title }: { title: string }): JSX.Element {
   );
 }
 
-function EditConnectionSheet({ id }: { id: string }): JSX.Element {
+function EditConnectionSheet({ id, failure }: { id: string; failure?: string }): JSX.Element {
   const connection = useStore((s) => s.connections.find((c) => c.id === id));
   const setSheet = useStore((s) => s.setSheet);
   if (!connection) {
@@ -296,5 +298,5 @@ function EditConnectionSheet({ id }: { id: string }): JSX.Element {
   }
   // Keyed on the id so switching which connection you're editing resets the
   // form's state instead of carrying the previous one's values over.
-  return <ConnectionForm key={id} existing={connection} onDone={() => setSheet(null)} />;
+  return <ConnectionForm key={id} existing={connection} failure={failure} onDone={() => setSheet(null)} />;
 }
