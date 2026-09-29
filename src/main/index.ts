@@ -13,6 +13,7 @@ import path from 'node:path';
 import fs from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { Store } from './store';
+import { CatalogStore } from './catalogStore';
 import * as db from './dbSupervisor';
 import { resolveWithTunnel } from './credentials';
 import { copySecret, deleteSecret, hasSecret, isEncryptionAvailable, secretsBackend, setSecret } from './secrets';
@@ -28,6 +29,7 @@ import type {
   Connection,
   ConnectionDraft,
   ConnectionTestResult,
+  SavedCatalog,
   SchemaSnapshot,
   SecretSource,
   StoreSnapshot,
@@ -39,6 +41,8 @@ import { classify } from '../shared/sqlGuard';
 import { bindFor } from '../shared/params';
 import * as writeGate from './writeGate';
 import { discoverLocal } from './discoverLocal';
+import { overcliAvailable, sendToOvercli } from './overcliInbox';
+import type { HandoffDraft } from '../shared/overcliHandoff';
 import { installMenu } from './menu';
 import { createSample } from './sample';
 import { initAutoUpdater, quitAndInstall } from './updater';
@@ -173,6 +177,7 @@ function registerIpc(): void {
       }
     }
     Store.saveConnections(connections);
+    CatalogStore.prune(connections.map((c) => c.id));
   });
   ipcMain.handle('store:saveGroups', (_e, groups) => Store.saveGroups(groups));
   ipcMain.handle('store:saveEnvSets', (_e, envSets) => Store.saveEnvSets(envSets));
@@ -234,6 +239,17 @@ function registerIpc(): void {
     clipboard.writeText(text);
   });
 
+  ipcMain.handle('overcli:status', () => ({ available: overcliAvailable() }));
+  ipcMain.handle('overcli:send', (_e, draft: HandoffDraft) => sendToOvercli(draft));
+  ipcMain.handle('overcli:pickRepo', async (_e, args: { name: string }) => {
+    const res = await dialog.showOpenDialog({
+      title: `Which repo has the code that uses ${args?.name ?? 'this database'}?`,
+      buttonLabel: 'Link repo',
+      properties: ['openDirectory'],
+    });
+    return res.canceled || res.filePaths.length === 0 ? null : res.filePaths[0];
+  });
+
   ipcMain.handle('app:pickFolder', async () => {
     const res = await dialog.showOpenDialog({
       title: 'Choose a folder to scan for project configs',
@@ -246,10 +262,17 @@ function registerIpc(): void {
     'app:saveFile',
     async (
       _e,
-      args: { suggestedName: string; data: string; encoding?: 'utf8' | 'base64'; extensions?: string[] },
+      args: {
+        suggestedName: string;
+        data: string;
+        encoding?: 'utf8' | 'base64';
+        extensions?: string[];
+        message?: string;
+      },
     ) => {
       const res = await dialog.showSaveDialog({
         defaultPath: args.suggestedName,
+        message: args.message,
         filters:
           args.extensions && args.extensions.length > 0
             ? [{ name: args.extensions.join(', ').toUpperCase(), extensions: args.extensions }]
@@ -526,6 +549,11 @@ function registerIpc(): void {
       return db.request(args.connectionId, { op: 'introspect', schemas: args.schemas });
     },
   );
+
+  ipcMain.handle('catalog:list', (_e, args: { connectionId: string }) =>
+    CatalogStore.list(args.connectionId),
+  );
+  ipcMain.handle('catalog:save', (_e, catalog: SavedCatalog) => CatalogStore.save(catalog));
 
   ipcMain.handle('ai:detect', () => detectTools());
 

@@ -787,6 +787,12 @@ function runMenuCommand(command: MenuCommand): void {
     case 'sample':
       void st.openSample();
       return;
+    case 'closeTab':
+      // Only the editor has tabs. Behind a sheet, the palette or a confirm,
+      // ⌘W would close something you cannot see.
+      if (st.sheet || st.paletteOpen || st.confirm) return;
+      if (st.selection?.kind === 'connection') st.closeBufferAsking(st.selection.id);
+      return;
   }
 }
 

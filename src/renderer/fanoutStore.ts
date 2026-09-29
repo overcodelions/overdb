@@ -64,7 +64,10 @@ interface FanoutState {
   handOff(envSetId: string, sql: string): void;
   clearHandoff(): void;
 
-  run(envSet: EnvSet, sql: string): Promise<void>;
+  /// `skip` names members not to send it to, with why — the ones that
+  /// could not be reached when the run began. They show as skipped, not
+  /// as failures.
+  run(envSet: EnvSet, sql: string, options?: { skip?: Record<string, string> }): Promise<void>;
   explain(envSet: EnvSet, sql: string): Promise<void>;
   cancel(): Promise<void>;
   focus(connectionId: string | null): void;
@@ -113,7 +116,7 @@ export const useFanout = create<FanoutState>((set, get) => ({
     set({ handoff: null });
   },
 
-  async run(envSet, sql) {
+  async run(envSet, sql, options = {}) {
     const connections = useStore.getState().connections;
     const members = envSet.memberIds
       .map((id) => connections.find((c) => c.id === id))
@@ -150,11 +153,18 @@ export const useFanout = create<FanoutState>((set, get) => ({
       // every single comparison.
       runs: [...members]
         .sort((a, b) => Number(b.id === envSet.baselineId) - Number(a.id === envSet.baselineId))
-        .map((m) => blankRun(m.id, m.engine, m.variant)),
+        .map((m) => {
+          const why = options.skip?.[m.id];
+          return why === undefined
+            ? blankRun(m.id, m.engine, m.variant)
+            : { ...blankRun(m.id, m.engine, m.variant), status: 'skipped' as const, error: why };
+        }),
       focused: null,
     });
 
-    const queue = get().runs.map((r) => r.connectionId);
+    const queue = get()
+      .runs.filter((r) => r.status !== 'skipped')
+      .map((r) => r.connectionId);
     const workers = Array.from({ length: Math.min(CONCURRENCY, queue.length) }, async () => {
       for (;;) {
         const id = queue.shift();

@@ -47,6 +47,53 @@ export type DriftKind =
   | 'foreign-key-extra'
   | 'foreign-key-target';
 
+/// What a finding will do to you, as opposed to how loud it is.
+///
+/// Severity says how much to worry; this says about what. A missing index
+/// and a missing foreign key can both be worth fixing, but one costs speed
+/// and the other lets bad rows in, and a panel that paints them the same
+/// colour makes the reader work out which is which for every line.
+export type DriftConsequence =
+  | 'breaks'
+  | 'integrity'
+  | 'behaviour'
+  | 'performance'
+  | 'extra'
+  | 'cosmetic';
+
+export function consequenceOf(f: DriftFinding): DriftConsequence {
+  if (f.severity === 'quiet') return 'cosmetic';
+  switch (f.kind) {
+    case 'table-missing':
+    case 'table-kind':
+    case 'column-missing':
+    case 'column-type':
+    case 'primary-key':
+      return 'breaks';
+    case 'column-nullability':
+      // NOT NULL here rejects inserts the baseline takes; nullable here
+      // takes rows the baseline would have refused.
+      return f.here === 'not null' ? 'breaks' : 'integrity';
+    case 'column-extra':
+      return f.severity === 'breaking' ? 'breaks' : 'extra';
+    case 'column-default':
+      return 'behaviour';
+    case 'index-missing':
+      return f.baseline?.startsWith('unique') ? 'integrity' : 'performance';
+    case 'index-uniqueness':
+      return f.baseline === 'unique' ? 'integrity' : 'breaks';
+    case 'foreign-key-missing':
+    case 'foreign-key-target':
+      return 'integrity';
+    case 'table-extra':
+    case 'index-extra':
+    case 'foreign-key-extra':
+      return 'extra';
+    case 'column-order':
+      return 'cosmetic';
+  }
+}
+
 export interface DriftFinding {
   kind: DriftKind;
   severity: DriftSeverity;
@@ -83,6 +130,11 @@ export interface SchemaDrift {
   /// from the comparison and named here, because an index overdb cannot
   /// read is one it cannot honestly call present, missing or matching.
   unreadable: string[];
+  /// Tables only the baseline has, when `baselineOnly` is `pending`. Same
+  /// shape as a finding so a migration can still be built from them.
+  pending: DriftFinding[];
+  /// One-sided tables an ignore pattern matched, and which pattern.
+  ignored: Array<{ schema: string; table: string; pattern: string }>;
   /// True when the two snapshots come from different engines, in which case
   /// every finding is advisory: the two catalogs do not mean the same thing
   /// closely enough for a verdict.
@@ -106,6 +158,20 @@ export interface DiffOptions {
   /// indexes", asked at the moment one member came back slower than
   /// another. A null schema means "whichever schema the table is in".
   tables?: Array<{ schema: string | null; table: string }>;
+  /// Glob patterns (`*` and `?`, case-insensitive) for tables to leave out
+  /// when only one side has them: `tmp_*`, `*_bak*`. A pattern with a dot in
+  /// it is matched against `schema.table` instead of the bare name.
+  ///
+  /// One-sided tables only, deliberately. A scratch copy nobody deployed is
+  /// noise; a table both sides have is the thing being compared, and a
+  /// pattern written for the first kind should not quietly swallow the
+  /// second. What matched is reported in `ignored`, never just dropped.
+  ignoreTables?: string[];
+  /// What a table only the baseline has is taken to mean. `drift` (the
+  /// default) calls it breaking. `pending` reads it as work that has not
+  /// been deployed yet — the usual case when the baseline is your laptop —
+  /// and moves it to `pending`, where it is listed but not counted.
+  baselineOnly?: 'drift' | 'pending';
 }
 
 /// Cross-engine findings never claim to be breaking: the two catalogs
@@ -136,6 +202,9 @@ export function diffSchemas(
   const onlyHere: string[] = [];
   const unread: string[] = [];
   const unreadable: string[] = [];
+  const pending: DriftFinding[] = [];
+  const ignored: SchemaDrift['ignored'] = [];
+  const ignores = (options.ignoreTables ?? []).map((p) => ({ pattern: p, re: globToRegExp(p) }));
 
   for (const schema of names) {
     const a = baseSchemas.get(schema);
@@ -171,8 +240,16 @@ export function diffSchemas(
       const at = aTables.get(name);
       const bt = bTables.get(name);
 
+      if (!at || !bt) {
+        const pattern = matchIgnore(ignores, schema, name);
+        if (pattern !== null) {
+          ignored.push({ schema, table: name, pattern });
+          continue;
+        }
+      }
+
       if (!bt) {
-        findings.push({
+        (options.baselineOnly === 'pending' ? pending : findings).push({
           kind: 'table-missing',
           severity: cap('breaking', crossEngine),
           schema,
@@ -246,8 +323,51 @@ export function diffSchemas(
     onlyHere,
     unread,
     unreadable: [...new Set(unreadable)].sort(),
+    pending: pending.sort(bySeverity),
+    ignored,
     crossEngine,
   };
+}
+
+/// `*` is any run of characters and `?` any one; everything else is literal.
+export function globToRegExp(pattern: string): RegExp {
+  const body = pattern
+    .trim()
+    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*/g, '.*')
+    .replace(/\?/g, '.');
+  return new RegExp(`^${body}$`, 'i');
+}
+
+function matchIgnore(
+  ignores: Array<{ pattern: string; re: RegExp }>,
+  schema: string,
+  table: string,
+): string | null {
+  for (const { pattern, re } of ignores) {
+    if (re.test(pattern.includes('.') ? `${schema}.${table}` : table)) return pattern;
+  }
+  return null;
+}
+
+/// Names people give tables they do not mean to deploy. Offered, never
+/// applied: `*_old` is a scratch copy in one team and a real table in
+/// another, and only the person looking at the list knows which.
+const LIKELY_SCRATCH = ['tmp_*', 'temp_*', '*_tmp', '*_temp', '*_bak*', '*_backup*', '*_old', '*_copy*'];
+
+/// The scratch-looking patterns that would hide at least one of `tables`
+/// and are not already in `active`, with how many each would hide.
+export function suggestIgnores(
+  tables: string[],
+  active: string[],
+): Array<{ pattern: string; count: number }> {
+  const have = new Set(active.map((p) => p.trim().toLowerCase()));
+  return LIKELY_SCRATCH.filter((p) => !have.has(p))
+    .map((pattern) => {
+      const re = globToRegExp(pattern);
+      return { pattern, count: tables.filter((t) => re.test(t)).length };
+    })
+    .filter((s) => s.count > 0);
 }
 
 const RANK: Record<DriftSeverity, number> = { breaking: 0, notable: 1, quiet: 2 };
@@ -402,6 +522,9 @@ export function normalizeDefault(expr: string | null): string | null {
   if (text === 'current_timestamp()' || text === 'now()') text = 'current_timestamp';
   if (text === "''" || text === '') return null;
   if (text === 'null') return null;
+  // MariaDB quotes a string default and MySQL does not, so `'ACTIVE'` and
+  // `ACTIVE` are the same default read off two servers.
+  text = text.replace(/^'([^']*)'$/, '$1');
   return text;
 }
 

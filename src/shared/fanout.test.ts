@@ -378,3 +378,32 @@ describe('touchedTables', () => {
     ).toHaveLength(1);
   });
 });
+
+describe('skipped members', () => {
+  const base = done('base', [col('id')], [[1]]);
+  const skipped = (id: string): MemberRun => ({
+    ...blankRun(id, 'postgres'),
+    status: 'skipped',
+    error: 'not reachable',
+  });
+
+  it('are counted as skipped, not failed', () => {
+    const runs = [base, done('same', [col('id')], [[1]]), skipped('eu')];
+    expect(fanoutSummary(runs, 'base')).toBe('1 match the baseline, 1 skipped — unreachable');
+    expect(compare(runs[2], base).summary).toBe('skipped — could not be reached');
+  });
+
+  it('say there is nothing to compare when only the baseline answered', () => {
+    expect(fanoutSummary([base, skipped('eu')], 'base')).toBe(
+      'Only the baseline answered — nothing to compare against.',
+    );
+  });
+
+  it('say so when the baseline is the one that could not be reached', () => {
+    const runs = [skipped('base'), done('eu', [col('id')], [[1]])];
+    expect(fanoutSummary(runs, 'base')).toBe(
+      'The baseline could not be reached — nothing to compare against.',
+    );
+    expect(inFlight(runs)).toEqual([]);
+  });
+});

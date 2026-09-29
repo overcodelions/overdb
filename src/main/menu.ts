@@ -54,8 +54,13 @@ export function installMenu(send: (command: MenuCommand) => void): void {
           registerAccelerator: false,
           click: () => send('palette'),
         },
+        { type: 'separator' },
+        // ⌘W closes the query tab, as it does in every editor and browser.
+        // The window moves to ⇧⌘W: a window holding every connection is too
+        // much to lose to the key you press to tidy up one scratchpad.
+        { label: 'Close Tab', accelerator: 'CmdOrCtrl+W', click: () => send('closeTab') },
         ...(isMac
-          ? ([{ type: 'separator' }, { role: 'close' }] as MenuItemConstructorOptions[])
+          ? ([{ role: 'close', label: 'Close Window', accelerator: 'Shift+CmdOrCtrl+W' }] as MenuItemConstructorOptions[])
           : ([
               { type: 'separator' },
               { label: 'Settings…', accelerator: 'Ctrl+,', click: () => send('settings') },

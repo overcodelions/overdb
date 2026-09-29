@@ -13,6 +13,7 @@
 export type AiTool = 'claude' | 'codex' | 'gemini';
 
 export type { Engine, Variant } from './engines';
+import type { HandoffDraft } from './overcliHandoff';
 import type { Engine, Variant } from './engines';
 import type { FormatStyle } from './formatSql';
 // Type-only, and slowQueries.ts imports `Cell` back from here. The cycle
@@ -172,6 +173,10 @@ export interface Connection {
   /// Opt-in exposure to `overdb serve --mcp` (v0.3). Off by default:
   /// handing an agent a prod connection should be a deliberate act.
   mcpExposed?: boolean;
+  /// The repo(s) holding the code that talks to this database, for handing
+  /// a finding to overcli. Only used when the connection is in no env set —
+  /// a set's link covers all its members. See src/shared/overcliHandoff.ts.
+  repoPaths?: string[];
 }
 
 /// A durable grouping — "these are Payments". The sidebar's collapsible
@@ -207,9 +212,19 @@ export interface EnvSet {
   /// which is the right default and the only one that needs no setup.
   memberSchemas?: Record<string, string>;
   pinnedSchema?: string;
+  /// Glob patterns for tables the drift view leaves out when only one side
+  /// has them — scratch copies, backups, `tmp_*`. See DiffOptions.
+  ignoreTables?: string[];
+  /// What the drift view makes of a table only the baseline has. Absent
+  /// means `pending`: listed as not deployed yet, not counted as drift.
+  baselineOnly?: 'pending' | 'drift' | 'hide';
   archived?: boolean;
   createdAt?: string;
   archivedAt?: string;
+  /// The repo(s) whose code uses this database, for handing a finding to
+  /// overcli. On the set rather than each member: every env is the same
+  /// codebase. See src/shared/overcliHandoff.ts.
+  repoPaths?: string[];
 }
 
 // ---------------------------------------------------------------------
@@ -302,6 +317,16 @@ export interface SchemaSnapshot {
   serverVersion: string;
   capturedAt: string;
   schemas: SchemaInfo[];
+}
+
+/// One schema's catalog as it was last read from a connection.
+export interface SavedCatalog {
+  connectionId: string;
+  schema: string;
+  savedAt: string;
+  engine: Engine;
+  serverVersion: string;
+  info: SchemaInfo;
 }
 
 // ---------------------------------------------------------------------
@@ -501,6 +526,15 @@ export interface IPCInvokeMap {
   /// itself; main returns only the chosen path.
   'app:pickSqliteFile': () => string | null;
   'app:pickFolder': () => string | null;
+  /// Whether overcli can take a handoff: its inbox folder exists, which only
+  /// an overcli that reads it creates. Checked, never cached for long —
+  /// installing overcli mid-session should light the button up.
+  'overcli:status': () => { available: boolean };
+  /// Write one handoff into overcli's inbox. Main stamps it and rebuilds it
+  /// from the known fields; see src/shared/overcliHandoff.ts.
+  'overcli:send': (draft: HandoffDraft) => { ok: true; id: string } | { ok: false; error: string };
+  /// Folder picker for linking a database to the repo that uses it.
+  'overcli:pickRepo': (args: { name: string }) => string | null;
   /// Build the sample shop database — three SQLite files, one per
   /// environment — and return where each one is. See src/main/sample.ts.
   'app:createSample': () => { local: string; staging: string; prod: string };
@@ -518,6 +552,8 @@ export interface IPCInvokeMap {
     encoding?: 'utf8' | 'base64';
     /// Extensions offered in the dialog, without dots.
     extensions?: string[];
+    /// A line shown in the dialog (macOS), for what the file carries.
+    message?: string;
   }) => { saved: boolean; path?: string; error?: string };
   /// Scan the machine for connections defined in other tools. Read-only:
   /// nothing is modified, and nothing is imported until the user picks it.
@@ -605,6 +641,11 @@ export interface IPCInvokeMap {
   /// reload has already missed every one of them.
   'conn:states': () => string[];
   'conn:introspect': (args: { connectionId: string; schemas?: string[] }) => SchemaSnapshot;
+  /// The last catalog read from a connection, per schema — what drift
+  /// compares against when that connection cannot be reached right now.
+  /// See src/main/catalogStore.ts.
+  'catalog:list': (args: { connectionId: string }) => SavedCatalog[];
+  'catalog:save': (catalog: SavedCatalog) => void;
   /// What a table filter would actually select, before it is saved.
   ///
   /// A pattern language explained in prose is a guess until you try it, and
@@ -785,4 +826,5 @@ export type MenuCommand =
   | 'newConnection'
   | 'importConnections'
   | 'newEnvSet'
+  | 'closeTab'
   | 'sample';

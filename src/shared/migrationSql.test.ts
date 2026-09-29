@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ColumnInfo, Engine, SchemaSnapshot, TableInfo } from './types';
-import { buildMigration } from './migrationSql';
+import { buildMigration, nameSides } from './migrationSql';
 import { diffSchemas } from './schemaDiff';
 
 function column(name: string, patch: Partial<ColumnInfo> = {}): ColumnInfo {
@@ -145,5 +145,18 @@ describe('buildMigration', () => {
   it('always says nothing has run', () => {
     const m = migrate(snap([table('t'), table('u')]), snap([table('t')]));
     expect(m.sql.startsWith('-- Proposed by overdb. Nothing here has run.')).toBe(true);
+  });
+});
+
+describe('nameSides', () => {
+  const names = { here: 'prod-west', baseline: 'prod-east' };
+
+  it('says which server, where a finding says here and the baseline', () => {
+    expect(nameSides('t.a is datetime here and timestamp on the baseline.', names)).toBe(
+      't.a is datetime on prod-west and timestamp on prod-east.',
+    );
+    expect(nameSides('t.a accepts nulls here; the baseline does not.', names)).toBe(
+      't.a accepts nulls on prod-west; prod-east does not.',
+    );
   });
 });

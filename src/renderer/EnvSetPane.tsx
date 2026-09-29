@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useEffect } from 'react';
 import type { Connection, EnvSet } from '@shared/types';
 import { variantLabel } from '@shared/engines';
 import { useStore } from './store';
+import { useReach, whyDown } from './reachStore';
 
 /// Are the members of this set actually reachable?
 ///
@@ -60,7 +61,8 @@ export function MemberHealth({ envSet }: { envSet: EnvSet }): JSX.Element {
 
 /// Reachability is checked on mount rather than claimed. A row that says
 /// "connected" because we saved a host once would be worse than saying
-/// nothing at all.
+/// nothing at all. The check is shared (reachStore.ts), so the Run button
+/// and this row never disagree and never both open a connection.
 function MemberRow({
   connection,
   baseline,
@@ -70,33 +72,13 @@ function MemberRow({
   baseline: boolean;
   onOpen(): void;
 }): JSX.Element {
-  const [state, setState] = useState<'checking' | 'up' | 'down'>('checking');
-  const [detail, setDetail] = useState<string>('');
-
+  const reach = useReach((s) => s.reach[connection.id]);
+  const check = useReach((s) => s.check);
   useEffect(() => {
-    let live = true;
-    void (async () => {
-      try {
-        const open = await window.overdb.invoke('conn:isOpen', connection.id);
-        if (!live) return;
-        if (open) {
-          setState('up');
-          return;
-        }
-        const res = await window.overdb.invoke('conn:open', connection.id);
-        if (!live) return;
-        setState(res.ok ? 'up' : 'down');
-        setDetail(res.ok ? (res.serverVersion ?? '') : (res.error ?? ''));
-      } catch (err) {
-        if (!live) return;
-        setState('down');
-        setDetail(err instanceof Error ? err.message : String(err));
-      }
-    })();
-    return () => {
-      live = false;
-    };
-  }, [connection.id]);
+    void check(connection.id);
+  }, [connection.id, check]);
+  const state = reach?.status ?? 'checking';
+  const detail = reach?.status === 'down' ? whyDown(connection, reach.error ?? '') : '';
 
   return (
     <button
@@ -125,7 +107,7 @@ function MemberRow({
         {state === 'checking'
           ? 'Checking…'
           : state === 'down'
-            ? detail || 'Not reachable'
+            ? <span title={reach?.error}>{detail || 'Not reachable'}</span>
             : `${variantLabel(connection.variant, connection.engine)}${
                 connection.database ? ` · ${connection.database}` : ''
               }`}

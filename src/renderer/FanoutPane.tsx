@@ -23,6 +23,9 @@ import { ResultGrid } from './ResultGrid';
 import { Resizer } from './Resizer';
 import { MemberHealth } from './EnvSetPane';
 import { SchemaDriftView } from './SchemaDriftView';
+import { SchemaBar } from './SchemaBar';
+import { useReach, whyDown } from './reachStore';
+import { ago } from '@shared/history';
 import { sampleEnvOf } from '@shared/sample';
 import { indexConsequence, indexMatrix } from '@shared/indexMatrix';
 
@@ -130,9 +133,53 @@ export function FanoutPane({ envSet }: { envSet: EnvSet }): JSX.Element {
 
   const [openParam, setOpenParam] = useState<{ slot: ParamSlot; at: DOMRect } | null>(null);
 
+  // Which members can be reached, asked up front and again while any
+  // cannot: a set is usually several VPNs' worth of servers, and learning
+  // that one is down from a red row after pressing Run is the worse way
+  // to find out.
+  const reach = useReach((s) => s.reach);
+  const checkAll = useReach((s) => s.checkAll);
+  const memberKey = members.map((m) => m.id).join(',');
+  useEffect(() => {
+    void checkAll(members.map((m) => m.id));
+    // memberKey is `members`, by value.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [memberKey, checkAll]);
+  const down = members.filter((m) => reach[m.id]?.status === 'down');
+  const up = members.filter((m) => reach[m.id]?.status === 'up');
+  const allDown = members.length > 0 && down.length === members.length;
+  const downKey = down.map((m) => m.id).join(',');
+  // Ask again when there is reason to think the answer changed — the
+  // network came back, the window came forward (you went and started the
+  // VPN) — and every twenty seconds while something is down. Electron has
+  // no event for a VPN coming up, so the timer is what catches that one.
+  useEffect(() => {
+    if (!downKey) return;
+    const ids = downKey.split(',');
+    const again = () => {
+      if (document.visibilityState === 'visible') void checkAll(ids);
+    };
+    const timer = window.setInterval(again, 20_000);
+    window.addEventListener('online', again);
+    window.addEventListener('focus', again);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener('online', again);
+      window.removeEventListener('focus', again);
+    };
+  }, [downKey, checkAll]);
+
+  /// Members to leave out of a run, with why: the ones known to be down.
+  const skip = () =>
+    Object.fromEntries(
+      down.map((m) => [m.id, whyDown(m, reach[m.id]?.error ?? '')]),
+    );
+  const toast = useStore((s) => s.toast);
+
   const go = () => {
     if (running) void cancel();
-    else void fanRun(envSet, sql);
+    else if (allDown) toast('Nothing in this set can be reached, so nothing can run.');
+    else void fanRun(envSet, sql, { skip: skip() });
   };
 
   // A statement handed over from a connection's editor by "Run on <set>".
@@ -151,7 +198,7 @@ export function FanoutPane({ envSet }: { envSet: EnvSet }): JSX.Element {
     clearHandoff();
     setMode('query');
     setSql(handoff.sql);
-    void fanRun(envSet, handoff.sql);
+    void fanRun(envSet, handoff.sql, { skip: skip() });
   }, [handoff, envSet, clearHandoff, fanRun, setSql]);
 
   return (
@@ -166,6 +213,18 @@ export function FanoutPane({ envSet }: { envSet: EnvSet }): JSX.Element {
             against <span className="text-ink-muted">{byId.get(envSet.baselineId)?.name}</span>
           </span>
         )}
+        {allDown ? (
+          <span className="text-[10px] px-2 py-px rounded-full border border-warn/40 text-warn/90">
+            Offline — nothing reachable
+          </span>
+        ) : down.length > 0 ? (
+          <span
+            className="text-[10px] px-2 py-px rounded-full border border-warn/40 text-warn/90"
+            title={`${down.map((m) => m.name).join(', ')} cannot be reached and will be skipped.`}
+          >
+            {up.length} of {members.length} reachable
+          </span>
+        ) : null}
         <div className="flex-1" />
         {/* Two different questions about the same set: what do these
             servers ANSWER, and do they still have the same shape. They
@@ -187,6 +246,11 @@ export function FanoutPane({ envSet }: { envSet: EnvSet }): JSX.Element {
               }`}
             >
               {m === 'query' ? 'Query' : 'Schema drift'}
+              {m === 'drift' && allDown && (
+                <span className="ml-1.5 text-[9px] px-1 rounded border border-side-base/40 text-side-base">
+                  works offline
+                </span>
+              )}
             </button>
           ))}
         </div>
@@ -202,14 +266,25 @@ export function FanoutPane({ envSet }: { envSet: EnvSet }): JSX.Element {
         {mode === 'query' && (
           <button
             onClick={go}
-            disabled={!sql.trim() && !running}
+            disabled={(!sql.trim() || allDown) && !running}
+            title={
+              allDown
+                ? 'Nothing in this set can be reached.'
+                : down.length > 0
+                  ? `${down.map((m) => m.name).join(', ')} cannot be reached and will be skipped.`
+                  : undefined
+            }
             className={`text-[11px] px-2.5 py-1 rounded disabled:opacity-40 ${
               running
                 ? 'border border-card text-ink-muted hover:text-ink hover:bg-card'
                 : 'bg-accent text-white hover:bg-accent-strong'
             }`}
           >
-            {running ? 'Cancel' : `Run on ${members.length}`}
+            {running
+              ? 'Cancel'
+              : down.length > 0
+                ? `Run on ${members.length - down.length} of ${members.length}`
+                : `Run on ${members.length}`}
           </button>
         )}
       </div>
@@ -280,6 +355,13 @@ export function FanoutPane({ envSet }: { envSet: EnvSet }): JSX.Element {
             <div className="p-4">
               <p className="text-xs text-warn/90 leading-relaxed max-w-[70ch]">{refusal}</p>
             </div>
+          ) : runs.length === 0 && allDown ? (
+            <OfflinePanel
+              members={members}
+              baselineId={envSet.baselineId ?? null}
+              onDrift={() => setMode('drift')}
+              onRetry={() => void checkAll(members.map((m) => m.id))}
+            />
           ) : runs.length === 0 ? (
             <div className="flex-1 overflow-y-auto p-4 flex flex-col items-start gap-3">
               <p className="text-xs text-ink-muted leading-relaxed max-w-[62ch]">
@@ -297,7 +379,7 @@ export function FanoutPane({ envSet }: { envSet: EnvSet }): JSX.Element {
                     // ran is on screen to read and change.
                     setStarter((p) => ({ text, nonce: p.nonce + 1, mode: 'replace' }));
                     setSql(text);
-                    void fanRun(envSet, text);
+                    void fanRun(envSet, text, { skip: skip() });
                   }}
                   onDrift={() => setMode('drift')}
                 />
@@ -306,6 +388,27 @@ export function FanoutPane({ envSet }: { envSet: EnvSet }): JSX.Element {
             </div>
           ) : (
             <>
+              <SkippedBanner
+                runs={runs}
+                byId={byId}
+                baselineId={envSet.baselineId ?? null}
+                running={running}
+                onRetry={async () => {
+                  const ids = runs.filter((r) => r.status === 'skipped').map((r) => r.connectionId);
+                  await checkAll(ids);
+                  const now = useReach.getState().reach;
+                  const still = members.filter((m) => now[m.id]?.status === 'down');
+                  if (still.length === members.length) {
+                    toast('Still nothing reachable.');
+                    return;
+                  }
+                  void fanRun(envSet, ranSql, {
+                    skip: Object.fromEntries(
+                      still.map((m) => [m.id, whyDown(m, now[m.id]?.error ?? '')]),
+                    ),
+                  });
+                }}
+              />
               <MemberTabs
                 runs={runs}
                 byId={byId}
@@ -344,77 +447,154 @@ export function FanoutPane({ envSet }: { envSet: EnvSet }): JSX.Element {
   );
 }
 
-/// Which schema each member's statement runs against.
+/// What the Query tab says when no member of the set can be reached.
 ///
-/// This is the part of a set that is easy to get silently wrong. "The same
-/// logical database in several places" almost never means the same NAME in
-/// several places — `acme` locally, `acmedmsandbox` in sandbox — so an
-/// unqualified statement resolves against whatever each session happens to
-/// be pointed at, and the fan-out cheerfully compares an answer from the
-/// wrong database against one from the right one. Stating it per member,
-/// where you can see all of them at once, is the only way that mismatch is
-/// visible before it is a result.
-function SchemaBar({ envSet, members }: { envSet: EnvSet; members: Connection[] }): JSX.Element | null {
-  const schemaList = useStore((s) => s.schemaList);
-  const activeSchema = useStore((s) => s.activeSchema);
-  const loadSchemaList = useStore((s) => s.loadSchemaList);
-  const saveEnvSet = useStore((s) => s.saveEnvSet);
-
+/// The editor stays: you are often writing the statement before you are on
+/// the VPN, and a pane that vanished whenever the network did would look
+/// like it had taken the draft with it. What goes is the promise of a run,
+/// replaced by why each server is out of reach and what works without one.
+function OfflinePanel({
+  members,
+  baselineId,
+  onDrift,
+  onRetry,
+}: {
+  members: Connection[];
+  baselineId: string | null;
+  onDrift(): void;
+  onRetry(): void;
+}): JSX.Element {
+  const reach = useReach((s) => s.reach);
+  const [kept, setKept] = useState<Record<string, string | null>>({});
   useEffect(() => {
-    for (const m of members) void loadSchemaList(m.id);
-  }, [members, loadSchemaList]);
-
-  if (!members.length) return null;
-
-  const chosen = (id: string) => envSet.memberSchemas?.[id] ?? activeSchema[id] ?? '';
-  const pick = (id: string, name: string) =>
-    void saveEnvSet({
-      id: envSet.id,
-      name: envSet.name,
-      memberIds: envSet.memberIds,
-      baselineId: envSet.baselineId,
-      memberSchemas: { ...envSet.memberSchemas, [id]: name },
-    });
-
-  // Worth pointing at only when they actually disagree. On a set where every
-  // member is on the same name this is a row of identical dropdowns saying
-  // nothing.
-  const distinct = new Set(members.map((m) => chosen(m.id)).filter(Boolean));
+    for (const m of members) {
+      void window.overdb
+        .invoke('catalog:list', { connectionId: m.id })
+        .then((list) => {
+          const latest = list.map((c) => c.savedAt).sort().pop() ?? null;
+          setKept((k) => ({ ...k, [m.id]: latest }));
+        })
+        .catch(() => undefined);
+    }
+  }, [members]);
+  const anyKept = members.some((m) => kept[m.id]);
 
   return (
-    <div className="shrink-0 border-b border-card px-3.5 py-2 flex items-center gap-2 flex-wrap">
-      <span className="text-[10px] uppercase tracking-wider text-ink-faint">Schema</span>
-      {members.map((m) => {
-        const names = schemaList[m.id] ?? [];
-        const value = chosen(m.id);
-        return (
-          <label
-            key={m.id}
-            className="flex items-center gap-1.5 pl-2 pr-1 py-0.5 rounded border border-card bg-wash"
-            title={`${m.name} — which schema its statement runs against`}
+    <div className="flex-1 overflow-y-auto p-5">
+      <div className="max-w-2xl flex flex-col gap-4">
+        <div>
+          <p className="text-sm font-medium text-ink">
+            {members.length === 1 ? 'This server' : members.length === 2 ? 'Neither server' : 'No server in this set'}{' '}
+            can be reached, so nothing can run.
+          </p>
+          <p className="mt-1 text-xs text-ink-muted">
+            You can keep writing — the statement is kept for when you are back on.
+          </p>
+        </div>
+
+        <div className="rounded border border-card overflow-hidden">
+          {members.map((m) => {
+            const r = reach[m.id];
+            return (
+              <div key={m.id} className="px-3 py-2.5 border-b border-card last:border-b-0 flex items-start gap-3">
+                <span className="mt-1.5 shrink-0 w-1.5 h-1.5 rounded-full bg-bad" />
+                <div className="w-48 shrink-0">
+                  <span className="text-xs text-ink">{m.name}</span>
+                  {m.id === baselineId && (
+                    <span className="ml-1.5 text-[9px] tracking-wider text-side-base">★ BASELINE</span>
+                  )}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs text-ink-muted">{whyDown(m, r?.error ?? '')}</p>
+                  {r?.error && <p className="mt-0.5 font-mono text-[10px] text-ink-faint break-words">{r.error}</p>}
+                </div>
+                <span className="shrink-0 text-[10px] text-ink-faint">
+                  {kept[m.id] ? `catalog kept ${ago(Date.parse(kept[m.id]!))}` : 'no kept catalog'}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+
+        {anyKept && (
+          <button
+            onClick={onDrift}
+            className="self-start text-left px-3 py-2.5 rounded-md border border-side-base/40 bg-side-base/5 hover:bg-side-base/10"
           >
-            <span className="text-[10px] text-ink-faint max-w-[130px] truncate">{m.name}</span>
-            <select
-              value={value}
-              onChange={(e) => pick(m.id, e.target.value)}
-              className="bg-transparent text-[11px] text-ink outline-none max-w-[150px]"
-            >
-              {value === '' && <option value="">whatever it is on</option>}
-              {!names.includes(value) && value !== '' && <option value={value}>{value}</option>}
-              {names.map((n) => (
-                <option key={n} value={n}>
-                  {n}
-                </option>
-              ))}
-            </select>
-          </label>
-        );
-      })}
-      {distinct.size > 1 && (
-        <span className="text-[10px] text-ink-faint">
-          {distinct.size} different names — the statement is run against each member's own.
-        </span>
-      )}
+            <span className="block text-xs font-medium text-ink">Compare schemas from kept catalogs</span>
+            <span className="block mt-0.5 text-[11px] text-ink-muted">
+              Schema drift works without a connection, from the catalogs overdb last read — marked as not live.
+            </span>
+          </button>
+        )}
+
+        <div className="flex items-center gap-3">
+          <button
+            onClick={onRetry}
+            className="text-[11px] px-2.5 py-1 rounded bg-accent text-white hover:bg-accent-strong"
+          >
+            Try again
+          </button>
+          <span className="text-[11px] text-ink-faint">
+            overdb also tries again every twenty seconds, and when your network changes.
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/// Said over the results when a run left members out because they could
+/// not be reached — louder when what came back is not a comparison at all.
+function SkippedBanner({
+  runs,
+  byId,
+  baselineId,
+  running,
+  onRetry,
+}: {
+  runs: MemberRun[];
+  byId: Map<string, Connection>;
+  baselineId: string | null;
+  running: boolean;
+  onRetry(): void;
+}): JSX.Element | null {
+  const skipped = runs.filter((r) => r.status === 'skipped');
+  if (skipped.length === 0) return null;
+  const names = skipped.map((r) => byId.get(r.connectionId)?.name ?? 'a member');
+  const sent = runs.filter((r) => r.status !== 'skipped');
+  const baselineSkipped = skipped.some((r) => r.connectionId === baselineId);
+  const alone = sent.length <= 1 || baselineSkipped;
+  const answered = sent.map((r) => byId.get(r.connectionId)?.name ?? 'a member');
+
+  return (
+    <div
+      className={`shrink-0 mx-3 mt-2 px-3 py-2 rounded border flex items-start gap-3 ${
+        alone ? 'border-warn/40 bg-warn/5' : 'border-card bg-card'
+      }`}
+    >
+      <div className="flex-1 min-w-0">
+        <p className={`text-xs ${alone ? 'text-warn/90 font-medium' : 'text-ink-muted'}`}>
+          {baselineSkipped
+            ? `The baseline, ${byId.get(baselineId ?? '')?.name ?? ''}, could not be reached — these answers are not compared against it.`
+            : alone
+              ? `Nothing to compare against — only ${answered.join(', ')} answered.`
+              : `${names.join(', ')} ${names.length === 1 ? 'was' : 'were'} skipped — could not be reached.`}
+        </p>
+        {alone && !baselineSkipped && (
+          <p className="mt-0.5 text-[11px] text-ink-muted">
+            {names.join(', ')} could not be reached, so {names.length === 1 ? 'it was' : 'they were'} skipped rather
+            than counted as failed. What is below is one server's answer, not a comparison.
+          </p>
+        )}
+      </div>
+      <button
+        onClick={onRetry}
+        disabled={running}
+        className="shrink-0 text-[11px] px-2 py-0.5 rounded border border-card text-ink-muted hover:text-ink disabled:opacity-40"
+      >
+        Check again and re-run
+      </button>
     </div>
   );
 }
@@ -501,7 +681,9 @@ function MemberTabs({
             {run.connectionId === baselineId && (
               <span className="text-[9px] uppercase tracking-wider text-accent">base</span>
             )}
-            {run.status === 'done' ? (
+            {run.status === 'skipped' ? (
+              <span className="opacity-60">skipped</span>
+            ) : run.status === 'done' ? (
               <span className="tabular-nums opacity-60">{run.rowCount.toLocaleString()}</span>
             ) : run.rows.length > 0 ? (
               <span className="tabular-nums opacity-40">{run.rows.length.toLocaleString()}…</span>
@@ -575,6 +757,7 @@ function Scales(): JSX.Element {
 function StatusDot({ run, verdict }: { run: MemberRun; verdict: string }): JSX.Element {
   const label =
     run.status === 'error' ? 'failed'
+    : run.status === 'skipped' ? 'skipped — could not be reached'
     : run.status === 'cancelled' || run.status === 'blocked' ? 'did not run'
     : run.status !== 'done' ? 'still running'
     : verdict === 'differs' ? 'differs from the baseline'
@@ -583,7 +766,7 @@ function StatusDot({ run, verdict }: { run: MemberRun; verdict: string }): JSX.E
   // No answer yet, or never coming: a ring. Pulsing only while it is still
   // working, so the animation says "in flight" and nothing else.
   if (run.status !== 'done' && run.status !== 'error') {
-    const working = run.status !== 'cancelled' && run.status !== 'blocked';
+    const working = run.status !== 'cancelled' && run.status !== 'blocked' && run.status !== 'skipped';
     return (
       <span
         title={label}

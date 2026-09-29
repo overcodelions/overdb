@@ -14,6 +14,7 @@ import {
 } from '@shared/slowQueries';
 import { CostScatter, ShareStrip, type CostPoint } from './Marks';
 import { useStore } from './store';
+import { OvercliButton } from './OvercliButton';
 
 /// What the SERVER thinks is expensive.
 ///
@@ -28,6 +29,7 @@ export function SlowQueryPane({
   onOpen,
   onPlan,
   onFaster,
+  onSendToOvercli,
   full,
   onToggleFull,
   onClose,
@@ -40,6 +42,8 @@ export function SlowQueryPane({
   onPlan(sql: string): void;
   /// Hand it to the tuner.
   onFaster(sql: string): void;
+  /// Hand it to overcli (or, without overcli, link to overcli.app).
+  onSendToOvercli?(stat: StatementStat): void;
   /// Whether the pane has the whole window or is docked under the editor.
   full: boolean;
   onToggleFull(): void;
@@ -455,6 +459,7 @@ export function SlowQueryPane({
               onOpen={onOpen}
               onPlan={onPlan}
               onFaster={onFaster}
+              onSendToOvercli={onSendToOvercli}
             />
           ))}
         </div>
@@ -473,6 +478,7 @@ function Row({
   onOpen,
   onPlan,
   onFaster,
+  onSendToOvercli,
   innerRef,
   highlight,
   onHover,
@@ -493,6 +499,7 @@ function Row({
   onOpen(sql: string): void;
   onPlan(sql: string): void;
   onFaster(sql: string): void;
+  onSendToOvercli?(stat: StatementStat): void;
 }): JSX.Element {
   const formatStyle = useStore((s) => s.settings.formatStyle);
   const ratio = scanRatio(stat);
@@ -629,6 +636,12 @@ function Row({
                 to "this needs an index on partner_id". */}
             {!stat.truncated && (
               <Action label="Make it faster" title="Hand this statement to the tuner" onClick={() => onFaster(stat.sql)} />
+            )}
+            {/* The normalized text, never the example: the server's
+                placeholders are exactly the right amount to hand over, and
+                an example carries real values from someone's request. */}
+            {!stat.truncated && !stat.redacted && onSendToOvercli && (
+              <OvercliButton compact onSend={() => onSendToOvercli(stat)} />
             )}
             <div className="flex-1" />
             {Object.entries(stat.extra)
