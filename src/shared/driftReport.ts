@@ -380,10 +380,8 @@ function md(text: string): string {
 /// as an escaped backslash and then a column break, splitting the cell —
 /// so that one is doubled before the pipe is escaped.
 export function code(text: string): string {
-  const clean = text
-    .replace(/\\(?=\|)/g, '\\\\')
-    .replace(/\|/g, '\\|')
-    .replace(/\n/g, ' ');
+  // One pass: a pipe, a backslash right before one, or a newline.
+  const clean = text.replace(/\\(?=\|)|\||\n/g, (m) => (m === '\n' ? ' ' : `\\${m}`));
   return clean.includes('`') ? `\`\` ${clean} \`\`` : `\`${clean}\``;
 }
 
