@@ -22,9 +22,10 @@ import {
   type ParamScope,
   type ParamSlot,
 } from '@shared/params';
-import { buffersFor, nextBufferKey, ownsBuffer } from '@shared/buffers';
+import { bufferLabel, buffersFor, nextBufferKey, ownsBuffer } from '@shared/buffers';
 import { copyName } from '@shared/copyName';
 import { SAMPLE_ENVS, SAMPLE_SET_NAME, sampleEnvOf } from '@shared/sample';
+import type { RepoLinkOwner } from '@shared/overcliHandoff';
 
 /// Selectors that derive a list must never build a fresh array on every
 /// call — zustand compares by reference, so `[]` inline re-renders the
@@ -240,6 +241,11 @@ interface State {
     baselineId: string;
     memberSchemas?: Record<string, string>;
   }): Promise<void>;
+  /// Link a connection or env set to the repo(s) that use it, for handing
+  /// findings to overcli. Saved without reconnecting, like the pins.
+  linkRepos(owner: RepoLinkOwner, repoPaths: string[]): Promise<void>;
+  /// The drift view's own settings for a set, saved as they change.
+  setDriftPrefs(id: string, patch: Pick<EnvSet, 'ignoreTables' | 'baselineOnly'>): Promise<void>;
   removeEnvSet(id: string): Promise<void>;
   loadSchema(connectionId: string, opts?: { force?: boolean }): Promise<void>;
   /// Fold one completed run into the durable history. Main does the fold
@@ -259,6 +265,9 @@ interface State {
   /// Closes one. The last tab is emptied rather than removed — a connection
   /// always has somewhere to type.
   closeBuffer(connectionId: string, key: string): void;
+  /// Closes one the way its × does — asking first when there is a query in
+  /// it. Without a key, the tab in front.
+  closeBufferAsking(connectionId: string, key?: string): void;
   selectBuffer(connectionId: string, key: string): void;
   applyBufferSchema(connectionId: string, key: string): Promise<void>;
   persistBufferState(): void;
@@ -691,6 +700,24 @@ export const useStore = create<State>((set, get) => ({
     void get().applyBufferSchema(connectionId, nextActive);
   },
 
+  closeBufferAsking(connectionId, key) {
+    const keys = buffersFor(connectionId, get().buffers);
+    const active = get().activeBuffer[connectionId];
+    const target = key ?? (active && keys.includes(active) ? active : keys[0]);
+    const text = (get().buffers[target] ?? '').trim();
+    if (!text) {
+      get().closeBuffer(connectionId, target);
+      return;
+    }
+    get().askConfirm({
+      title: `Close ${bufferLabel(text)}?`,
+      body: 'The query in this tab is discarded. Nothing that already ran is affected.',
+      confirmLabel: 'Close tab',
+      destructive: true,
+      onConfirm: () => get().closeBuffer(connectionId, target),
+    });
+  },
+
   selectBuffer(connectionId, key) {
     if (get().activeBuffer[connectionId] === key) return;
     set((st) => ({ activeBuffer: { ...st.activeBuffer, [connectionId]: key } }));
@@ -1021,6 +1048,9 @@ export const useStore = create<State>((set, get) => ({
       createdAt: existing?.createdAt ?? new Date().toISOString(),
       archived: existing?.archived,
       pinnedSchema: existing?.pinnedSchema,
+      ignoreTables: existing?.ignoreTables,
+      baselineOnly: existing?.baselineOnly,
+      repoPaths: existing?.repoPaths,
     };
     const envSets = existing
       ? get().envSets.map((e) => (e.id === envSet.id ? envSet : e))
@@ -1028,6 +1058,25 @@ export const useStore = create<State>((set, get) => ({
     set({ envSets });
     await window.overdb.invoke('store:saveEnvSets', envSets);
     get().toast(existing ? `Saved ${envSet.name}.` : `Created ${envSet.name}.`);
+  },
+
+  async linkRepos(owner, repoPaths) {
+    const next = repoPaths.length ? repoPaths : undefined;
+    if (owner.kind === 'envSet') {
+      const envSets = get().envSets.map((e) => (e.id === owner.id ? { ...e, repoPaths: next } : e));
+      set({ envSets });
+      await window.overdb.invoke('store:saveEnvSets', envSets);
+    } else {
+      const connections = get().connections.map((c) => (c.id === owner.id ? { ...c, repoPaths: next } : c));
+      set({ connections });
+      await window.overdb.invoke('store:saveConnections', connections);
+    }
+  },
+
+  async setDriftPrefs(id, patch) {
+    const envSets = get().envSets.map((e) => (e.id === id ? { ...e, ...patch } : e));
+    set({ envSets });
+    await window.overdb.invoke('store:saveEnvSets', envSets);
   },
 
   async removeEnvSet(id) {

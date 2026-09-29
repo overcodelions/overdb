@@ -23,7 +23,12 @@ export type MemberStatus =
   | 'done'
   | 'error'
   | 'cancelled'
-  | 'blocked';
+  | 'blocked'
+  /// Not sent at all: the member could not be reached when the run began.
+  /// Kept apart from `error` because nothing was wrong with the statement
+  /// or the server's answer — there was no answer to be had, and a row of
+  /// red "failed" for a VPN that is down says the wrong thing.
+  | 'skipped';
 
 /// One member's run. Mirrors a result tab, minus everything that only makes
 /// sense for the single-connection editor (sorting, filtering, inline edits):
@@ -139,6 +144,8 @@ export function compare(member: MemberRun, baseline: MemberRun | null): Comparis
       summary:
         member.status === 'error' ? 'did not run'
         : member.status === 'blocked' ? 'not run'
+        : member.status === 'skipped' ? 'skipped — could not be reached'
+        : baseline.status === 'skipped' ? 'nothing to compare against — the baseline could not be reached'
         : baseline.status !== 'done' ? 'nothing to compare against — the baseline did not finish'
         : 'still running',
     };
@@ -266,6 +273,13 @@ export function fanoutSummary(runs: MemberRun[], baselineId: string | null): str
   // said one, because the one it left out was the baseline — which is the
   // failure that matters most, since nothing can be compared without it.
   const failed = runs.filter((r) => r.status === 'error').length;
+  const skipped = runs.filter((r) => r.status === 'skipped').length;
+  if (baseline?.status === 'skipped') {
+    return 'The baseline could not be reached — nothing to compare against.';
+  }
+  if (skipped > 0 && skipped === others.length) {
+    return 'Only the baseline answered — nothing to compare against.';
+  }
   if (baseline?.status === 'error') {
     return failed === 1
       ? 'The baseline failed — nothing to compare against.'
@@ -280,6 +294,7 @@ export function fanoutSummary(runs: MemberRun[], baselineId: string | null): str
   if (matched) parts.push(`${matched} match the baseline`);
   if (differ) parts.push(`${differ} differ`);
   if (failed) parts.push(`${failed} failed`);
+  if (skipped) parts.push(`${skipped} skipped — unreachable`);
 
   // Said last but decisive: a tally taken while members are still working
   // is a progress report, not a result, and "Nothing finished" was flatly

@@ -35,6 +35,10 @@ const NO_AI_NOTE = [
 import { WriteControls } from './WriteControls';
 import { QueryError } from './QueryError';
 import { PlanView } from './PlanView';
+import { sendToOvercli } from './overcli';
+import { planSummary, slowStatSummary, statementTitle } from '@shared/overcliHandoff';
+import { planFindings } from '@shared/planFindings';
+import { tableAliases } from '@shared/aliases';
 import { parsePlan, type PlanRow } from '@shared/plan';
 import {
   affectedVerb,
@@ -314,7 +318,7 @@ export function QueryPane(): JSX.Element {
   const buffers = useStore((s) => s.buffers);
   const setBuffer = useStore((s) => s.setBuffer);
   const newBuffer = useStore((s) => s.newBuffer);
-  const closeBuffer = useStore((s) => s.closeBuffer);
+  const closeBufferAsking = useStore((s) => s.closeBufferAsking);
   const selectBuffer = useStore((s) => s.selectBuffer);
   const activeBuffer = useStore((s) => (conn ? s.activeBuffer[conn.id] : undefined));
   const bufferSchema = useStore((s) => s.bufferSchema);
@@ -538,6 +542,23 @@ export function QueryPane(): JSX.Element {
     const tab = tabs.find((t) => t.status === 'done' && t.sql.trim() === want);
     return tab ? { rowCount: tab.rowCount, durationMs: tab.durationMs } : null;
   }, [bufferPlan, tabs]);
+
+  // Hand the plan to overcli, where the code behind the statement lives.
+  // The plan and its findings go; the result's rows never do. Whether
+  // overcli is installed is the button's business — see OvercliButton.
+  const sendPlanToOvercli =
+    conn && bufferPlan?.sql
+      ? () =>
+          void sendToOvercli(conn.id, {
+            kind: 'slow-query',
+            title: `${statementTitle(bufferPlan.sql!, 'Slow query')} (${conn.name})`,
+            summary: planSummary(
+              planFindings(bufferPlan.rows, tableAliases(bufferPlan.sql!)),
+              plannedResult,
+            ),
+            evidence: { sql: bufferPlan.sql, plan: bufferPlan.raw, envs: [conn.env] },
+          })
+      : undefined;
 
   /// Table or chart, for whichever result is in front.
   ///
@@ -1355,21 +1376,7 @@ export function QueryPane(): JSX.Element {
             {/* Only on the tab you are on, and only on hover: a row of close
                 buttons invites the one misclick that loses a query. */}
             <button
-              onClick={() => {
-                if (!conn) return;
-                const text = (buffers[key] ?? '').trim();
-                if (!text) {
-                  closeBuffer(conn.id, key);
-                  return;
-                }
-                askConfirm({
-                  title: `Close ${bufferLabel(text)}?`,
-                  body: 'The query in this tab is discarded. Nothing that already ran is affected.',
-                  confirmLabel: 'Close tab',
-                  destructive: true,
-                  onConfirm: () => closeBuffer(conn.id, key),
-                });
-              }}
+              onClick={() => conn && closeBufferAsking(conn.id, key)}
               className="opacity-0 group-hover:opacity-100 focus:opacity-100 text-ink-faint hover:text-ink px-1 rounded"
               title={bufferKeys.length > 1 ? 'Close this tab' : 'Clear this tab'}
               aria-label="Close tab"
@@ -1582,6 +1589,14 @@ export function QueryPane(): JSX.Element {
             onClose={closePane}
             onOpen={(text) => editStatement(text, 'From slow queries')}
             onPlan={(text) => void showPlan(text)}
+            onSendToOvercli={(stat) =>
+              void sendToOvercli(conn.id, {
+                kind: 'slow-query',
+                title: `${statementTitle(stat.sql, 'Slow query')} (${conn.name})`,
+                summary: slowStatSummary(stat),
+                evidence: { sql: stat.sql, envs: [conn.env] },
+              })
+            }
             // Straight into the tuner that already exists. Finding the
             // expensive statement and improving it are the same errand, and
             // making the user retype it in between is where that errand
@@ -1673,6 +1688,7 @@ export function QueryPane(): JSX.Element {
             onDropCompare={() => setPlan((p) => (p ? { ...p, compare: undefined } : p))}
             onTune={tune}
             tuning={askBusy}
+            onSendToOvercli={sendPlanToOvercli}
           />
         ) : !current ? (
           <EmptyResults lang={lang} writes={Boolean(conn.writesEnabled)} />

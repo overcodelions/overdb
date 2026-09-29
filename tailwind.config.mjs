@@ -45,6 +45,12 @@ export default {
           violet: 'var(--c-tag-violet)', indigo: 'var(--c-tag-indigo)', amber: 'var(--c-tag-amber)',
           orange: 'var(--c-tag-orange)', emerald: 'var(--c-tag-emerald)', blue: 'var(--c-tag-blue)',
         },
+        side: {
+          base: 'rgb(var(--c-side-base) / <alpha-value>)',
+          here: 'rgb(var(--c-side-here) / <alpha-value>)',
+          here2: 'rgb(var(--c-side-2) / <alpha-value>)',
+          here3: 'rgb(var(--c-side-3) / <alpha-value>)',
+        },
         wash: {
           DEFAULT: 'var(--c-wash)',
           strong: 'var(--c-wash-strong)',

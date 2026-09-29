@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import type { ColumnInfo, Engine, SchemaSnapshot, TableInfo } from './types';
-import { diffSchemas, driftSummary, normalizeDefault, type DriftKind } from './schemaDiff';
+import {
+  diffSchemas,
+  driftSummary,
+  globToRegExp,
+  normalizeDefault,
+  suggestIgnores,
+  type DriftKind,
+} from './schemaDiff';
 
 function column(name: string, patch: Partial<ColumnInfo> = {}): ColumnInfo {
   return { name, ordinal: 1, typeName: 'integer', nullable: true, defaultExpr: null, ...patch };
@@ -269,7 +276,12 @@ describe('diffSchemas', () => {
 
 describe('normalizeDefault', () => {
   it('strips the type Postgres appends to a literal', () => {
-    expect(normalizeDefault("'active'::text")).toBe("'active'");
+    expect(normalizeDefault("'active'::text")).toBe(normalizeDefault("'active'"));
+  });
+
+  it('reads a quoted and an unquoted string default as one', () => {
+    // MariaDB reports 'ACTIVE', MySQL reports ACTIVE.
+    expect(normalizeDefault("'ACTIVE'")).toBe(normalizeDefault('ACTIVE'));
   });
 
   it('reads the two spellings of now as one', () => {
@@ -335,5 +347,80 @@ describe('diffSchemas scoped to named tables', () => {
     expect(new Set(drift.findings.map((f) => f.table))).toEqual(
       new Set(['partner', 'panel_widget']),
     );
+  });
+});
+
+describe('ignoring one-sided tables', () => {
+  const baseline = snap([
+    table('users'),
+    table('invoices'),
+    table('TMP_REPORT_1'),
+    table('orders_bak2'),
+  ]);
+
+  it('leaves out a table only one side has when a pattern names it', () => {
+    const drift = diffSchemas(baseline, snap([table('users'), table('scratch_tmp')]), {
+      ignoreTables: ['tmp_*', '*_bak*', '*_tmp'],
+    });
+    expect(drift.findings.map((f) => f.table)).toEqual(['invoices']);
+    expect(drift.ignored.map((i) => [i.table, i.pattern])).toEqual([
+      ['TMP_REPORT_1', 'tmp_*'],
+      ['orders_bak2', '*_bak*'],
+      ['scratch_tmp', '*_tmp'],
+    ]);
+  });
+
+  it('never hides a table both sides have', () => {
+    // A pattern written for scratch copies must not swallow real drift on
+    // a table that happens to share its shape of name.
+    const drift = diffSchemas(
+      snap([table('users_tmp', { columns: [column('id', { typeName: 'integer' })] })]),
+      snap([table('users_tmp', { columns: [column('id', { typeName: 'text' })] })]),
+      { ignoreTables: ['*_tmp'] },
+    );
+    expect(kinds(drift)).toEqual(['column-type']);
+    expect(drift.ignored).toEqual([]);
+  });
+
+  it('matches schema.table when the pattern has a dot', () => {
+    const drift = diffSchemas(baseline, snap([table('users')]), {
+      ignoreTables: ['public.inv*', 'other.*'],
+    });
+    expect(drift.ignored.map((i) => i.table)).toEqual(['invoices']);
+  });
+
+  it('moves baseline-only tables to pending when asked, and does not count them', () => {
+    const drift = diffSchemas(baseline, snap([table('users')]), {
+      ignoreTables: ['tmp_*', '*_bak*'],
+      baselineOnly: 'pending',
+    });
+    expect(drift.findings).toEqual([]);
+    expect(drift.verdict).toBe('match');
+    expect(drift.pending.map((f) => f.table)).toEqual(['invoices']);
+  });
+
+  it('keeps a table only here as a finding in pending mode', () => {
+    const drift = diffSchemas(snap([table('users')]), snap([table('users'), table('audit')]), {
+      baselineOnly: 'pending',
+    });
+    expect(kinds(drift)).toEqual(['table-extra']);
+  });
+});
+
+describe('globToRegExp', () => {
+  it('reads * and ? and nothing else', () => {
+    expect(globToRegExp('tmp_*').test('TMP_REPORT_2')).toBe(true);
+    expect(globToRegExp('t?p').test('tmp')).toBe(true);
+    expect(globToRegExp('a.b').test('axb')).toBe(false);
+    expect(globToRegExp('*_bak*').test('orders_bak2')).toBe(true);
+    expect(globToRegExp('*_bak*').test('orders')).toBe(false);
+  });
+});
+
+describe('suggestIgnores', () => {
+  it('offers only patterns that would hide something and are not already on', () => {
+    expect(suggestIgnores(['TMP_A', 'TMP_B', 'x_tmp', 'invoices'], ['*_tmp'])).toEqual([
+      { pattern: 'tmp_*', count: 2 },
+    ]);
   });
 });

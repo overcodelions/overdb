@@ -402,6 +402,7 @@ export const SHORTCUTS: { title: string; items: [keys: string, what: string][] }
       ['⇧⌥F', 'Format every statement'],
       ['Tab', 'Accept the highlighted completion'],
       ['⌘T', 'New tab on this connection'],
+      ['⌘W', 'Close the tab — ⇧⌘W closes the window'],
       ['⌘I', 'Ask about this database'],
       ['Esc', 'Cancel a running statement, on the server'],
     ],

@@ -7,6 +7,80 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+- Fix it in overcli: a plan, or a statement in the slow-query pane, can be
+  handed to overcli to find and fix the code behind it. The button glows
+  when overcli is installed; without it, the same spot links to overcli.app
+  (with a × to stop suggesting it). The first send asks
+  which repo uses the database and remembers it on the env set (or the
+  connection). The statement, plan and findings go; result rows never do.
+- Schema drift can ignore tables by pattern (`tmp_*`, `*_bak*`), saved with
+  the set. overdb suggests patterns from the scratch-looking names it finds,
+  and only ever hides tables one side is missing.
+- Tables only the baseline has are listed apart as not deployed yet instead
+  of counted as breaking drift. Tick one to put it in the proposed SQL, or
+  switch a set back to counting them.
+- Schema drift has the set's Schema bar, and compares exactly the schema
+  picked for each member, even when the names differ (`acme` locally,
+  `acmeprod` on prod). Each member says which schemas it compared and how
+  many tables the two have in common, so an empty result can be told apart
+  from one that compared nothing.
+- Schema drift keeps the last catalog it read from each connection, and
+  compares against it when that connection cannot be reached — two
+  environments on VPNs you cannot be on at once can still be compared. A
+  member compared that way is marked with how old its catalog is. Catalogs
+  only: no rows, nothing from the connection.
+- Share a drift comparison. Export report… saves it as one HTML file anyone
+  can open — the verdict, the consequence cards, every table side by side,
+  what was not deployed or ignored, and the proposed SQL — with no script
+  and nothing loaded from the network, in light or dark to match the
+  reader. Copy as Markdown puts the same report on the clipboard for a PR,
+  a ticket or a chat. Either one says when each catalog was read and which
+  was kept rather than live. Schema, table and column names go in; hosts,
+  users and rows never do.
+- A set's Query tab knows which members can be reached before you press
+  Run. With none reachable it says so — each server's reason in plain words
+  and how old its kept catalog is — keeps the editor, turns Run off, and
+  points to Schema drift, which works from kept catalogs. With some
+  reachable, Run says "Run on 1 of 2", the others are skipped rather than
+  failed, and the results say plainly when what came back is one server's
+  answer and not a comparison. overdb checks again every twenty seconds
+  while a member is down, and when the network or the window comes back.
+
+### Changed
+- Schema drift reads table by table. Findings are grouped by what they do —
+  breaks, integrity, behaviour, performance, only on one side — each with a
+  line on what that means, naming the servers. Every table that differs is
+  on one scrolling page, as rows with the two servers side by side: the
+  baseline, marked ★ and in teal, then the other member in orange, under
+  column headings that stay on screen as you scroll. Only the words that
+  differ are lit. Matching rows are folded (click to see the whole table),
+  Swap sides puts the baseline on the right, and each table's SQL is a
+  click away. A list down the side follows the scroll; ↑/↓ jump between
+  tables. A set with one member to compare opens straight on it, the Schema
+  bar marks the baseline and carries Re-read, and the ignore rules open
+  from a button instead of taking a column.
+- A set with more than one member to compare shows them side by side: a
+  column per member beside the baseline's, each in its own colour, a cell
+  reading "same" wherever a member agrees — so which of them drifted, and
+  whether the same way, is one read. The member list turns columns on and
+  off; up to three show at once. The side list marks which members differ
+  on each table, each table has its SQL per member, and the report and
+  Markdown export take the same shape.
+- Changing one member's schema in a set's Schema bar moves the others that
+  were on the same schema with it, when they have the new one too. A member
+  deliberately on another name stays where it is, and a toast says who
+  moved.
+- Proposed SQL names the servers in its comments — "datetime on prod-west
+  and timestamp on prod-east" — instead of "here" and "the baseline".
+- Proposed SQL is dated as `2026-09-28 12:43 UTC` rather than a raw
+  timestamp, and a foreign key to a table in the same schema no longer
+  names the schema.
+- A string default quoted on one server and not on the other (`'ACTIVE'`
+  against `ACTIVE`) is no longer reported as drift.
+- ⌘W closes the query tab you are on instead of the window, asking first if
+  there is a query in it. Close Window moves to ⇧⌘W.
+
 ## [0.1.2] - 2026-09-27
 
 ### Added

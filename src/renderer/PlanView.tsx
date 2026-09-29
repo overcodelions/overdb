@@ -6,6 +6,7 @@ import { PlanLedger } from './PlanLedger';
 import { PlanReading, PlanVerdict } from './PlanReading';
 import { resolveStep, tableAliases } from '@shared/aliases';
 import { useStore } from './store';
+import { OvercliButton } from './OvercliButton';
 
 /// The plan, twice: as a picture, then as the table.
 ///
@@ -23,6 +24,7 @@ export function PlanView({
   onDropCompare,
   onTune,
   tuning,
+  onSendToOvercli,
 }: {
   rows: PlanRow[];
   raw: string;
@@ -40,6 +42,9 @@ export function PlanView({
   /// `compare` above.
   onTune?(): void;
   tuning?: boolean;
+  /// Hand this plan to overcli. Without overcli installed, the button links
+  /// to overcli.app instead — see OvercliButton.
+  onSendToOvercli?(): void;
 }): JSX.Element {
   if (rows.length === 0) {
     return (
@@ -53,7 +58,14 @@ export function PlanView({
 
   return (
     <div className="h-full overflow-auto">
-      <Picture rows={rows} result={result} sql={sql} onTune={onTune} tuning={tuning} />
+      <Picture
+        rows={rows}
+        result={result}
+        sql={sql}
+        onTune={onTune}
+        tuning={tuning}
+        onSendToOvercli={onSendToOvercli}
+      />
       {compare && <Comparison rows={rows} compare={compare} onDrop={onDropCompare} />}
 
       <table className="w-full text-[11px]">
@@ -246,12 +258,14 @@ function Picture({
   sql,
   onTune,
   tuning,
+  onSendToOvercli,
 }: {
   rows: PlanRow[];
   result?: { rowCount: number; durationMs: number | null } | null;
   sql?: string;
   onTune?(): void;
   tuning?: boolean;
+  onSendToOvercli?(): void;
 }): JSX.Element | null {
   const [mode, setMode] = useState<Picture>(() => {
     try {
@@ -290,6 +304,7 @@ function Picture({
       <div className="flex items-center gap-2 px-3 pt-2.5">
         <span className="text-[11px] text-ink">The work this query does</span>
         <div className="flex-1" />
+        {onSendToOvercli && <OvercliButton onSend={onSendToOvercli} />}
         {onTune && mode === 'bars' && (
           <button
             onClick={onTune}

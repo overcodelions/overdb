@@ -45,7 +45,18 @@ export function buildMigration(
   drift: SchemaDrift,
   baseline: SchemaSnapshot,
   engine: Engine,
-  options: { includeQuiet?: boolean } = {},
+  /// `header: false` leaves off the preamble — for one table's SQL shown
+  /// under its own diff, where three lines of boilerplate would outweigh
+  /// the one statement.
+  ///
+  /// `names` puts the two servers' names where the comments would say
+  /// "here" and "the baseline" — a comment read in someone's editor, away
+  /// from the drift view, has nothing else to say which side is which.
+  options: {
+    includeQuiet?: boolean;
+    header?: boolean;
+    names?: { here: string; baseline: string };
+  } = {},
 ): Migration {
   const q = (name: string) => quoteIdent(name, engine);
   const qualified = (schema: string, table: string) =>
@@ -60,7 +71,8 @@ export function buildMigration(
     lines.push(sql);
     statementCount++;
   };
-  const comment = (text: string) => lines.push(text);
+  const named = (text: string) => (options.names ? nameSides(text, options.names) : text);
+  const comment = (text: string) => lines.push(named(text));
 
   const tableIn = (schema: string, name: string): TableInfo | undefined =>
     baseline.schemas.find((s) => s.name === schema)?.tables.find((t) => t.name === name);
@@ -234,12 +246,15 @@ export function buildMigration(
     }
   }
 
-  const header = [
-    `-- Proposed by overdb. Nothing here has run.`,
-    `-- Bringing this connection in line with the baseline, as of ${new Date().toISOString()}.`,
-    `-- Read every statement: overdb compared two catalogs, not two datasets.`,
-    '',
-  ];
+  const at = new Date().toISOString().slice(0, 16).replace('T', ' ');
+  const header = options.header === false
+    ? []
+    : [
+        `-- Proposed by overdb. Nothing here has run.`,
+        named(`-- Bringing this connection in line with the baseline, as of ${at} UTC.`),
+        `-- Read every statement: overdb compared two catalogs, not two datasets.`,
+        '',
+      ];
 
   return {
     sql: statementCount === 0 && lines.length === 0
@@ -248,6 +263,15 @@ export function buildMigration(
     statementCount,
     unhandled,
   };
+}
+
+/// A finding's sentence, with "here" and "the baseline" swapped for names.
+export function nameSides(text: string, names: { here: string; baseline: string }): string {
+  return text
+    .replace(/\bon the baseline\b/g, `on ${names.baseline}`)
+    .replace(/\bthe baseline\b/g, names.baseline)
+    .replace(/\bthis connection\b/g, names.here)
+    .replace(/\bhere\b/g, `on ${names.here}`);
 }
 
 function destructiveHint(

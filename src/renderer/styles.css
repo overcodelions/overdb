@@ -68,6 +68,14 @@
   --c-hot: 182 61 11;
   --c-bad: 205 33 33;
   --c-bad-strong: 153 27 27;
+  /* The two sides of a drift comparison. Not red and green: neither side
+   * is an addition or a removal, and a diff's colours say that they are.
+   * Teal and orange also differ in lightness, not only hue. */
+  --c-side-base: 13 148 136;
+  --c-side-here: 194 65 12;
+  /* Further members of a set, beside the first. */
+  --c-side-2: 109 40 217;
+  --c-side-3: 190 24 93;
 
   /* Engine badges. Whole colours rather than channels: the badge is muted
    * by design, and the amount of muting is not the same on both grounds —
@@ -134,6 +142,10 @@
   --c-hot: 251 146 60;
   --c-bad: 248 113 113;
   --c-bad-strong: 252 165 165;
+  --c-side-base: 94 234 212;
+  --c-side-here: 253 186 116;
+  --c-side-2: 196 181 253;
+  --c-side-3: 249 168 212;
 
   --c-tag-sky: rgb(125 211 252 / 0.75);
   --c-tag-rose: rgb(253 164 175 / 0.75);
@@ -725,5 +737,26 @@ button:hover > .ai-spark {
   .plan-strain {
     animation: none;
     opacity: 0.16;
+  }
+}
+
+/* "Send to overcli" — the one button in overdb that leaves overdb, so it is
+ * lit rather than grey. A steady halo, and a few slow breaths when it first
+ * appears so the eye finds it; after that it holds still (see
+ * attention-pulse: a control that never stops moving becomes furniture). */
+@keyframes overcli-breathe {
+  0%, 100% { box-shadow: 0 0 6px 0 rgb(var(--c-accent) / 0.35); }
+  50% { box-shadow: 0 0 14px 2px rgb(var(--c-accent) / 0.6); }
+}
+.overcli-glow {
+  box-shadow: 0 0 6px 0 rgb(var(--c-accent) / 0.35);
+  animation: overcli-breathe 2.4s ease-in-out 3;
+}
+.overcli-glow:hover {
+  box-shadow: 0 0 14px 2px rgb(var(--c-accent) / 0.6);
+}
+@media (prefers-reduced-motion: reduce) {
+  .overcli-glow {
+    animation: none;
   }
 }
