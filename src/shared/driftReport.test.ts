@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ColumnInfo, SchemaSnapshot, TableInfo } from './types';
 import { diffSchemas } from './schemaDiff';
-import { driftReport, type ReportInput } from './driftReport';
+import { code, driftReport, type ReportInput } from './driftReport';
 
 function column(name: string, patch: Partial<ColumnInfo> = {}): ColumnInfo {
   return { name, ordinal: 1, typeName: 'int', nullable: true, defaultExpr: null, ...patch };
@@ -121,5 +121,21 @@ describe('driftReport, several members', () => {
     expect(r.markdown).toContain('**sandbox matches prod-east.**');
     expect(r.html).toContain('<td class="m1 same">same</td>');
     expect(r.fileName).toBe('drift-prod-west-sandbox-vs-prod-east-2026-09-28');
+  });
+});
+
+describe('code', () => {
+  it('leaves a backslash alone — it prints as-is inside a code span', () => {
+    expect(code("'a\\b'")).toBe("`'a\\b'`");
+  });
+
+  it('keeps a table cell whole when a backslash comes before a pipe', () => {
+    // `\\|` would read as an escaped backslash, then a column break.
+    expect(code('a\\|b')).toBe('`a\\\\\\|b`');
+    expect(code('a|b')).toBe('`a\\|b`');
+  });
+
+  it('fences a value holding a backtick with two', () => {
+    expect(code('a`b')).toBe('`` a`b ``');
   });
 });

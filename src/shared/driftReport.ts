@@ -371,9 +371,19 @@ function md(text: string): string {
   return text.replace(/\\/g, '\\\\').replace(/\|/g, '\\|').replace(/\n/g, ' ');
 }
 
-/// Inline code that survives a backtick in the value.
-function code(text: string): string {
-  const clean = text.replace(/\|/g, '\\|').replace(/\n/g, ' ');
+/// Inline code for a table cell, that survives a backtick or a pipe in the
+/// value.
+///
+/// Backslashes are left alone: inside a code span they print as they are,
+/// so escaping each one as prose would show every backslash twice. The one
+/// that matters is a backslash right before a pipe — the table reads `\\|`
+/// as an escaped backslash and then a column break, splitting the cell —
+/// so that one is doubled before the pipe is escaped.
+export function code(text: string): string {
+  const clean = text
+    .replace(/\\(?=\|)/g, '\\\\')
+    .replace(/\|/g, '\\|')
+    .replace(/\n/g, ' ');
   return clean.includes('`') ? `\`\` ${clean} \`\`` : `\`${clean}\``;
 }
 
