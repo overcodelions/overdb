@@ -51,7 +51,9 @@ export type Sheet =
   /// set-up hint in the sidebar. Still a form: nothing is saved until Create.
   | { kind: 'newEnvSet'; suggested?: { name: string; memberIds: string[]; baselineId: string } }
   | { kind: 'editEnvSet'; id: string }
-  | { kind: 'pickTables'; connectionId: string };
+  | { kind: 'pickTables'; connectionId: string }
+  /// Seed for a ticket. See seedStore.ts.
+  | { kind: 'seed'; connectionId: string };
 
 export interface ConfirmRequest {
   title: string;

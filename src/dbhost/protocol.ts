@@ -27,6 +27,12 @@ export type HostRequest =
   | { id: string; op: 'resetSlowQueries' }
   | { id: string; op: 'health'; scope?: HealthScope }
   | { id: string; op: 'killSession'; sessionId: string; terminate: boolean }
+  /// The server's own table statistics for one schema — estimated rows per
+  /// table and the highest id handed out — for the seed gate and the seed's
+  /// id block. Catalog reads; no row leaves the host, and no table is
+  /// scanned except where the server has no estimate and `countUnknown`
+  /// asks for a bounded count instead.
+  | { id: string; op: 'seedStats'; schema: string; countUnknown: boolean; cap: number }
   | { id: string; op: 'close' };
 
 export type HostResponse =
@@ -37,6 +43,21 @@ export type HostResponse =
   | { kind: 'chunk'; runId: string; seq: number; columns?: ColumnMeta[]; rows: Cell[][] }
   | { kind: 'done'; runId: string; rowCount: number; affectedRows?: number | null; truncated: boolean; durationMs: number }
   | { kind: 'failed'; runId: string; message: string };
+
+export interface SeedStatsValue {
+  tables: Array<{
+    table: string;
+    /// The server's estimate, a bounded count where it had none, or null.
+    rows: number | null;
+    /// An estimate rather than a count.
+    approx: boolean;
+    /// A bounded count that reached the cap: "at least this many".
+    capped: boolean;
+  }>;
+  /// The highest id any table in the schema has handed out, when the
+  /// server keeps one (AUTO_INCREMENT, a sequence, SQLite's rowid).
+  maxId: number | null;
+}
 
 export interface PingValue {
   ok: boolean;

@@ -23,6 +23,8 @@ import type { SlowQuerySupport, StatementStat } from './slowQueries';
 import type { HealthScope, HealthSnapshot } from './health';
 import type { HistoryEntry, RunRecord, SavedQuery } from './history';
 import type { SshTunnel } from './sshTunnel';
+import type { SeedGate } from './seedGate';
+import type { SeedInvestigation, SeedScript, SeedScriptCheck } from './seedSql';
 export type { SshTunnel } from './sshTunnel';
 export type { FormatStyle } from './formatSql';
 export type { HistoryEntry, RunRecord, SavedQuery } from './history';
@@ -264,7 +266,25 @@ export type Cell = null | string | number | boolean | BinaryCell;
 /// Where a statement came from. There is deliberately NO 'ai' member:
 /// the AI layer proposes SQL into the editor and has no execute path.
 /// `src/main/aiNeverExecutes.test.ts` asserts this stays true.
-export type QueryOrigin = 'editor' | 'grid-edit' | 'saved';
+///
+/// 'seed' is a person pressing Run on a seed script they have read — the
+/// same act as running it from the editor, but main holds it to more: the
+/// connection must pass the seed gate again (src/shared/seedGate.ts), only
+/// INSERTs and reads get through, and the first write always opens a
+/// transaction, whatever the connection's own mode.
+export type QueryOrigin = 'editor' | 'grid-edit' | 'saved' | 'seed';
+
+/// How much data a seed should make. 'minimal' is one row per case the need
+/// describes; 'realistic' fills around them so a list screen looks lived
+/// in; 'volume' is enough to see pagination and slow paths.
+export type SeedSize = 'minimal' | 'realistic' | 'volume';
+
+/// One line of the seed flow's "what it's looking at" log. Paths and
+/// patterns only — never a file's contents.
+export interface SeedStep {
+  kind: 'schema' | 'count' | 'read' | 'grep' | 'glob' | 'note';
+  text: string;
+}
 
 // ---------------------------------------------------------------------
 // Schema
@@ -765,6 +785,41 @@ export interface IPCInvokeMap {
     confirm?: string;
   }) => { ok: boolean; error?: string };
 
+  /// Seed for a ticket. See src/shared/seedGate.ts for what may be seeded
+  /// and src/shared/seedSql.ts for what comes back. None of these channels
+  /// runs SQL: the script is run by the window, through `query:run` with
+  /// origin 'seed', after a person has read it.
+  ///
+  /// The gate, plus the repo the connection is linked to (the same link the
+  /// overcli handoff uses), if any.
+  'seed:check': (connectionId: string) => { gate: SeedGate | null; repo: string | null; error?: string };
+  /// Read the schema — and, with `readRepo` and claude, the code — and come
+  /// back with findings and a plan in words. `revise` redoes the plan from
+  /// the previous one and an instruction, without reading the code again.
+  /// Progress arrives as `seed:step` events for `jobId`.
+  'seed:investigate': (args: {
+    jobId: string;
+    connectionId: string;
+    tool: AiTool;
+    need: string;
+    size: SeedSize;
+    readRepo: boolean;
+    revise?: { previous: SeedInvestigation; instruction: string };
+  }) => { ok: true; investigation: SeedInvestigation; readCode: boolean } | { ok: false; error: string };
+  /// Turn an approved plan into a seed, a teardown and a verify query, and
+  /// check them against the catalog before returning. A script that fails
+  /// the check is retried once with the problems named, then returned with
+  /// them so the window can say what is wrong.
+  'seed:write': (args: {
+    jobId: string;
+    connectionId: string;
+    tool: AiTool;
+    need: string;
+    investigation: SeedInvestigation;
+  }) => { ok: true; script: SeedScript; check: SeedScriptCheck } | { ok: false; error: string; check?: SeedScriptCheck };
+  /// Stop an investigation or a write in flight. Its answer is discarded.
+  'seed:cancel': (jobId: string) => void;
+
   /// Which AI CLIs are installed. The whole AI surface hides when none are.
   'ai:detect': () => { claude: boolean; codex: boolean; gemini: boolean };
   /// Ask a question about the connected database. Returns PROSE plus any SQL
@@ -808,6 +863,8 @@ export type MainToRendererEvent =
   /// An open transaction is state you must not have to remember, so it is
   /// pushed — including when the idle timeout rolls it back for you.
   | { kind: 'txn:state'; connectionId: string; open: boolean; statements: number; expiresAt: number | null }
+  /// A line for the seed flow's live log while a model investigates.
+  | { kind: 'seed:step'; jobId: string; step: SeedStep }
   /// A menu item the window has to carry out — opening a help sheet, the
   /// palette. See src/main/menu.ts.
   | { kind: 'menu'; command: MenuCommand }

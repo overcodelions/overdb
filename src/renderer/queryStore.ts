@@ -9,6 +9,7 @@ import { previewUpdate } from '@shared/rowEdit';
 import { bindFor, paramSlots, previewBound, resolveParams, unfilledParams } from '@shared/params';
 import { useStore } from './store';
 import { useFanout } from './fanoutStore';
+import { useSeed } from './seedStore';
 
 export type TabStatus = 'pending' | 'running' | 'done' | 'error' | 'cancelled';
 
@@ -675,6 +676,8 @@ export const useQuery = create<QueryState>((set, get) => ({
     // will ever collect — one stale entry per member per run, for as long
     // as the window is open.
     if (useFanout.getState().runs.some((r) => r.runId === event.runId)) return;
+    // The seed flow's statements, likewise — it reads its own results back.
+    if (useSeed.getState().owns(event.runId)) return;
     const { connectionId, tabs } = get();
     const idx = tabs.findIndex((t) => t.runId === event.runId);
     if (idx < 0) {
@@ -820,6 +823,14 @@ export function subscribeToMainEvents(): () => void {
       useStore.getState().setTxnState(event.connectionId, {
         open: event.open, statements: event.statements, expiresAt: event.expiresAt,
       });
+      // The idle timeout rolls a transaction back without asking; a seed
+      // waiting on Commit has to hear about it.
+      const seed = useSeed.getState();
+      if (!event.open && seed.connectionId === event.connectionId) seed.txnClosed();
+      return;
+    }
+    if (event.kind === 'seed:step') {
+      useSeed.setState((st) => (st.jobId === event.jobId ? { steps: [...st.steps, event.step].slice(-200) } : {}));
       return;
     }
     // Both stores see every run event and each ignores the runIds it does
@@ -828,5 +839,6 @@ export function subscribeToMainEvents(): () => void {
     // a single connection.
     useQuery.getState().ingest(event);
     useFanout.getState().ingest(event);
+    useSeed.getState().ingest(event);
   });
 }

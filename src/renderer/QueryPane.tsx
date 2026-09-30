@@ -32,7 +32,11 @@ const NO_AI_NOTE = [
   'Everything else — running SQL, plans, the catalog, history — works without it.',
 ].join('\n');
 
-import { WriteControls } from './WriteControls';
+import { ConnectionState } from './WriteControls';
+import { Dropdown, MenuDivider, MenuItem } from './Menu';
+import { Chevron, Dots, Lines, Play, PlanIcon, SetIcon, Sparkle, Stop, TableGrid, Wand } from './Icons';
+import { TAG_TEXT } from './engineTags';
+import { variantLabel } from '@shared/engines';
 import { QueryError } from './QueryError';
 import { PlanView } from './PlanView';
 import { sendToOvercli } from './overcli';
@@ -98,6 +102,9 @@ export function QueryPane(): JSX.Element {
   /// navigator: nothing here changes what the editor is pointed at.
 
   const [tablesOpen, setTablesOpen] = useState(false);
+  /// The header's two menus: the ways to run, and the rarely needed rest.
+  const [runMenu, setRunMenu] = useState(false);
+  const [moreMenu, setMoreMenu] = useState(false);
   const [inject, setInject] = useState<{
     text: string;
     nonce: number;
@@ -592,6 +599,14 @@ export function QueryPane(): JSX.Element {
     handOff(envSet.id, text);
     selectPane({ kind: 'envSet', id: envSet.id });
     toast(`Running on ${envSet.name}.`);
+  };
+
+  /// Where a set's members live, for the Run menu: "local · staging · prod,
+  /// compared with prod".
+  const setDetail = (envSet: EnvSet): string => {
+    const envs = [...new Set(envSet.memberIds.map((id) => connections.find((c) => c.id === id)?.env).filter(Boolean))];
+    const base = connections.find((c) => c.id === envSet.baselineId);
+    return `${envs.join(' · ')}${base ? `, compared with ${base.name}` : ''}`;
   };
 
   const [resultView, setResultView] = useState<'table' | 'chart'>('table');
@@ -1125,105 +1140,82 @@ export function QueryPane(): JSX.Element {
         </div>
       )}
       <div className="flex-1 min-w-0 flex flex-col min-h-0">
-      <div className="flex items-center gap-2.5 px-3.5 h-10 border-b border-card shrink-0">
-        <span className="text-xs font-medium text-ink">{conn.name}</span>
-        <span className="text-[10px] text-ink-faint">{conn.engine}</span>
+      {/* The header in three parts, sorted by what each thing IS rather than
+          how important it is: where you are and what state it is in on the
+          left, what you can do on the right, and one primary action. The
+          actions that apply to ONE statement — plan, explain, refine, run
+          on a set — live on the statement's own strip (SqlEditor), where
+          they cannot be misread as applying to the whole buffer. */}
+      <div className="flex items-center gap-1.5 pl-3.5 pr-3 h-11 border-b border-card shrink-0">
+        <span className={`shrink-0 text-[10px] font-semibold ${TAG_TEXT[conn.variant ?? conn.engine]}`}>
+          {variantLabel(conn.variant, conn.engine)}
+        </span>
+        <span className="ml-1 text-[13px] font-semibold text-ink truncate max-w-[220px]" title={conn.name}>
+          {conn.name}
+        </span>
         {schemaList && schemaList.length > 0 && (
-          <select
-            value={activeSchema ?? ''}
-            onChange={(e) => void switchSchema(conn.id, e.target.value)}
-            title={conn.engine === 'mysql' ? 'Active database' : 'Active schema'}
-            className="field px-1.5 py-0.5 text-[11px] max-w-[180px]"
-          >
-            {activeSchema && !schemaList.includes(activeSchema) && (
-              <option value={activeSchema}>{activeSchema}</option>
-            )}
-            {schemaList.map((n) => (
-              <option key={n} value={n}>{n}</option>
-            ))}
-          </select>
+          <>
+            <span className="text-ink-faint" aria-hidden="true">/</span>
+            <select
+              value={activeSchema ?? ''}
+              onChange={(e) => void switchSchema(conn.id, e.target.value)}
+              title={conn.engine === 'mysql' ? 'Active database' : 'Active schema'}
+              aria-label={conn.engine === 'mysql' ? 'Active database' : 'Active schema'}
+              className="bg-transparent font-mono text-[12px] text-ink rounded px-1 py-1 max-w-[200px] outline-none cursor-pointer hover:bg-wash-strong focus-visible:ring-1 focus-visible:ring-accent"
+            >
+              {activeSchema && !schemaList.includes(activeSchema) && (
+                <option value={activeSchema}>{activeSchema}</option>
+              )}
+              {schemaList.map((n) => (
+                <option key={n} value={n}>{n}</option>
+              ))}
+            </select>
+          </>
         )}
         {conn.env === 'prod' && (
           <span className="text-[10px] px-1.5 py-0.5 rounded bg-warn/10 text-warn/90 border border-warn/25">
             prod
           </span>
         )}
-        <WriteControls conn={conn} />
+        <span className="w-px h-4 bg-rule mx-1.5 shrink-0" aria-hidden="true" />
+        <ConnectionState
+          conn={conn}
+          pinnedCount={pinnedCount}
+          onPickTables={() => setSheet({ kind: 'pickTables', connectionId: conn.id })}
+        />
         {connectError ? null : schemaError ? (
           <button
             onClick={() => void loadSchema(conn.id, { force: true })}
             title={`Completion is off because the catalog could not be read: ${schemaError}`}
-            className="text-[10px] px-1.5 py-0.5 rounded bg-warn/10 text-warn/90 border border-warn/25"
+            className="text-[11px] px-2 py-1 rounded bg-warn/10 text-warn/90 border border-warn/25"
           >
             no schema — retry
           </button>
         ) : schemaLoading ? (
-          <span className="text-[10px] text-ink-faint">reading schema…</span>
+          <span className="text-[11px] text-ink-faint px-2">reading schema…</span>
         ) : schema ? (
-          // The table count is the natural door to "which of these does the
-          // AI actually see", so it is the button rather than a label.
+          // The table count is the door to the tables themselves: it was a
+          // label beside a "Tables" button that did the same job.
           <button
-            onClick={() => setSheet({ kind: 'pickTables', connectionId: conn.id })}
-            title="Choose which tables the AI always sees"
-            className="text-[10px] text-ink-faint hover:text-ink"
+            onClick={() => setTablesOpen((v) => !v)}
+            aria-pressed={tablesOpen}
+            title="Browse tables and build a query from their keys"
+            className={`h-7 px-2 rounded-[5px] flex items-center gap-1.5 text-[12px] ${
+              tablesOpen ? 'bg-accent/15 text-ink' : 'text-ink-muted hover:text-ink hover:bg-wash-strong'
+            }`}
           >
+            <TableGrid />
             {schema.schemas.reduce((n, sc) => n + sc.tables.length, 0)} tables
             {/* A count that silently excludes most of the account is worse
                 than no count, so the filter is stated wherever it applies. */}
             {conn.tableFilter && (
-              <span title={`Showing only ${conn.tableFilter}`}> · filtered</span>
+              <span className="text-ink-faint" title={`Showing only ${conn.tableFilter}`}>· filtered</span>
             )}
-            {pinnedCount > 0 && <span className="text-accent"> · {pinnedCount} pinned</span>}
           </button>
         ) : null}
+
         <div className="flex-1" />
-        <button
-          onClick={() => setTablesOpen((v) => !v)}
-          title="Browse tables and build a query from their keys"
-          className={`text-xs px-2.5 py-1 rounded border ${
-            tablesOpen ? 'border-accent text-accent' : 'border-card text-ink-muted hover:text-ink'
-          }`}
-        >
-          Tables
-        </button>
-        <button
-          onClick={formatBuffer}
-          disabled={!sql.trim()}
-          title="Reformat every statement (⇧⌥F)"
-          className="text-xs px-2.5 py-1 rounded border border-card text-ink-muted hover:text-ink disabled:opacity-40"
-        >
-          Format
-        </button>
-        <button
-          // The plan, and nothing else: no model, no execution. It was
-          // reachable only from the results footer, which meant the only
-          // way to see what a query was about to do was to do it first.
-          onClick={() => void showPlan(targetSql())}
-          disabled={!sql.trim()}
-          title="Show the plan for this statement — it is not executed (⌥↵)"
-          className="text-xs px-2.5 py-1 rounded border border-card text-ink-muted hover:text-ink disabled:opacity-40"
-        >
-          Plan
-        </button>
-        <button
-          onClick={() => void explain()}
-          // EXPLAIN goes to the server like anything else — including the
-          // reconnect, which main does for it.
-          disabled={!sql.trim() || running}
-          title="Plan it AND ask the model to interpret it — Plan alone uses no AI"
-          className="text-xs px-2.5 py-1 rounded border border-card text-ink-muted hover:text-ink disabled:opacity-40"
-        >
-          Explain
-        </button>
-        <button
-          onClick={() => setAskOpen((v) => !v)}
-          title="Ask about this database (⌘I)"
-          className={`text-xs px-2.5 py-1 rounded border ${
-            askOpen ? 'border-accent text-accent' : 'border-card text-ink-muted hover:text-ink'
-          }`}
-        >
-          Ask
-        </button>
+
         {!connected && !running && (
           // Connect stays reachable — it also loads the catalog, which Run
           // does not — but it no longer stands IN the Run slot. Running
@@ -1232,7 +1224,7 @@ export function QueryPane(): JSX.Element {
           <button
             onClick={() => void connect()}
             disabled={connecting}
-            className="text-xs px-2.5 py-1 rounded border border-warn/50 text-warn-strong hover:bg-warn/10 disabled:opacity-40"
+            className="h-7 text-[12px] px-2.5 rounded-[5px] border border-warn/50 text-warn-strong hover:bg-warn/10 disabled:opacity-40"
             title={
               live === 'error'
                 ? 'The last attempt to connect failed — try again'
@@ -1242,23 +1234,101 @@ export function QueryPane(): JSX.Element {
             {connecting ? 'Connecting…' : 'Connect'}
           </button>
         )}
+
+        <div className="relative">
+          <button
+            onClick={() => setMoreMenu((v) => !v)}
+            aria-label="More actions"
+            aria-haspopup="menu"
+            aria-expanded={moreMenu}
+            title="More actions"
+            className={`w-7 h-7 rounded-[5px] flex items-center justify-center ${
+              moreMenu ? 'bg-wash-strong text-ink' : 'text-ink-muted hover:text-ink hover:bg-wash-strong'
+            }`}
+          >
+            <Dots />
+          </button>
+          <Dropdown open={moreMenu} onClose={() => setMoreMenu(false)} label="More actions" width={280}>
+            <MenuItem
+              icon={<Wand />}
+              label="Format all statements"
+              kbd="⇧⌥F"
+              disabled={!sql.trim()}
+              onSelect={() => {
+                setMoreMenu(false);
+                formatBuffer();
+              }}
+            />
+            <MenuItem
+              icon={<Sparkle className="w-3 h-3" />}
+              tone="ai"
+              label="Tables the AI always sees…"
+              detail={pinnedCount > 0 ? `${pinnedCount} pinned` : 'None pinned — it picks from your question'}
+              onSelect={() => {
+                setMoreMenu(false);
+                setSheet({ kind: 'pickTables', connectionId: conn.id });
+              }}
+            />
+            <MenuDivider />
+            <MenuItem
+              label="Keyboard shortcuts"
+              kbd="⌘/"
+              onSelect={() => {
+                setMoreMenu(false);
+                setSheet({ kind: 'shortcuts' });
+              }}
+            />
+          </Dropdown>
+        </div>
+
+        {/* Everything that hands work to a model, together and in the AI
+            hue — so which buttons send something to a model is a thing you
+            can see rather than one you have to remember. */}
+        <div className="flex items-center h-7 mx-1 rounded-md border border-ai/30 overflow-hidden">
+          <button
+            onClick={() => setAskOpen((v) => !v)}
+            aria-pressed={askOpen}
+            title="Ask about this database (⌘I)"
+            className={`h-full px-2.5 flex items-center gap-1.5 text-[12px] text-ai ${askOpen ? 'bg-ai/15' : 'hover:bg-ai/10'}`}
+          >
+            <Sparkle />
+            Ask
+            <kbd className="font-mono text-[10px] text-ink-muted">⌘I</kbd>
+          </button>
+          {conn.env === 'local' && conn.engine !== 'dynamodb' && (
+            // Local only: on anything else the sheet would open straight onto
+            // its refusal, and a button that always refuses is noise.
+            <>
+              <span className="w-px h-4 bg-ai/25" aria-hidden="true" />
+              <button
+                onClick={() => setSheet({ kind: 'seed', connectionId: conn.id })}
+                title="Seed this local database with test data for a ticket — you read the plan and the SQL before anything runs"
+                className="h-full px-2.5 text-[12px] text-ai hover:bg-ai/10"
+              >
+                Seed
+              </button>
+            </>
+          )}
+        </div>
+
         {running ? (
           <button
             onClick={() => void cancel()}
             // Red because it stops something already happening. It sits in
             // the slot Run occupied a moment ago, so it has to read as a
             // different kind of action rather than as Run in a new coat.
-            className="text-xs px-2.5 py-1 rounded bg-bad/15 text-bad-strong border border-bad/40 hover:bg-bad/25"
+            className="h-7 min-w-[104px] px-3 rounded-md flex items-center justify-center gap-2 text-[12px] font-semibold bg-bad/15 text-bad-strong border border-bad/40 hover:bg-bad/25"
             title="Cancel — aborts on the server, not just here (Esc)"
           >
-            Cancel <span className="text-bad-strong/60">Esc</span>
+            <Stop />
+            Cancel <kbd className="font-mono text-[10px] text-bad-strong/70">Esc</kbd>
           </button>
         ) : (
-          <>
+          <div className="relative flex h-7">
             <button
               onClick={doRun}
               disabled={translating}
-              className="text-xs px-3 py-1 rounded bg-accent/90 text-white hover:bg-accent disabled:opacity-40"
+              className="h-full pl-3 pr-2.5 rounded-l-md flex items-center gap-2 text-[12px] font-semibold bg-accent-strong text-white hover:bg-accent-strong/90 disabled:opacity-40"
               title={
                 willTranslate
                   ? `That looks like a question — turn it into ${lang} (⌘↵)`
@@ -1269,6 +1339,7 @@ export function QueryPane(): JSX.Element {
                       : 'Run the statement at the cursor (⌘↵)'
               }
             >
+              {willTranslate ? <Sparkle /> : <Play />}
               {translating
                 ? 'Translating…'
                 : willTranslate
@@ -1276,17 +1347,93 @@ export function QueryPane(): JSX.Element {
                   : isQuestion
                     ? 'Needs AI'
                     : 'Run'}
+              <kbd className="font-mono text-[10px] text-white/75">⌘↵</kbd>
             </button>
-            {statementCount > 1 && (
-              <button
-                onClick={doRunAll}
-                className="text-xs px-2 py-1 rounded border border-card text-ink-muted hover:text-ink"
-                title="Run every statement in the editor (⇧⌘↵)"
-              >
-                All {statementCount}
-              </button>
-            )}
-          </>
+            <button
+              onClick={() => setRunMenu((v) => !v)}
+              aria-label="More ways to run"
+              aria-haspopup="menu"
+              aria-expanded={runMenu}
+              title={statementCount > 1 ? `Run all ${statementCount}, run on a set, or plan only` : 'Run on a set, or plan only'}
+              className={`h-full w-[26px] rounded-r-md flex items-center justify-center border-l border-white/25 text-white ${
+                runMenu ? 'bg-accent-strong/80' : 'bg-accent-strong hover:bg-accent-strong/90'
+              }`}
+            >
+              <Chevron up={runMenu} />
+            </button>
+            <Dropdown open={runMenu} onClose={() => setRunMenu(false)} label="Run" width={330}>
+              <MenuItem
+                icon={<Play />}
+                label={cursor.to > cursor.from ? 'Run the selection' : 'Run this statement'}
+                detail={firstLine(targetSql())}
+                kbd="⌘↵"
+                disabled={!targetSql().trim()}
+                onSelect={() => {
+                  setRunMenu(false);
+                  doRun();
+                }}
+              />
+              {statementCount > 1 && (
+                <MenuItem
+                  icon={<Lines />}
+                  label={`Run all ${statementCount} statements`}
+                  kbd="⇧⌘↵"
+                  onSelect={() => {
+                    setRunMenu(false);
+                    doRunAll();
+                  }}
+                />
+              )}
+              {sets.all.length > 0 && <MenuDivider />}
+              {sets.all.length === 1 && (
+                <MenuItem
+                  icon={<SetIcon />}
+                  label={`Run on ${sets.all[0].name}`}
+                  detail={setDetail(sets.all[0])}
+                  disabled={!targetSql().trim()}
+                  onSelect={() => {
+                    setRunMenu(false);
+                    runOnSet(sets.all[0], targetSql());
+                  }}
+                />
+              )}
+              {sets.all.length > 1 && (
+                <MenuItem
+                  icon={<SetIcon />}
+                  label="Run on a set…"
+                  detail={`${sets.all.length} sets include ${conn.name}`}
+                  disabled={!targetSql().trim()}
+                  onSelect={() => {
+                    setRunMenu(false);
+                    setPickSetFor(targetSql());
+                  }}
+                />
+              )}
+              <MenuDivider />
+              <MenuItem
+                icon={<PlanIcon />}
+                label="Plan only"
+                detail="EXPLAIN — the statement is not executed"
+                kbd="⌥↵"
+                disabled={!targetSql().trim()}
+                onSelect={() => {
+                  setRunMenu(false);
+                  void showPlan(targetSql());
+                }}
+              />
+              <MenuItem
+                icon={<Sparkle className="w-3 h-3" />}
+                tone="ai"
+                label="Plan and explain"
+                detail="The model reads the plan for you"
+                disabled={!targetSql().trim()}
+                onSelect={() => {
+                  setRunMenu(false);
+                  void explain();
+                }}
+              />
+            </Dropdown>
+          </div>
         )}
       </div>
 
@@ -2015,6 +2162,12 @@ function WriteOutcome({ tab }: { tab: ResultTab }): JSX.Element {
 /// its siblings elsewhere" is what the action means nine times in ten. The
 /// others are still offered, marked, since a statement written here is
 /// often exactly what you want to ask somewhere else.
+/// A statement as one line, for the Run menu to say what it will run.
+function firstLine(sql: string): string {
+  const line = sql.trim().split('\n').find((l) => l.trim() && !l.trim().startsWith('--'))?.trim() ?? '';
+  return line.length > 60 ? `${line.slice(0, 59)}…` : line;
+}
+
 function eligibleSets(envSets: EnvSet[], connectionId: string) {
   const live = envSets.filter((e) => !e.archived);
   const mine = live.filter((e) => e.memberIds.includes(connectionId));

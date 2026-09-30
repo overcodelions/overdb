@@ -10,6 +10,7 @@
 import './devProfile';
 import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeTheme, shell } from 'electron';
 import path from 'node:path';
+import os from 'node:os';
 import fs from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { Store } from './store';
@@ -32,7 +33,10 @@ import type {
   SavedCatalog,
   SchemaSnapshot,
   SecretSource,
+  SeedSize,
+  SeedStep,
   StoreSnapshot,
+  TableInfo,
 } from '../shared/types';
 import type { Variant } from '../shared/engines';
 import { referencedSchemas } from '../shared/qualifiedRefs';
@@ -46,7 +50,29 @@ import type { HandoffDraft } from '../shared/overcliHandoff';
 import { installMenu } from './menu';
 import { createSample } from './sample';
 import { initAutoUpdater, quitAndInstall } from './updater';
-import { detectTools, extractSql, runOneShot, type AiTool } from './ai';
+import { detectTools, extractSql, runInvestigation, runOneShot, type AiTool } from './ai';
+import { investigatePrompt, revisePrompt, scriptPrompt, type SeedPromptInput } from './seedPrompts';
+import {
+  SEED_MAX_ROWS,
+  connectionChecks,
+  isLoopback,
+  seedGate,
+  seedRefusal,
+  sizeGates,
+  type Listener,
+  type SeedGate,
+} from '../shared/seedGate';
+import { connectionPort, portOwner } from './portOwner';
+import {
+  checkSeedScript,
+  insertOrder,
+  parseInvestigation,
+  parseScript,
+  seedIdStart,
+  type SeedInvestigation,
+} from '../shared/seedSql';
+import { linkedRepos, repoLinkOwner } from '../shared/overcliHandoff';
+import type { SeedStatsValue } from '../dbhost/protocol';
 import { buildSchemaContext } from './schemaContext';
 import { askPrompt, explainPrompt, fasterPrompt, fixPrompt, refinePrompt, sqlPrompt } from './aiPrompts';
 import {
@@ -555,6 +581,285 @@ function registerIpc(): void {
   );
   ipcMain.handle('catalog:save', (_e, catalog: SavedCatalog) => CatalogStore.save(catalog));
 
+  // ---- seed for a ticket ------------------------------------------------
+  //
+  // The model investigates and writes; none of these handlers runs the
+  // script. The window runs it through `query:run` with origin 'seed',
+  // which checks the gate again below. See src/shared/seedGate.ts.
+
+  /// In-flight investigations and writes, so Stop and closing the sheet can
+  /// end them. A cancelled job's answer is dropped when it arrives.
+  const seedJobs = new Map<string, { cancel(): void }>();
+
+  interface SeedContext {
+    gate: SeedGate;
+    snapshot: SchemaSnapshot;
+    schema: string | null;
+    tables: TableInfo[];
+    stats: SeedStatsValue | null;
+  }
+
+  /// Where a bounded count stops when a server has no estimate.
+  const PROMPT_COUNT_CAP = 5_000;
+
+  /// Who holds the port a loopback connection reaches — see portOwner.ts.
+  /// Null for SQLite, a socket, a remote host, or an owner lsof cannot see.
+  async function seedListener(conn: Connection): Promise<Listener | null> {
+    if (conn.engine === 'sqlite' || conn.tunnel || !isLoopback(conn.host) || conn.host?.startsWith('/')) return null;
+    const port = connectionPort(conn.engine, conn.port);
+    return port ? portOwner(port) : null;
+  }
+
+  async function currentSchemaOf(connectionId: string): Promise<string | null> {
+    return (await db.request(connectionId, { op: 'currentSchema' }).catch(() => null)) as string | null;
+  }
+
+  /// The gate, as cheaply as it can be answered. The connection's own
+  /// settings and who holds its port settle it outright almost always — a
+  /// confirmed local server, a file or a socket needs nothing from the
+  /// database at all. Only when the owner cannot be seen does size decide,
+  /// and then from the server's own table statistics: one catalog query,
+  /// not a scan. A connection that already failed a check is never asked.
+  async function readSeedGate(conn: Connection): Promise<{ gate: SeedGate; listener: Listener | null; stats: SeedStatsValue | null }> {
+    const listener = await seedListener(conn);
+    const early = listener?.kind === 'forward'
+      ? seedGate(conn, { tables: [], listener }).checks.filter((c) => c.id !== 'size')
+      : connectionChecks(conn);
+    if (early.some((c) => c.ok === false)) return { gate: { ok: false, checks: early }, listener, stats: null };
+    if (!sizeGates(conn, listener)) return { gate: seedGate(conn, { tables: [], listener }), listener, stats: null };
+
+    await ensureOpen(conn.id);
+    const schema = await currentSchemaOf(conn.id);
+    const stats = schema
+      ? ((await db.request(conn.id, { op: 'seedStats', schema, countUnknown: true, cap: SEED_MAX_ROWS })) as SeedStatsValue)
+      : { tables: [], maxId: null };
+    const tables = stats.tables.map((t) => ({
+      schema: schema ?? '', table: t.table, rows: t.rows ?? 0, capped: t.capped, approx: t.approx,
+    }));
+    return { gate: seedGate(conn, { tables, listener }), listener, stats };
+  }
+
+  /// Everything a prompt needs: the gate, the catalog of the schema the
+  /// session is on — from the cache Ask already keeps when it covers it —
+  /// and the table statistics.
+  async function readSeedContext(connectionId: string, step?: (s: SeedStep) => void): Promise<SeedContext> {
+    const conn = Store.load().connections.find((c) => c.id === connectionId);
+    if (!conn) throw new Error('That connection no longer exists.');
+    const read = await readSeedGate(conn);
+    if (!read.gate.ok) {
+      return {
+        gate: read.gate,
+        snapshot: { engine: conn.engine, serverVersion: '', capturedAt: '', schemas: [] },
+        schema: null, tables: [], stats: null,
+      };
+    }
+    await ensureOpen(connectionId);
+    const current = await currentSchemaOf(connectionId);
+    let snapshot = current && cachedCovers(connectionId, [current]) ? getCached(connectionId) : undefined;
+    if (!snapshot) {
+      step?.({ kind: 'schema', text: `Reading the catalog of ${current ?? 'the database'}` });
+      snapshot = (await db.request(connectionId, {
+        op: 'introspect',
+        schemas: current ? [current] : undefined,
+      })) as SchemaSnapshot;
+      putCached(connectionId, snapshot, current ? [current] : undefined);
+    }
+    const home = snapshot.schemas.find((s) => s.name === current) ?? snapshot.schemas[0];
+    const tables = (home?.tables ?? []).filter((t) => t.kind === 'table');
+    const stats = read.stats ?? (home
+      ? ((await db.request(connectionId, {
+          op: 'seedStats', schema: home.name, countUnknown: false, cap: PROMPT_COUNT_CAP,
+        })) as SeedStatsValue)
+      : null);
+    return { gate: read.gate, snapshot, schema: home?.name ?? null, tables, stats };
+  }
+
+  function seedPromptInput(ctx: SeedContext, need: string, size: SeedSize): SeedPromptInput {
+    const names = ctx.tables.map((t) => t.name);
+    // A dev database is small enough to show whole; past that, the tables
+    // the need names and their foreign-key neighbours.
+    const context = buildSchemaContext(ctx.snapshot, need, {
+      activeSchema: ctx.schema ?? undefined,
+      pinned: names.length <= 60 ? names : undefined,
+    });
+    // Counts and insert order for the tables the model can see, not the
+    // whole database: 900 names of tables it was never shown are noise.
+    const shown = new Set(context.included.map((n) => n.slice(n.lastIndexOf('.') + 1).toLowerCase()));
+    const inScope = ctx.tables.filter((t) => shown.has(t.name.toLowerCase()));
+    return {
+      engine: ctx.snapshot.engine,
+      serverVersion: ctx.snapshot.serverVersion,
+      schemaContext: context.text,
+      need,
+      size,
+      insertOrder: insertOrder(inScope),
+      counts: (ctx.stats?.tables ?? [])
+        .filter((t) => shown.has(t.table.toLowerCase()) && t.rows !== null)
+        .map((t) => ({ table: t.table, rows: t.rows!, capped: t.capped, approx: t.approx })),
+      idStart: seedIdStart([ctx.stats?.maxId ?? null]),
+    };
+  }
+
+  async function linkedRepo(connectionId: string): Promise<string | null> {
+    const st = Store.load();
+    const owner = repoLinkOwner(connectionId, st.connections, st.envSets);
+    const repo = owner ? linkedRepos(owner, st.connections, st.envSets)[0] : undefined;
+    if (!repo) return null;
+    return (await fs.stat(repo).then((s) => s.isDirectory()).catch(() => false)) ? repo : null;
+  }
+
+  const seedStep = (jobId: string, step: SeedStep) =>
+    mainWindow?.webContents.send('main:event', { kind: 'seed:step', jobId, step });
+
+  ipcMain.handle('seed:check', async (_e, connectionId: string) => {
+    const repo = await linkedRepo(connectionId);
+    try {
+      const conn = Store.load().connections.find((c) => c.id === connectionId);
+      if (!conn) return { gate: null, repo, error: 'That connection no longer exists.' };
+      const { gate } = await readSeedGate(conn);
+      return { gate, repo };
+    } catch (err) {
+      return { gate: null, repo, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  ipcMain.handle(
+    'seed:investigate',
+    async (
+      _e,
+      args: {
+        jobId: string;
+        connectionId: string;
+        tool: AiTool;
+        need: string;
+        size: SeedSize;
+        readRepo: boolean;
+        revise?: { previous: SeedInvestigation; instruction: string };
+      },
+    ) => {
+      let cancelled = false;
+      seedJobs.set(args.jobId, { cancel: () => (cancelled = true) });
+      try {
+        const ctx = await readSeedContext(args.connectionId, (step) => seedStep(args.jobId, step));
+        if (!ctx.gate.ok) return { ok: false as const, error: 'This connection can’t be seeded.' };
+        const input = seedPromptInput(ctx, args.need, args.size);
+        const settings = Store.load().settings;
+        const model = settings.aiModel[args.tool] || undefined;
+
+        if (args.revise) {
+          seedStep(args.jobId, { kind: 'note', text: 'Revising the plan' });
+          const result = await runOneShot(args.tool, revisePrompt(input, args.revise.previous, args.revise.instruction), { model });
+          if (cancelled) return { ok: false as const, error: 'Stopped.' };
+          if (!result.ok) return { ok: false as const, error: result.error ?? 'The model did not answer.' };
+          const parsed = parseInvestigation(result.output);
+          return 'error' in parsed
+            ? { ok: false as const, error: parsed.error }
+            : { ok: true as const, investigation: parsed, readCode: false };
+        }
+
+        const links = ctx.tables.reduce((n, t) => n + t.foreignKeys.length, 0);
+        seedStep(args.jobId, { kind: 'schema', text: `Foreign keys: ${ctx.tables.length} tables, ${links} links` });
+        // The log is a glance at what it is doing, so long lists are cut:
+        // the prompt gets them whole.
+        const order = input.insertOrder;
+        seedStep(args.jobId, {
+          kind: 'schema',
+          text: `Insert order: ${order.slice(0, 8).join(' → ')}${order.length > 8 ? ` → ${order.length - 8} more` : ''}`,
+        });
+        seedStep(args.jobId, {
+          kind: 'count',
+          text: `${input.counts.slice(0, 12).map((c) => `${c.table} ${c.approx ? '~' : ''}${c.rows}${c.capped ? '+' : ''}`).join(' · ')}${
+            input.counts.length > 12 ? ` · ${input.counts.length - 12} more` : ''
+          } (counts only)`,
+        });
+
+        const repo = args.readRepo && args.tool === 'claude' ? await linkedRepo(args.connectionId) : null;
+        let result;
+        if (repo) {
+          seedStep(args.jobId, { kind: 'note', text: `Reading ${repo.replace(os.homedir(), '~')}` });
+          const job = runInvestigation(investigatePrompt(input, { readable: true }), {
+            cwd: repo,
+            model,
+            onStep: (step) => seedStep(args.jobId, step),
+          });
+          seedJobs.set(args.jobId, { cancel: () => ((cancelled = true), job.cancel()) });
+          result = await job.result;
+        } else {
+          seedStep(args.jobId, { kind: 'note', text: 'Planning from the schema alone' });
+          result = await runOneShot(args.tool, investigatePrompt(input, { readable: false }), {
+            model,
+            timeoutMs: 3 * 60_000,
+          });
+        }
+        if (cancelled) return { ok: false as const, error: 'Stopped.' };
+        if (!result.ok) return { ok: false as const, error: result.error ?? 'The model did not answer.' };
+        const parsed = parseInvestigation(result.output);
+        return 'error' in parsed
+          ? { ok: false as const, error: parsed.error }
+          : { ok: true as const, investigation: parsed, readCode: !!repo };
+      } catch (err) {
+        console.error('seed:investigate failed', err);
+        return { ok: false as const, error: err instanceof Error ? err.message : String(err) };
+      } finally {
+        seedJobs.delete(args.jobId);
+      }
+    },
+  );
+
+  ipcMain.handle(
+    'seed:write',
+    async (
+      _e,
+      args: { jobId: string; connectionId: string; tool: AiTool; need: string; investigation: SeedInvestigation },
+    ) => {
+      let cancelled = false;
+      seedJobs.set(args.jobId, { cancel: () => (cancelled = true) });
+      try {
+        const ctx = await readSeedContext(args.connectionId);
+        if (!ctx.gate.ok) return { ok: false as const, error: 'This connection can’t be seeded.' };
+        // The size is already in the plan; the prompt's own line about it
+        // only has to not contradict it.
+        const input = seedPromptInput(ctx, args.need, 'minimal');
+        const model = Store.load().settings.aiModel[args.tool] || undefined;
+
+        // One retry with the problems named. A script that fails twice goes
+        // back with its problems, rather than round and round on the
+        // person's quota.
+        let problems: string[] = [];
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const result = await runOneShot(args.tool, scriptPrompt(input, args.investigation, problems), {
+            model,
+            timeoutMs: 3 * 60_000,
+          });
+          if (cancelled) return { ok: false as const, error: 'Stopped.' };
+          if (!result.ok) return { ok: false as const, error: result.error ?? 'The model did not answer.' };
+          const script = parseScript(result.output);
+          if ('error' in script) {
+            problems = [script.error];
+            continue;
+          }
+          const check = checkSeedScript(script, ctx.snapshot, ctx.snapshot.engine, ctx.schema);
+          if (check.ok) return { ok: true as const, script, check };
+          problems = check.problems;
+          if (attempt === 1) {
+            return { ok: false as const, error: 'The script failed overdb’s checks twice.', check };
+          }
+        }
+        return { ok: false as const, error: problems[0] ?? 'The model did not return a script.' };
+      } catch (err) {
+        console.error('seed:write failed', err);
+        return { ok: false as const, error: err instanceof Error ? err.message : String(err) };
+      } finally {
+        seedJobs.delete(args.jobId);
+      }
+    },
+  );
+
+  ipcMain.handle('seed:cancel', (_e, jobId: string) => {
+    seedJobs.get(jobId)?.cancel();
+    seedJobs.delete(jobId);
+  });
+
   ipcMain.handle('ai:detect', () => detectTools());
 
   ipcMain.handle(
@@ -863,9 +1168,35 @@ function registerIpc(): void {
       const conn = state.connections.find((c) => c.id === args.connectionId);
       const kind = classify(args.sql);
 
+      // A seed statement is held to the seed gate here too, so the window
+      // cannot talk its way past it: the connection must still pass, and
+      // only INSERTs and reads get through — the teardown is saved for a
+      // person to run from the editor, not run from here.
+      if (args.origin === 'seed') {
+        const refusal = seedRefusal(conn);
+        if (refusal) throw new Error(refusal);
+        // The port's owner can change between checking and running — a
+        // tunnel opened on the same port in the meantime.
+        const listener = conn ? await seedListener(conn) : null;
+        if (listener?.kind === 'forward') {
+          throw new Error(`Seeding refused: ${listener.process} is forwarding this port.`);
+        }
+        const insert = /^\s*(?:--[^\n]*\n\s*)*insert\b/i.test(args.sql);
+        if (kind !== 'read' && !(kind === 'write' && insert)) {
+          throw new Error('Seeding refused: only INSERT statements and reads may run from the seed flow.');
+        }
+      }
+
       // Running is a request for the connection, not something that has to
       // wait behind one: a dead or never-opened session reopens here.
       await ensureOpen(args.connectionId);
+
+      // A seed always runs inside a transaction, whatever the connection's
+      // own mode, so what it wrote can be looked at before it is kept.
+      if (args.origin === 'seed' && kind === 'write' && !writeGate.isOpen(args.connectionId)) {
+        await db.request(args.connectionId, { op: 'txn', action: 'begin' });
+        writeGate.opened(args.connectionId);
+      }
 
       // Manual mode opens the transaction on the first write and leaves it
       // open. Opening it here rather than in the host keeps one place that

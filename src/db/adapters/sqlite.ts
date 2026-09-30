@@ -134,8 +134,16 @@ export class SqliteAdapter implements DbAdapter {
     // No result columns means a statement, not a query — run it and
     // report the write as an empty result rather than iterating nothing.
     if (columns.length === 0) {
-      stmt.run(...(params as never[]));
-      return { columns, async next() { return { rows: [], done: true }; }, async close() {} };
+      // `changes` is what the statement did, which is what "3 rows
+      // inserted" should report — not the zero rows it returned.
+      const info = stmt.run(...(params as never[]));
+      const affected = Number(info.changes);
+      return {
+        columns,
+        affectedRows: Number.isFinite(affected) ? affected : null,
+        async next() { return { rows: [], done: true }; },
+        async close() {},
+      };
     }
 
     const iter = stmt.iterate(...(params as never[])) as Iterator<unknown[]>;

@@ -35,6 +35,7 @@ import {
   joinCompletionSource,
   namespaceFor,
 } from './sqlSchema';
+import { SetIcon, Wand } from './Icons';
 
 const highlight = HighlightStyle.define([
   { tag: tags.keyword, color: 'rgb(var(--c-accent))' },
@@ -705,9 +706,13 @@ export function SqlEditor({
           onMouseDown={(e) => e.stopPropagation()}
           className="absolute right-3.5 z-10 flex items-center gap-1 rounded-md border border-accent/60 bg-surface shadow-md shadow-black/20 px-1 py-1"
         >
-          <Act label="Plan" title="Show this statement's plan — it is not executed" onClick={() => act('plan')} />
-          <Act label="Explain" title="Plan it and ask the model to interpret it" onClick={() => act('explain')} />
-          <Act label="Format" title="Reformat just this statement" onClick={() => act('format')} />
+          <Act label="Plan" title="Show this statement's plan — it is not executed (⌥↵)" onClick={() => act('plan')} />
+          <Act
+            label="Explain"
+            title="Plan it and ask the model to interpret it"
+            onClick={() => act('explain')}
+            icon={aiAvailable ? <Sparkle /> : undefined}
+          />
           {/* The same door as the mark in the gutter, said in a word for
               anyone who never hovers a line number. */}
           {aiAvailable && onRefine && (
@@ -722,12 +727,19 @@ export function SqlEditor({
               comment above: fanning out acts on ONE statement, and a
               button above a buffer of six reads as applying to all six. */}
           {runSetLabel && (
-            <Act
-              label={runSetLabel}
-              title="Run this statement against every member of an environment set and compare the answers"
-              onClick={() => act('run-set')}
-            />
+            <>
+              <span className="w-px h-3.5 bg-rule mx-0.5" aria-hidden="true" />
+              <Act
+                label={runSetLabel}
+                title="Run this statement against every member of an environment set and compare the answers"
+                onClick={() => act('run-set')}
+                icon={<SetIcon />}
+              />
+            </>
           )}
+          {/* Last and wordless: tidying a statement is the one action here
+              that changes nothing about what it does. */}
+          <Act title="Reformat just this statement" onClick={() => act('format')} icon={<Wand />} />
         </div>
       )}
     </div>
@@ -740,7 +752,8 @@ function Act({
   onClick,
   icon,
 }: {
-  label: string;
+  /// Absent for an icon-only action, which is then named by its title.
+  label?: string;
   title: string;
   onClick(): void;
   /// The mark, for the one action here that hands work to a model. It says
@@ -753,7 +766,10 @@ function Act({
     <button
       onClick={onClick}
       title={title}
-      className="flex items-center gap-1.5 text-[11px] font-medium tracking-wide px-2 py-1 rounded text-ink bg-card/70 hover:bg-accent hover:text-white"
+      aria-label={label ? undefined : title}
+      className={`flex items-center gap-1.5 text-[11px] font-medium tracking-wide py-1 rounded text-ink bg-card/70 hover:bg-accent hover:text-white ${
+        label ? 'px-2' : 'px-1.5 text-ink-muted'
+      }`}
     >
       {icon}
       {label}

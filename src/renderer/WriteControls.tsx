@@ -1,13 +1,9 @@
 import { useEffect, useState } from 'react';
 import type { Connection } from '@shared/types';
 import { useStore } from './store';
+import { Dropdown } from './Menu';
+import { Chevron, Clock, Lock, Sparkle } from './Icons';
 
-/// The header's answer to "can this hurt anything, and is anything pending".
-///
-/// Deliberately always visible rather than tucked in a menu: read-only vs
-/// writable is the single most consequential fact about the connection you
-/// are typing into, and an open transaction is state you must not have to
-/// remember you left behind.
 /// The enable-writes gesture, shared by the header control and the panel
 /// that appears when the server has just refused a write. One place, because
 /// the prod confirmation is the part that must not be reimplemented slightly
@@ -101,19 +97,38 @@ export function ProdConfirm({
   );
 }
 
-export function WriteControls({ conn }: { conn: Connection }): JSX.Element {
+/// The header's answer to "can this hurt anything, and is anything pending".
+///
+/// One chip, always visible: read-only vs writable is the single most
+/// consequential fact about the connection you are typing into. It opens a
+/// panel for the settings behind it — writes, the transaction mode, which
+/// tables the AI always sees — which are changed rarely and read constantly,
+/// so the chip says them and the panel changes them.
+///
+/// An open transaction takes the chip's place outright. It is state you must
+/// not have to remember you left behind, and the one moment the header's
+/// most important job is Commit and Roll back.
+export function ConnectionState({
+  conn,
+  pinnedCount,
+  onPickTables,
+}: {
+  conn: Connection;
+  pinnedCount: number;
+  onPickTables(): void;
+}): JSX.Element {
   const txn = useStore((s) => s.txnState[conn.id]);
   const setTxnMode = useStore((s) => s.setTxnMode);
   const endTransaction = useStore((s) => s.endTransaction);
-  const toast = useStore((s) => s.toast);
   const blockedAt = useStore((s) => s.writeBlockedAt[conn.id]);
   const gate = useWriteToggle(conn);
+  const [panel, setPanel] = useState(false);
 
   const mode = conn.txnMode ?? 'auto';
   const open = Boolean(txn?.open);
 
   // Pulse only for a few seconds after a refusal, and only while writes are
-  // still off — once they are on, the control has nothing left to say.
+  // still off — once they are on, the chip has nothing left to say.
   const [pulsing, setPulsing] = useState(false);
   useEffect(() => {
     if (!blockedAt || conn.writesEnabled) return;
@@ -122,61 +137,131 @@ export function WriteControls({ conn }: { conn: Connection }): JSX.Element {
     return () => clearTimeout(id);
   }, [blockedAt, conn.writesEnabled]);
 
-  const toggle = async () => {
-    if (gate.writes) {
-      if (open) {
-        toast('Commit or roll back the open transaction first.', 'error');
-        return;
-      }
-      await gate.disable();
-      return;
-    }
-    if (conn.env === 'prod') {
-      gate.begin();
-      return;
-    }
+  useEffect(() => setPanel(false), [conn.id]);
+
+  if (open) return <OpenTransaction txn={txn} onEnd={(a) => void endTransaction(conn.id, a)} />;
+
+  const toggleWrites = async () => {
+    if (gate.writes) return void gate.disable();
+    if (conn.env === 'prod') return gate.begin();
     await gate.enable();
   };
 
   return (
-    <>
+    <div className="relative">
       <button
-        onClick={() => void toggle()}
+        onClick={() => setPanel((v) => !v)}
+        aria-expanded={panel}
+        aria-haspopup="dialog"
         title={
           gate.writes
-            ? 'Writes are enabled on this connection. Click to make it read-only again.'
-            : 'This connection is read-only — the server refuses writes. Click to enable them.'
+            ? `Writes are on; ${mode === 'auto' ? 'each write commits by itself' : 'writes wait in a transaction for you to commit'}.`
+            : 'Read-only — the server refuses writes.'
         }
-        className={`text-[10px] px-1.5 py-0.5 rounded border ${
+        className={`h-[26px] px-2.5 rounded-md flex items-center gap-1.5 text-[12px] border ${
           gate.writes
-            ? 'bg-warn/10 text-warn/90 border-warn/25'
-            : 'bg-card border-card text-ink-faint hover:text-ink'
+            ? `text-ink border-warn/40 ${panel ? 'bg-warn/15' : 'bg-warn/5 hover:bg-warn/10'}`
+            : `text-ink-muted border-transparent ${panel ? 'bg-wash-strong text-ink' : 'hover:bg-wash-strong hover:text-ink'}`
         } ${pulsing ? 'animate-attention' : ''}`}
       >
-        {gate.writes ? 'writes on' : 'read-only'}
+        {gate.writes ? <span className="w-1.5 h-1.5 rounded-full bg-warn" /> : <Lock />}
+        {gate.writes ? (
+          <>
+            Writes on <span className="text-ink-muted">· {mode === 'auto' ? 'auto-commit' : 'manual'}</span>
+          </>
+        ) : (
+          'Read-only'
+        )}
+        <Chevron up={panel} className="w-2.5 h-2.5 text-ink-muted" />
       </button>
 
-      {gate.writes && (
-        <select
-          value={mode}
-          onChange={(e) => void setTxnMode(conn.id, e.target.value as 'auto' | 'manual')}
-          disabled={open}
-          title={
-            open
-              ? 'Finish the open transaction before changing this.'
-              : 'Auto-commit closes each write on its own. Manual holds one transaction open so you can check before committing.'
-          }
-          className="field px-1.5 py-0.5 text-[10px] disabled:opacity-50"
-        >
-          <option value="auto">auto-commit</option>
-          <option value="manual">manual</option>
-        </select>
-      )}
+      <Dropdown
+        open={panel}
+        onClose={() => {
+          setPanel(false);
+          gate.cancel();
+        }}
+        label="Connection state"
+        align="left"
+        width={360}
+        role="dialog"
+      >
+        <div className="flex flex-col gap-3.5 text-[12px] text-ink">
+          <div className="flex items-start gap-3">
+            <div className="flex-1">
+              <div className="font-semibold">Writes</div>
+              <p className="text-[11px] text-ink-muted mt-0.5 leading-relaxed">
+                {gate.writes
+                  ? `Statements may change data on ${conn.name}.`
+                  : 'The server refuses anything that would change data.'}
+                {conn.env === 'prod' && !gate.writes ? ' Turning them on asks you to type the connection’s name.' : ''}
+              </p>
+            </div>
+            <button
+              role="switch"
+              aria-checked={gate.writes}
+              aria-label="Writes"
+              onClick={() => void toggleWrites()}
+              className={`shrink-0 mt-0.5 w-9 h-5 rounded-full relative transition-colors ${gate.writes ? 'bg-warn' : 'bg-wash-strong border border-card'}`}
+            >
+              <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all ${gate.writes ? 'left-[18px]' : 'left-0.5'}`} />
+            </button>
+          </div>
+          {gate.confirming && <ProdConfirm conn={conn} gate={gate} />}
 
-      {open && <OpenTransaction txn={txn} onEnd={(a) => void endTransaction(conn.id, a)} />}
+          {gate.writes && (
+            <div className="flex flex-col gap-1.5">
+              <div className="font-semibold">Transactions</div>
+              <div role="radiogroup" aria-label="Transactions" className="grid grid-cols-2 rounded-md border border-card overflow-hidden">
+                {(
+                  [
+                    ['auto', 'Auto-commit', 'Each write commits by itself'],
+                    ['manual', 'Manual', 'Look before you commit'],
+                  ] as const
+                ).map(([value, name, note], i) => (
+                  <button
+                    key={value}
+                    role="radio"
+                    aria-checked={mode === value}
+                    onClick={() => void setTxnMode(conn.id, value)}
+                    className={`px-2.5 py-2 text-left ${i ? 'border-l border-card' : ''} ${mode === value ? 'bg-accent/20' : 'hover:bg-wash-strong'}`}
+                  >
+                    <span className="block font-semibold">{name}</span>
+                    <span className="block text-[10.5px] text-ink-muted mt-0.5">{note}</span>
+                  </button>
+                ))}
+              </div>
+              {mode === 'manual' && (
+                <p className="text-[10.5px] text-ink-muted leading-relaxed">
+                  An open transaction rolls itself back after 90 s idle, so it never sits on locks.
+                </p>
+              )}
+            </div>
+          )}
 
-      {gate.confirming && <ProdConfirm conn={conn} gate={gate} />}
-    </>
+          <div className="h-px bg-rule" />
+          <div className="flex items-center gap-2.5">
+            <Sparkle />
+            <div className="flex-1">
+              {pinnedCount > 0 ? (
+                <>AI always sees <b className="font-semibold">{pinnedCount} pinned table{pinnedCount === 1 ? '' : 's'}</b></>
+              ) : (
+                <span className="text-ink-muted">AI picks tables from your question</span>
+              )}
+            </div>
+            <button
+              onClick={() => {
+                setPanel(false);
+                onPickTables();
+              }}
+              className="text-[11px] text-accent hover:underline"
+            >
+              Choose…
+            </button>
+          </div>
+        </div>
+      </Dropdown>
+    </div>
   );
 }
 
@@ -200,31 +285,32 @@ function OpenTransaction({
   const n = txn?.statements ?? 0;
 
   return (
-    <span className="flex items-center gap-1.5 px-1.5 py-0.5 rounded border border-accent/40 bg-accent/10">
-      <span className="w-1.5 h-1.5 rounded-full bg-accent" />
-      <span className="text-[10px] text-ink">
-        {n} statement{n === 1 ? '' : 's'} uncommitted
+    <div role="status" className="h-7 flex items-center gap-2.5 pl-2.5 pr-1 rounded-md border border-warn/50 bg-warn/10 text-[12px]">
+      <Clock className="w-[13px] h-[13px] text-warn" />
+      <span>
+        <b className="font-semibold">Transaction open</b>
+        <span className="text-ink-muted"> · {n} statement{n === 1 ? '' : 's'}</span>
       </span>
       {left !== null && (
         <span
-          className="text-[10px] text-ink-faint tabular-nums"
+          className="font-mono text-[11px] text-warn-strong tabular-nums"
           title="An open transaction holds locks, so it rolls back on its own if left idle."
         >
-          {left}s
+          rolls back in {left} s
         </span>
       )}
       <button
-        onClick={() => onEnd('commit')}
-        className="text-[10px] px-1.5 py-0.5 rounded bg-accent text-white hover:bg-accent-strong"
-      >
-        Commit
-      </button>
-      <button
         onClick={() => onEnd('rollback')}
-        className="text-[10px] px-1.5 py-0.5 rounded border border-card text-ink-muted hover:text-bad"
+        className="h-[22px] px-2.5 rounded border border-card bg-wash-strong text-[11px] text-ink hover:text-bad"
       >
         Roll back
       </button>
-    </span>
+      <button
+        onClick={() => onEnd('commit')}
+        className="h-[22px] px-2.5 rounded bg-[rgb(4_113_82)] hover:bg-[rgb(6_95_70)] text-white text-[11px] font-semibold"
+      >
+        Commit
+      </button>
+    </div>
   );
 }

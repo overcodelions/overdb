@@ -122,6 +122,18 @@ export function CommandPalette(): JSX.Element | null {
         hint: 'view',
         run: close(() => setActiveTab(SLOW_TAB)),
       },
+      // Seeding needs a connection to stand on; the sheet itself says why a
+      // given one can't be seeded, so it is offered on any SQL connection.
+      ...(selection?.kind === 'connection' &&
+      connections.some((c) => c.id === selection.id && c.engine !== 'dynamodb')
+        ? [{
+            id: 'seed',
+            label: 'Seed data for a ticket…',
+            hint: 'local',
+            keywords: 'seed fixture test data insert ticket',
+            run: close(() => setSheet({ kind: 'seed', connectionId: selection.id })),
+          }]
+        : []),
       { id: 'new-connection', label: 'New connection…', run: close(() => setSheet({ kind: 'newConnection' })) },
       { id: 'new-envset', label: 'New environment set…', run: close(() => setSheet({ kind: 'newEnvSet' })) },
       { id: 'import', label: 'Import connections…', keywords: 'datagrip dbeaver pgpass intellij', run: close(() => setSheet({ kind: 'importConnections' })) },

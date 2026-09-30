@@ -3,6 +3,7 @@ import { ConnectionForm } from './ConnectionForm';
 import { EnvSetForm } from './EnvSetForm';
 import { AboutSheet, BasicsSheet, ShortcutsSheet } from './Help';
 import { ImportSheet } from './ImportSheet';
+import { SeedSheet } from './SeedSheet';
 import { TablePicker } from './TablePicker';
 import { useStore } from './store';
 import { FORMAT_STYLES, formatSql } from '@shared/formatSql';
@@ -40,14 +41,27 @@ export function SheetHost(): JSX.Element | null {
 
   return (
     <div
-      className={`fixed inset-0 z-40 flex items-start justify-center bg-black/40 ${help ? 'pt-14' : 'pt-24'}`}
+      // Sheets hang from near the top so a form that grows as you fill it
+      // grows downward instead of jumping. The seed sheet has a fixed
+      // height — it cannot jump — so it sits in the middle, where a tall
+      // dialog belongs.
+      className={`fixed inset-0 z-40 flex justify-center bg-black/40 ${
+        sheet.kind === 'seed' ? 'items-center py-6' : `items-start ${help ? 'pt-14' : 'pt-24'}`
+      }`}
       onClick={() => setSheet(null)}
     >
       <div
         className={`${
           help
             ? 'w-[760px] max-w-[calc(100vw-48px)] max-h-[80vh] overflow-hidden'
-            : `${sheet.kind === 'importConnections' ? 'w-[680px]' : 'w-[520px]'} max-w-[calc(100vw-48px)] max-h-[70vh] flex flex-col overflow-hidden`
+            : sheet.kind === 'seed'
+              // A five-step flow with a plan and a script side by side: it
+              // needs a fixed frame, or every step resizes under the pointer.
+              // Grows with the window up to a comfortable reading size: a
+              // plan beside its rules, or a script beside its checks, needs
+              // the room, and at 880×720 both were scrolling in slivers.
+              ? 'w-[min(1200px,calc(100vw-96px))] h-[min(900px,calc(100vh-96px))] min-w-[min(880px,calc(100vw-48px))] min-h-[min(640px,calc(100vh-48px))] flex flex-col overflow-hidden'
+              : `${sheet.kind === 'importConnections' ? 'w-[680px]' : 'w-[520px]'} max-w-[calc(100vw-48px)] max-h-[70vh] flex flex-col overflow-hidden`
         } rounded-lg border border-card bg-surface-elevated shadow-2xl`}
         onClick={(e) => e.stopPropagation()}
       >
@@ -66,6 +80,7 @@ export function SheetHost(): JSX.Element | null {
         {sheet.kind === 'editEnvSet' && (
           <EnvSetForm id={sheet.id} onDone={() => setSheet(null)} />
         )}
+        {sheet.kind === 'seed' && <SeedSheet connectionId={sheet.connectionId} />}
         {sheet.kind === 'pickTables' && (
           <TablePicker connectionId={sheet.connectionId} onClose={() => setSheet(null)} />
         )}

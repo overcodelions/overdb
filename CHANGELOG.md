@@ -8,6 +8,22 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ## [Unreleased]
 
 ### Added
+- Seed for a ticket. Describe the data a ticket needs — or paste the ticket —
+  and overdb investigates, proposes a plan in plain words, writes the SQL,
+  and runs it in a transaction you commit or roll back after reading back
+  what landed. With a linked repo and `claude`, the investigation reads the
+  code to learn what the schema can't say (allowed status values, JSON
+  shapes, app rules), using Read, Grep and Glob only: no shell, no MCP
+  servers, and `.env` files denied. Local databases only — tagged local,
+  writes on, and on this machine: no tunnel, and the port held by a
+  database server or Docker rather than ssh, kubectl or a cloud SQL proxy
+  (when the owner can't be seen, a table over a million rows refuses it
+  instead). No override. The script is checked before you see it: INSERTs only, every
+  table and column real, parents before children, and a teardown that
+  deletes exactly what the seed made. Commit saves both as saved queries.
+  From the Seed button on a local connection, or ⌘K.
+- SQLite reports how many rows a write changed, so an INSERT says
+  "3 rows inserted" instead of nothing.
 - Fix it in overcli: a plan, or a statement in the slow-query pane, can be
   handed to overcli to find and fix the code behind it. The button glows
   when overcli is installed; without it, the same spot links to overcli.app
@@ -48,6 +64,17 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   while a member is down, and when the network or the window comes back.
 
 ### Changed
+- The editor header is sorted by what each control is. Where you are and
+  what state it's in sit on the left: the connection, the schema, one chip
+  for writes and the transaction mode (click it to change either, or which
+  tables the AI always sees), and the table count, which opens the table
+  browser. An open transaction takes the chip's place with its countdown,
+  Commit and Roll back. On the right: a ⋯ menu for the rarely needed, Ask
+  and Seed together in the AI colour, and a split Run button whose menu
+  runs all statements, runs on an environment set, or plans only. Plan,
+  Explain and Format left the header — they act on one statement, so they
+  live on the statement's own strip, where Explain now carries the AI mark
+  and Run on set its own icon.
 - Schema drift reads table by table. Findings are grouped by what they do —
   breaks, integrity, behaviour, performance, only on one side — each with a
   line on what that means, naming the servers. Every table that differs is

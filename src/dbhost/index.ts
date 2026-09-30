@@ -21,7 +21,8 @@ import type { Engine } from '../shared/engines';
 import { SqliteAdapter } from '../db/adapters/sqlite';
 import type { DbAdapter } from '../db/adapter';
 import { cleanError } from './cleanError';
-import type { HostRequest, HostResponse } from './protocol';
+import type { HostRequest, HostResponse, SeedStatsValue } from './protocol';
+import { quoteIdent } from '../shared/orderBy';
 
 /// Electron's utilityProcess exposes `parentPort`; child_process.fork uses
 /// `process.send`. Supporting both is what makes the CLI path free later.
@@ -67,6 +68,86 @@ function makeAdapter(engine: Engine): DbAdapter {
 
 const wire = transport();
 let adapter: DbAdapter | null = null;
+let engine: Engine | null = null;
+
+/// Table statistics for the seed flow — see SeedStatsValue. One catalog
+/// query per engine, because a local copy of production is 900 tables and
+/// counting them is minutes of disk for numbers the server already keeps.
+async function seedStats(a: DbAdapter, schema: string, countUnknown: boolean, cap: number): Promise<SeedStatsValue> {
+  const q = (name: string) => quoteIdent(name, engine ?? 'postgres');
+  const num = (v: unknown): number | null => {
+    if (v === null || v === undefined || v === '') return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  };
+  const out: SeedStatsValue = { tables: [], maxId: null };
+  const bump = (n: number | null) => {
+    if (n !== null) out.maxId = Math.max(out.maxId ?? 0, n);
+  };
+
+  if (engine === 'mysql') {
+    // MySQL 8 serves these from a cache up to a day old by default; a stale
+    // AUTO_INCREMENT would put the seed's ids on top of real ones. MariaDB
+    // has no such setting and reads them live.
+    await a.query('SET SESSION information_schema_stats_expiry = 0').catch(() => undefined);
+    const r = await a.query(
+      `SELECT TABLE_NAME, TABLE_ROWS, AUTO_INCREMENT FROM information_schema.TABLES
+        WHERE TABLE_SCHEMA = ? AND TABLE_TYPE = 'BASE TABLE'`,
+      [schema],
+    );
+    for (const [name, rows, auto] of r.rows) {
+      out.tables.push({ table: String(name), rows: num(rows), approx: true, capped: false });
+      const next = num(auto);
+      bump(next === null ? null : next - 1);
+    }
+  } else if (engine === 'postgres') {
+    const r = await a.query(
+      `SELECT c.relname, c.reltuples FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = $1 AND c.relkind IN ('r', 'p')`,
+      [schema],
+    );
+    // -1 is "never analyzed", which is not the same as empty.
+    for (const [name, rows] of r.rows) {
+      const n = num(rows);
+      out.tables.push({ table: String(name), rows: n !== null && n >= 0 ? Math.round(n) : null, approx: true, capped: false });
+    }
+    const seq = await a
+      .query('SELECT max(last_value) FROM pg_sequences WHERE schemaname = $1', [schema])
+      .catch(() => null);
+    bump(num(seq?.rows[0]?.[0]));
+  } else if (engine === 'sqlite') {
+    // No statistics to read, but a SQLite file is on this machine and a
+    // bounded count of a local file is cheap.
+    const r = await a.query(`SELECT name FROM ${q(schema)}.sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`);
+    for (const [name] of r.rows) {
+      const target = `${q(schema)}.${q(String(name))}`;
+      const c = await a.query(`SELECT COUNT(*) FROM (SELECT 1 FROM ${target} LIMIT ${cap + 1}) AS bounded`);
+      const n = num(c.rows[0]?.[0]) ?? 0;
+      out.tables.push({ table: String(name), rows: Math.min(n, cap), approx: false, capped: n > cap });
+      // rowid is the integer primary key where there is one; a WITHOUT
+      // ROWID table has neither and is skipped.
+      const m = await a.query(`SELECT MAX(rowid) FROM ${target}`).catch(() => null);
+      bump(num(m?.rows[0]?.[0]));
+    }
+    return out;
+  }
+
+  // Where the server had no estimate and size decides the gate, a bounded
+  // count — stopping at the first table that reaches the cap, because the
+  // answer is already no.
+  if (countUnknown) {
+    for (const t of out.tables) {
+      if (t.rows !== null) continue;
+      const c = await a.query(`SELECT COUNT(*) FROM (SELECT 1 FROM ${q(schema)}.${q(t.table)} LIMIT ${cap + 1}) AS bounded`);
+      const n = num(c.rows[0]?.[0]) ?? 0;
+      t.rows = Math.min(n, cap);
+      t.approx = false;
+      t.capped = n > cap;
+      if (t.capped) break;
+    }
+  }
+  return out;
+}
 
 /// Last resort. The adapters listen for their own driver's connection
 /// errors, but a driver that throws from a timer or a socket callback we
@@ -193,6 +274,7 @@ wire.onMessage((req) => {
       switch (req.op) {
         case 'connect': {
           adapter = makeAdapter(req.spec.engine);
+          engine = req.spec.engine;
           await adapter.connect(req.spec);
           const ping = await adapter.ping();
           wire.send({ kind: 'reply', id: req.id, ok: true, value: ping });
@@ -271,6 +353,12 @@ wire.onMessage((req) => {
           wire.send({
             kind: 'reply', id: req.id, ok: true,
             value: await require_().killSession(req.sessionId, { terminate: req.terminate }),
+          });
+          return;
+        case 'seedStats':
+          wire.send({
+            kind: 'reply', id: req.id, ok: true,
+            value: await seedStats(require_(), req.schema, req.countUnknown, req.cap),
           });
           return;
         case 'run':
