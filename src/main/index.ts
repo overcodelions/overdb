@@ -71,8 +71,31 @@ import {
   seedIdStart,
   type SeedInvestigation,
 } from '../shared/seedSql';
-import { linkedRepos, repoLinkOwner } from '../shared/overcliHandoff';
-import type { SeedStatsValue } from '../dbhost/protocol';
+import { repoLinkOwner } from '../shared/overcliHandoff';
+import { appSchemas, recipeHome, repoLinks, reposFor, reposInOrder, reposNote, suggestSchemas, type RepoLink } from '../shared/repoLinks';
+import { scanRepoSchemas } from './repoScan';
+import {
+  catalogLines,
+  emptyMap,
+  freshness,
+  learnFrom,
+  mapSlice,
+  mergeInto,
+  parseMapAnswer,
+  schemaFingerprint,
+  schemasFor,
+  type DbMap,
+} from '../shared/dbMap';
+import { gitBehind, gitChanged, gitHead, loadMap, mapPath, saveMap } from './mapper';
+import { mapPrompt } from './mapPrompts';
+import type { BaselineFindValue, BaselineStatsValue, SeedStatsValue } from '../dbhost/protocol';
+import { findLinks, parseRecipe, plansFromRecipe, type BaselineRecipe, type FindRequest } from '../shared/baseline';
+import { buildPlan, type BuildProgress } from '../shared/baselineBuild';
+import type { Cell } from '../shared/types';
+import { baselineCodePrompt, type BaselineCodeInput } from './baselinePrompts';
+import type { ProxyConfig, ProxyTarget } from '../shared/instances';
+import * as baselines from './baselines';
+import { resolve as resolveCredentials } from './credentials';
 import { buildSchemaContext } from './schemaContext';
 import { askPrompt, explainPrompt, fasterPrompt, fixPrompt, refinePrompt, sqlPrompt } from './aiPrompts';
 import {
@@ -597,6 +620,8 @@ function registerIpc(): void {
     schema: string | null;
     tables: TableInfo[];
     stats: SeedStatsValue | null;
+    /// The other schemas the seed covers, with their tables and counts.
+    others: Array<{ schema: string; tables: TableInfo[]; stats: SeedStatsValue | null }>;
   }
 
   /// Where a bounded count stops when a server has no estimate.
@@ -642,7 +667,7 @@ function registerIpc(): void {
   /// Everything a prompt needs: the gate, the catalog of the schema the
   /// session is on — from the cache Ask already keeps when it covers it —
   /// and the table statistics.
-  async function readSeedContext(connectionId: string, step?: (s: SeedStep) => void): Promise<SeedContext> {
+  async function readSeedContext(connectionId: string, step?: (s: SeedStep) => void, also: string[] = []): Promise<SeedContext> {
     const conn = Store.load().connections.find((c) => c.id === connectionId);
     if (!conn) throw new Error('That connection no longer exists.');
     const read = await readSeedGate(conn);
@@ -650,19 +675,21 @@ function registerIpc(): void {
       return {
         gate: read.gate,
         snapshot: { engine: conn.engine, serverVersion: '', capturedAt: '', schemas: [] },
-        schema: null, tables: [], stats: null,
+        schema: null, tables: [], stats: null, others: [],
       };
     }
     await ensureOpen(connectionId);
     const current = await currentSchemaOf(connectionId);
-    let snapshot = current && cachedCovers(connectionId, [current]) ? getCached(connectionId) : undefined;
+    const extra = current ? [...new Set(also.filter((s) => s !== current))] : [];
+    const wanted = current ? [current, ...extra] : undefined;
+    let snapshot = wanted && cachedCovers(connectionId, wanted) ? getCached(connectionId) : undefined;
     if (!snapshot) {
-      step?.({ kind: 'schema', text: `Reading the catalog of ${current ?? 'the database'}` });
+      step?.({ kind: 'schema', text: `Reading the catalog of ${wanted?.join(', ') ?? 'the database'}` });
       snapshot = (await db.request(connectionId, {
         op: 'introspect',
-        schemas: current ? [current] : undefined,
+        schemas: wanted,
       })) as SchemaSnapshot;
-      putCached(connectionId, snapshot, current ? [current] : undefined);
+      putCached(connectionId, snapshot, wanted);
     }
     const home = snapshot.schemas.find((s) => s.name === current) ?? snapshot.schemas[0];
     const tables = (home?.tables ?? []).filter((t) => t.kind === 'table');
@@ -671,7 +698,16 @@ function registerIpc(): void {
           op: 'seedStats', schema: home.name, countUnknown: false, cap: PROMPT_COUNT_CAP,
         })) as SeedStatsValue)
       : null);
-    return { gate: read.gate, snapshot, schema: home?.name ?? null, tables, stats };
+    const others = [];
+    for (const name of extra) {
+      const sc = snapshot.schemas.find((s) => s.name === name);
+      if (!sc) continue;
+      const st = (await db.request(connectionId, {
+        op: 'seedStats', schema: name, countUnknown: false, cap: PROMPT_COUNT_CAP,
+      })) as SeedStatsValue;
+      others.push({ schema: name, tables: sc.tables.filter((t) => t.kind === 'table'), stats: st });
+    }
+    return { gate: read.gate, snapshot, schema: home?.name ?? null, tables, stats, others };
   }
 
   function seedPromptInput(ctx: SeedContext, need: string, size: SeedSize): SeedPromptInput {
@@ -680,33 +716,271 @@ function registerIpc(): void {
     // the need names and their foreign-key neighbours.
     const context = buildSchemaContext(ctx.snapshot, need, {
       activeSchema: ctx.schema ?? undefined,
-      pinned: names.length <= 60 ? names : undefined,
+      pinned: names.length <= 60 && ctx.others.length === 0 ? names : undefined,
     });
     // Counts and insert order for the tables the model can see, not the
     // whole database: 900 names of tables it was never shown are noise.
-    const shown = new Set(context.included.map((n) => n.slice(n.lastIndexOf('.') + 1).toLowerCase()));
-    const inScope = ctx.tables.filter((t) => shown.has(t.name.toLowerCase()));
+    // Names come qualified when the seed covers more than one schema.
+    const included = new Set(context.included.map((n) => n.toLowerCase()));
+    const shown = (schema: string | null, table: string) =>
+      included.has(table.toLowerCase()) || (!!schema && included.has(`${schema}.${table}`.toLowerCase()));
+    const inScope = ctx.tables.filter((t) => shown(ctx.schema, t.name));
+    // Tables in the other schemas are written schema-qualified, after the
+    // session's own: their rows usually point back at it.
+    const elsewhere = ctx.others.flatMap((o) =>
+      insertOrder(o.tables.filter((t) => shown(o.schema, t.name))).map((n) => `${o.schema}.${n}`),
+    );
+    const countsOf = (stats: SeedStatsValue | null, schema: string | null, prefix: string) =>
+      (stats?.tables ?? [])
+        .filter((t) => shown(schema, t.table) && t.rows !== null)
+        .map((t) => ({ table: `${prefix}${t.table}`, rows: t.rows!, capped: t.capped, approx: t.approx }));
     return {
       engine: ctx.snapshot.engine,
       serverVersion: ctx.snapshot.serverVersion,
       schemaContext: context.text,
       need,
       size,
-      insertOrder: insertOrder(inScope),
-      counts: (ctx.stats?.tables ?? [])
-        .filter((t) => shown.has(t.table.toLowerCase()) && t.rows !== null)
-        .map((t) => ({ table: t.table, rows: t.rows!, capped: t.capped, approx: t.approx })),
-      idStart: seedIdStart([ctx.stats?.maxId ?? null]),
+      insertOrder: [...insertOrder(inScope), ...elsewhere],
+      counts: [...countsOf(ctx.stats, ctx.schema, ''), ...ctx.others.flatMap((o) => countsOf(o.stats, o.schema, `${o.schema}.`))],
+      idStart: seedIdStart([ctx.stats?.maxId ?? null, ...ctx.others.map((o) => o.stats?.maxId ?? null)]),
     };
   }
 
-  async function linkedRepo(connectionId: string): Promise<string | null> {
+  /// Every repo linked for this connection that is still on disk, with the
+  /// schemas each one's code uses.
+  async function linkedRepoLinks(connectionId: string): Promise<RepoLink[]> {
     const st = Store.load();
     const owner = repoLinkOwner(connectionId, st.connections, st.envSets);
-    const repo = owner ? linkedRepos(owner, st.connections, st.envSets)[0] : undefined;
-    if (!repo) return null;
-    return (await fs.stat(repo).then((s) => s.isDirectory()).catch(() => false)) ? repo : null;
+    if (!owner) return [];
+    const links = repoLinks(owner, st.connections, st.envSets);
+    const here = await Promise.all(links.map((l) => fs.stat(l.path).then((s) => s.isDirectory()).catch(() => false)));
+    return links.filter((_, i) => here[i]);
   }
+
+  /// The repos to read for work on `schemas`, the first as claude's working
+  /// directory, and a note telling it which repo owns which schema.
+  /// `all`: every linked repo, the ones for `schemas` first — for a seed,
+  /// whose ticket may be about another service's schema.
+  async function codeRepos(
+    connectionId: string,
+    schemas: string[] | null,
+    opts: { all?: boolean } = {},
+  ): Promise<{ cwd: string; addDirs: string[]; note: string } | null> {
+    const links = await linkedRepoLinks(connectionId);
+    const picked = opts.all && schemas ? reposInOrder(links, schemas) : reposFor(links, schemas);
+    if (picked.length === 0) return null;
+    const cwd = picked[0].path;
+    return { cwd, addDirs: picked.slice(1).map((l) => l.path), note: reposNote(picked, cwd) };
+  }
+
+  async function linkedRepo(connectionId: string): Promise<string | null> {
+    return (await linkedRepoLinks(connectionId))[0]?.path ?? null;
+  }
+
+  // ---- the database map -----------------------------------------------
+  // See src/shared/dbMap.ts. Built once per env set (or lone connection)
+  // from its linked repos, kept in overdb's folder unless the setting says
+  // the recipe repo, and read by every seed after.
+
+  const mapJobs = new Map<string, { cancel(): void }>();
+
+  /// The connection whose catalog a map is checked against: a branch's
+  /// source, since a branch holds the same schemas.
+  function mapProbe(connectionId: string): string {
+    const conn = Store.load().connections.find((c) => c.id === connectionId);
+    return conn?.branchOf && Store.load().connections.some((c) => c.id === conn.branchOf) ? conn.branchOf : connectionId;
+  }
+
+  async function mapFileFor(connectionId: string): Promise<{ owner: DbMap['owner']; file: string } | null> {
+    const st = Store.load();
+    const owner = repoLinkOwner(connectionId, st.connections, st.envSets);
+    if (!owner) return null;
+    const file = mapPath(owner, {
+      location: st.settings.mapLocation ?? 'overdb',
+      userData: app.getPath('userData'),
+      repo: recipeHome(await linkedRepoLinks(connectionId)),
+    });
+    return { owner, file };
+  }
+
+  async function mapCatalog(connectionId: string, schemas: string[]): Promise<SchemaSnapshot> {
+    const probe = mapProbe(connectionId);
+    await ensureOpen(probe);
+    if (cachedCovers(probe, schemas)) return getCached(probe)!;
+    const snap = (await db.request(probe, { op: 'introspect', schemas })) as SchemaSnapshot;
+    putCached(probe, snap, schemas);
+    return snap;
+  }
+
+  /// Which schemas each repo maps: its own, else every app schema.
+  async function mapPlan(connectionId: string): Promise<{ links: RepoLink[]; schemasOf: (l: RepoLink) => string[]; all: string[] }> {
+    const links = await linkedRepoLinks(connectionId);
+    const probe = mapProbe(connectionId);
+    await ensureOpen(probe);
+    const all = appSchemas((await db.request(probe, { op: 'listSchemas' })) as string[]);
+    return { links, all, schemasOf: (l) => (l.schemas?.length ? l.schemas.filter((x) => all.includes(x)) : all) };
+  }
+
+  async function mapStatus(connectionId: string) {
+    const where = await mapFileFor(connectionId);
+    if (!where) return null;
+    const map = await loadMap(where.file);
+    const links = await linkedRepoLinks(connectionId);
+    if (!map) return { file: where.file, map: null, repos: links.length, freshness: null };
+    const repos = await Promise.all(
+      links.map(async (l) => {
+        const head = await gitHead(l.path);
+        const was = map.repos.find((r) => r.path === l.path)?.head;
+        const behind = was && head && was !== head ? await gitBehind(l.path, was, head) : was === head ? 0 : null;
+        return { path: l.path, head, behind };
+      }),
+    );
+    const mapped = Object.keys(map.schemas);
+    const snap = mapped.length ? await mapCatalog(connectionId, mapped).catch(() => null) : null;
+    const fps: Record<string, string> = {};
+    for (const sc of snap?.schemas ?? []) if (mapped.includes(sc.name)) fps[sc.name] = schemaFingerprint(sc);
+    const learned = Object.values(map.tables).reduce((n, t) => n + t.rules.filter((r) => r.learnedAt).length, 0);
+    return {
+      file: where.file,
+      map: { builtAt: map.builtAt, updatedAt: map.updatedAt, tables: Object.keys(map.tables).length, links: map.links.length, learned, schemas: mapped },
+      repos: links.length,
+      freshness: freshness(map, { repos, schemas: fps }),
+    };
+  }
+
+  ipcMain.handle('map:status', async (_e, connectionId: string) => {
+    try {
+      return { ok: true as const, status: await mapStatus(connectionId) };
+    } catch (err) {
+      return { ok: false as const, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  ipcMain.handle('map:build', async (_e, args: { jobId: string; connectionId: string; refresh: boolean }) => {
+    const say = (repo: string | null, step: { kind: string; text: string }) =>
+      mainWindow?.webContents.send('main:event', { kind: 'map:progress', jobId: args.jobId, repo, step });
+    let cancelled = false;
+    const running: Array<{ cancel(): void }> = [];
+    mapJobs.set(args.jobId, { cancel: () => ((cancelled = true), running.forEach((j) => j.cancel())) });
+    try {
+      if (!(await detectTools()).claude) return { ok: false as const, error: 'Mapping reads the code with the claude CLI, which is not installed.' };
+      const where = await mapFileFor(args.connectionId);
+      if (!where) return { ok: false as const, error: 'That connection no longer exists.' };
+      const plan = await mapPlan(args.connectionId);
+      if (plan.links.length === 0) return { ok: false as const, error: 'Link the repos whose code uses this database first.' };
+      const before = await loadMap(where.file);
+      let map = before && args.refresh ? before : emptyMap(where.owner);
+      const model = Store.load().settings.aiModel.claude || undefined;
+      let dropped = 0;
+      const failures: string[] = [];
+
+      // One pass per repo, or several for a big catalog — one answer can
+      // only describe so many tables — three passes at a time.
+      const PART = 50;
+      type Task = { l: RepoLink; schemas: string[]; snap: SchemaSnapshot; changed: string[] | null; head: string | null; focus?: { tables: string[]; part: number; of: number } };
+      const tasks: Task[] = [];
+      const remaining = new Map<string, number>();
+      for (const l of plan.links) {
+        const schemas = plan.schemasOf(l);
+        if (schemas.length === 0) continue;
+        const head = await gitHead(l.path);
+        const was = before?.repos.find((r) => r.path === l.path);
+        let changed: string[] | null = null;
+        if (args.refresh && was?.head && head) {
+          if (was.head === head && schemas.every((x) => before?.schemas[x])) {
+            say(l.path, { kind: 'note', text: 'No new commits — kept as it was' });
+            continue;
+          }
+          changed = was.head === head ? [] : await gitChanged(l.path, was.head, head);
+        }
+        const snap = await mapCatalog(args.connectionId, schemas);
+        const names = snap.schemas
+          .filter((x) => schemas.includes(x.name))
+          .flatMap((x) => x.tables.filter((t) => t.kind === 'table').map((t) => `${x.name}.${t.name}`));
+        // A refresh reads only what changed, whatever the catalog's size.
+        const parts = changed || names.length <= PART ? [null] : Array.from({ length: Math.ceil(names.length / PART) }, (_, i) => names.slice(i * PART, (i + 1) * PART));
+        parts.forEach((p, i) => tasks.push({ l, schemas, snap, changed, head, focus: p ? { tables: p, part: i + 1, of: parts.length } : undefined }));
+        remaining.set(l.path, parts.length);
+      }
+
+      const one = async (t: Task) => {
+        if (cancelled) return;
+        const { l, schemas, snap, changed, head, focus } = t;
+        const label = focus ? ` · part ${focus.part} of ${focus.of}` : '';
+        say(l.path, { kind: 'note', text: `${changed ? `Refreshing from ${changed.length} changed files` : 'Mapping'} · ${schemas.join(', ')}${label}` });
+        const job = runInvestigation(mapPrompt({ repo: l.path, schemas, catalog: catalogLines(snap, schemas), changed, focus }), {
+          cwd: l.path,
+          model,
+          timeoutMs: 30 * 60_000,
+          onStep: (step) => say(l.path, step),
+        });
+        running.push(job);
+        const result = await job.result;
+        if (cancelled) return;
+        if (!result.ok) {
+          failures.push(`${path.basename(l.path)}${label}: ${result.error ?? 'claude did not answer'}`);
+          say(l.path, { kind: 'note', text: `Stopped${label}: ${result.error ?? 'no answer'}` });
+          return;
+        }
+        const part = parseMapAnswer(result.output, snap, l.path);
+        if ('error' in part) {
+          failures.push(`${path.basename(l.path)}${label}: ${part.error}`);
+          return;
+        }
+        dropped += part.dropped;
+        map = mergeInto(map, part);
+        // A repo counts as mapped at its commit once its last part is in.
+        const left = (remaining.get(l.path) ?? 1) - 1;
+        remaining.set(l.path, left);
+        if (left === 0) {
+          const fps = Object.fromEntries(snap.schemas.filter((x) => schemas.includes(x.name)).map((x) => [x.name, schemaFingerprint(x)]));
+          map = {
+            ...map,
+            repos: [...map.repos.filter((r) => r.path !== l.path), { path: l.path, head, mappedAt: new Date().toISOString(), schemas }],
+            schemas: { ...map.schemas, ...fps },
+          };
+        }
+        // Saved after every pass, so a long map that is stopped keeps what
+        // it has.
+        await saveMap(where.file, map);
+        say(l.path, { kind: 'note', text: `Kept ${Object.keys(part.tables).length} tables and ${part.links.length} links${label}` });
+      };
+      await Promise.all(
+        Array.from({ length: Math.min(3, tasks.length) }, async () => {
+          while (tasks.length && !cancelled) await one(tasks.shift()!);
+        }),
+      );
+      if (cancelled) return { ok: false as const, error: 'Stopped. What was mapped so far is kept.' };
+      if (Object.keys(map.tables).length === 0) return { ok: false as const, error: failures[0] ?? 'Nothing in the code described these tables.' };
+      await saveMap(where.file, map);
+      return { ok: true as const, tables: Object.keys(map.tables).length, links: map.links.length, dropped, failures };
+    } catch (err) {
+      return { ok: false as const, error: err instanceof Error ? err.message : String(err) };
+    } finally {
+      mapJobs.delete(args.jobId);
+    }
+  });
+
+  ipcMain.handle('map:cancel', (_e, jobId: string) => {
+    mapJobs.get(jobId)?.cancel();
+  });
+
+  ipcMain.handle('map:schemasFor', async (_e, args: { connectionId: string; text: string }) => {
+    const where = await mapFileFor(args.connectionId);
+    const map = where ? await loadMap(where.file) : null;
+    return map ? schemasFor(map, args.text) : [];
+  });
+
+  ipcMain.handle('repo:suggestSchemas', async (_e, args: { connectionId: string; path: string }) => {
+    try {
+      await ensureOpen(args.connectionId);
+      const all = appSchemas((await db.request(args.connectionId, { op: 'listSchemas' })) as string[]);
+      const evidence = await scanRepoSchemas(args.path, all);
+      return { ok: true as const, schemas: all, suggested: suggestSchemas(evidence, args.path) };
+    } catch (err) {
+      return { ok: false as const, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
 
   const seedStep = (jobId: string, step: SeedStep) =>
     mainWindow?.webContents.send('main:event', { kind: 'seed:step', jobId, step });
@@ -717,7 +991,14 @@ function registerIpc(): void {
       const conn = Store.load().connections.find((c) => c.id === connectionId);
       if (!conn) return { gate: null, repo, error: 'That connection no longer exists.' };
       const { gate } = await readSeedGate(conn);
-      return { gate, repo };
+      let schema: string | null = null;
+      let schemas: string[] = [];
+      if (gate.ok) {
+        await ensureOpen(conn.id);
+        schema = await currentSchemaOf(conn.id);
+        schemas = appSchemas((await db.request(conn.id, { op: 'listSchemas' })) as string[]);
+      }
+      return { gate, repo, schema, schemas };
     } catch (err) {
       return { gate: null, repo, error: err instanceof Error ? err.message : String(err) };
     }
@@ -734,13 +1015,15 @@ function registerIpc(): void {
         need: string;
         size: SeedSize;
         readRepo: boolean;
+        alsoSchemas?: string[];
+        useMap?: boolean;
         revise?: { previous: SeedInvestigation; instruction: string };
       },
     ) => {
       let cancelled = false;
       seedJobs.set(args.jobId, { cancel: () => (cancelled = true) });
       try {
-        const ctx = await readSeedContext(args.connectionId, (step) => seedStep(args.jobId, step));
+        const ctx = await readSeedContext(args.connectionId, (step) => seedStep(args.jobId, step), args.alsoSchemas ?? []);
         if (!ctx.gate.ok) return { ok: false as const, error: 'This connection can’t be seeded.' };
         const input = seedPromptInput(ctx, args.need, args.size);
         const settings = Store.load().settings;
@@ -773,20 +1056,33 @@ function registerIpc(): void {
           } (counts only)`,
         });
 
-        const repo = args.readRepo && args.tool === 'claude' ? await linkedRepo(args.connectionId) : null;
+        // The map, when there is one: the slice of it this need touches.
+        const where = args.useMap === false ? null : await mapFileFor(args.connectionId);
+        const map = where ? await loadMap(where.file) : null;
+        const slice = map ? mapSlice(map, args.need, ctx.snapshot.schemas.map((x) => x.name)) : null;
+        if (slice?.tables.length) seedStep(args.jobId, { kind: 'note', text: `From the map: ${slice.tables.length} tables — ${slice.tables.slice(0, 6).join(', ')}${slice.tables.length > 6 ? ', …' : ''}` });
+        const mapText = slice?.text || undefined;
+
+        const code =
+          args.readRepo && args.tool === 'claude'
+            ? await codeRepos(args.connectionId, ctx.snapshot.schemas.map((s) => s.name), { all: true })
+            : null;
+        const repo = code?.cwd ?? null;
         let result;
-        if (repo) {
-          seedStep(args.jobId, { kind: 'note', text: `Reading ${repo.replace(os.homedir(), '~')}` });
-          const job = runInvestigation(investigatePrompt(input, { readable: true }), {
-            cwd: repo,
+        if (code) {
+          for (const dir of [code.cwd, ...code.addDirs]) seedStep(args.jobId, { kind: 'note', text: `Reading ${dir.replace(os.homedir(), '~')}` });
+          const prompt = investigatePrompt(input, { readable: true, map: mapText });
+          const job = runInvestigation(code.note ? `${prompt}\n\n${code.note}` : prompt, {
+            cwd: code.cwd,
+            addDirs: code.addDirs,
             model,
             onStep: (step) => seedStep(args.jobId, step),
           });
           seedJobs.set(args.jobId, { cancel: () => ((cancelled = true), job.cancel()) });
           result = await job.result;
         } else {
-          seedStep(args.jobId, { kind: 'note', text: 'Planning from the schema alone' });
-          result = await runOneShot(args.tool, investigatePrompt(input, { readable: false }), {
+          seedStep(args.jobId, { kind: 'note', text: mapText ? 'Planning from the schema and the map' : 'Planning from the schema alone' });
+          result = await runOneShot(args.tool, investigatePrompt(input, { readable: false, map: mapText }), {
             model,
             timeoutMs: 3 * 60_000,
           });
@@ -794,9 +1090,16 @@ function registerIpc(): void {
         if (cancelled) return { ok: false as const, error: 'Stopped.' };
         if (!result.ok) return { ok: false as const, error: result.error ?? 'The model did not answer.' };
         const parsed = parseInvestigation(result.output);
-        return 'error' in parsed
-          ? { ok: false as const, error: parsed.error }
-          : { ok: true as const, investigation: parsed, readCode: !!repo };
+        if ('error' in parsed) return { ok: false as const, error: parsed.error };
+        // What reading the code taught this seed, the next one knows.
+        if (code && map && where) {
+          const learned = learnFrom(map, parsed.findings);
+          if (learned.added) {
+            await saveMap(where.file, learned.map);
+            seedStep(args.jobId, { kind: 'note', text: `Added ${learned.added} finding${learned.added === 1 ? '' : 's'} to the map` });
+          }
+        }
+        return { ok: true as const, investigation: parsed, readCode: !!repo, mapTables: slice?.tables.length ?? 0 };
       } catch (err) {
         console.error('seed:investigate failed', err);
         return { ok: false as const, error: err instanceof Error ? err.message : String(err) };
@@ -810,12 +1113,12 @@ function registerIpc(): void {
     'seed:write',
     async (
       _e,
-      args: { jobId: string; connectionId: string; tool: AiTool; need: string; investigation: SeedInvestigation },
+      args: { jobId: string; connectionId: string; tool: AiTool; need: string; investigation: SeedInvestigation; alsoSchemas?: string[] },
     ) => {
       let cancelled = false;
       seedJobs.set(args.jobId, { cancel: () => (cancelled = true) });
       try {
-        const ctx = await readSeedContext(args.connectionId);
+        const ctx = await readSeedContext(args.connectionId, undefined, args.alsoSchemas ?? []);
         if (!ctx.gate.ok) return { ok: false as const, error: 'This connection can’t be seeded.' };
         // The size is already in the plan; the prompt's own line about it
         // only has to not contradict it.
@@ -858,6 +1161,282 @@ function registerIpc(): void {
   ipcMain.handle('seed:cancel', (_e, jobId: string) => {
     seedJobs.get(jobId)?.cancel();
     seedJobs.delete(jobId);
+  });
+
+  // ---- baselines ----------------------------------------------------------
+  //
+  // Discovery for a baseline. Reads only — the catalog, the server's table
+  // statistics and bounded searches built in src/shared/baseline.ts — and
+  // only on a connection tagged local, the server the baseline is copied
+  // from. See docs/design/baselines.md.
+
+  function baselineSource(connectionId: string): Connection {
+    const conn = Store.load().connections.find((c) => c.id === connectionId);
+    if (!conn) throw new Error('That connection no longer exists.');
+    if (conn.env !== 'local') throw new Error('A base is built from a connection tagged local.');
+    if (conn.engine === 'dynamodb') throw new Error('Bases are for SQL databases.');
+    return conn;
+  }
+
+  /// In the linked repo, so it is reviewed with the code and a teammate
+  /// builds the same baseline; otherwise in overdb's own data.
+  async function recipePath(connectionId: string): Promise<string> {
+    const repo = recipeHome(await linkedRepoLinks(connectionId));
+    if (repo) return path.join(repo, '.overdb', 'baseline.json');
+    return path.join(app.getPath('userData'), 'baselines', `${connectionId.replace(/[^A-Za-z0-9_-]/g, '_')}.json`);
+  }
+
+  /// Every schema's catalog and the server's table sizes: what discovery
+  /// reads, and what a build re-reads so it works from the catalog as it is.
+  async function readBaselineCatalog(conn: Connection) {
+    await ensureOpen(conn.id);
+    const schemas = (await db.request(conn.id, { op: 'listSchemas' })) as string[];
+    const snapshot = (await db.request(conn.id, { op: 'introspect', schemas })) as SchemaSnapshot;
+    const stats = (await db.request(conn.id, { op: 'baselineStats', schemas })) as BaselineStatsValue;
+    return { snapshot, stats };
+  }
+
+  ipcMain.handle('baseline:discover', async (_e, connectionId: string) => {
+    try {
+      const conn = baselineSource(connectionId);
+      const { snapshot, stats } = await readBaselineCatalog(conn);
+      const file = await recipePath(conn.id);
+      let recipe: BaselineRecipe | null = null;
+      let recipeError: string | undefined;
+      const raw = await fs.readFile(file, 'utf-8').catch(() => null);
+      if (raw !== null) {
+        const parsed = parseRecipe(raw);
+        if ('error' in parsed) recipeError = parsed.error;
+        else recipe = parsed;
+      }
+      return { ok: true as const, snapshot, stats, repo: await linkedRepo(conn.id), recipe, recipePath: file, recipeError };
+    } catch (err) {
+      console.error('baseline:discover failed', err);
+      return { ok: false as const, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  ipcMain.handle('baseline:find', async (_e, args: { connectionId: string; req: FindRequest }) => {
+    try {
+      const conn = baselineSource(args.connectionId);
+      await ensureOpen(conn.id);
+      const value = (await db.request(conn.id, { op: 'baselineFind', req: args.req })) as BaselineFindValue;
+      return { ok: true as const, rows: value.rows };
+    } catch (err) {
+      return { ok: false as const, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  ipcMain.handle('baseline:distinct', async (_e, args: { connectionId: string; schema: string; table: string; columns: string[]; sample: number; limit: number }) => {
+    try {
+      const conn = baselineSource(args.connectionId);
+      await ensureOpen(conn.id);
+      const rows = (await db.request(conn.id, { op: 'baselineDistinct', ...args })) as Cell[][];
+      return { ok: true as const, rows };
+    } catch (err) {
+      return { ok: false as const, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  ipcMain.handle('baseline:measure', async (_e, args: { connectionId: string; schema: string; table: string; column: string; values: string[] }) => {
+    try {
+      const conn = baselineSource(args.connectionId);
+      await ensureOpen(conn.id);
+      const rows = (await db.request(conn.id, {
+        op: 'baselineCount', schema: args.schema, table: args.table, column: args.column, values: args.values,
+      })) as number;
+      return { ok: true as const, rows };
+    } catch (err) {
+      return { ok: false as const, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  ipcMain.handle('baseline:save', async (_e, args: { connectionId: string; recipe: BaselineRecipe }) => {
+    try {
+      const conn = baselineSource(args.connectionId);
+      const file = await recipePath(conn.id);
+      await fs.mkdir(path.dirname(file), { recursive: true });
+      await fs.writeFile(file, `${JSON.stringify(args.recipe, null, 2)}\n`);
+      return { ok: true as const, path: file };
+    } catch (err) {
+      return { ok: false as const, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  // ---- building a baseline, ticket copies, the proxy -----------------------
+
+  const builds = new Map<string, { cancelled: boolean; kill?: () => void }>();
+
+  ipcMain.handle('baseline:build', async (_e, args: { jobId: string; connectionId: string }) => {
+    const signal: { cancelled: boolean; kill?: () => void } = { cancelled: false };
+    builds.set(args.jobId, signal);
+    const progress = (p: BuildProgress) =>
+      mainWindow?.webContents.send('main:event', { kind: 'baseline:progress', jobId: args.jobId, progress: p });
+    try {
+      const conn = baselineSource(args.connectionId);
+      const raw = await fs.readFile(await recipePath(conn.id), 'utf-8').catch(() => null);
+      if (raw === null) return { ok: false as const, error: 'Save the recipe first.' };
+      const recipe = parseRecipe(raw);
+      if ('error' in recipe) return { ok: false as const, error: recipe.error };
+      progress({ stage: 'start', text: 'Reading the catalog as it is now' });
+      const { snapshot, stats } = await readBaselineCatalog(conn);
+      const plans = plansFromRecipe(recipe, snapshot, stats, findLinks(snapshot));
+      const plan = buildPlan(recipe, plans, snapshot);
+      for (const w of plan.warnings) progress({ stage: 'start', text: w });
+      // The source's address and credential, resolved here and handed to
+      // the builder process only — never to the window.
+      const spec = await resolveCredentials(conn, { readOnly: true });
+      const tenantStart = recipe.tenant ? recipe.starts.find((s) => s.ref.table === recipe.tenant!.table && s.ref.schema === recipe.tenant!.schema) : undefined;
+      const baseline = await baselines.buildBaseline({
+        source: conn,
+        endpoint: { host: spec.host ?? '127.0.0.1', port: spec.port ?? 3306, user: spec.user, password: spec.password ?? '' },
+        plan,
+        serverVersion: snapshot.serverVersion,
+        recipeSavedAt: recipe.savedAt,
+        label: tenantStart?.label || recipe.starts[0]?.label || conn.name,
+        onProgress: progress,
+        signal,
+      });
+      return { ok: true as const, baseline };
+    } catch (err) {
+      console.error('baseline:build failed', err);
+      return { ok: false as const, error: err instanceof Error ? err.message : String(err) };
+    } finally {
+      builds.delete(args.jobId);
+    }
+  });
+
+  const codeJobs = new Map<string, { cancel(): void }>();
+
+  /// Read the linked repo for what the schema cannot say. The same
+  /// read-only investigation the seed flow uses: Read, Grep and Glob, no
+  /// shell, no MCP, no dotenv (src/main/seedNeverExecutes.test.ts). The
+  /// answer goes back raw; the window keeps only suggestions that name a
+  /// link or table its catalog has.
+  ipcMain.handle('baseline:readCode', async (_e, args: { jobId: string; connectionId: string; input: BaselineCodeInput }) => {
+    try {
+      const conn = baselineSource(args.connectionId);
+      const code = await codeRepos(conn.id, args.input.schemas ?? null);
+      if (!code) return { ok: false as const, error: 'Link the repo your services live in first.' };
+      if (!(await detectTools()).claude) return { ok: false as const, error: 'Reading the code needs the claude CLI.' };
+      const model = Store.load().settings.aiModel.claude || undefined;
+      const prompt = baselineCodePrompt(args.input);
+      const job = runInvestigation(code.note ? `${prompt}\n\n${code.note}` : prompt, {
+        cwd: code.cwd,
+        addDirs: code.addDirs,
+        model,
+        onStep: (step) => mainWindow?.webContents.send('main:event', { kind: 'baseline:codeStep', jobId: args.jobId, step }),
+      });
+      let cancelled = false;
+      codeJobs.set(args.jobId, { cancel: () => ((cancelled = true), job.cancel()) });
+      const result = await job.result;
+      if (cancelled) return { ok: false as const, error: 'Stopped.' };
+      return result.ok ? { ok: true as const, output: result.output } : { ok: false as const, error: result.error ?? 'claude did not answer.' };
+    } catch (err) {
+      return { ok: false as const, error: err instanceof Error ? err.message : String(err) };
+    } finally {
+      codeJobs.delete(args.jobId);
+    }
+  });
+
+  ipcMain.handle('baseline:cancelReadCode', (_e, jobId: string) => {
+    codeJobs.get(jobId)?.cancel();
+    codeJobs.delete(jobId);
+  });
+
+  ipcMain.handle('baseline:cancelBuild', (_e, jobId: string) => {
+    const b = builds.get(jobId);
+    if (!b) return;
+    b.cancelled = true;
+    b.kill?.();
+  });
+
+  ipcMain.handle('baseline:instances', async () => ({
+    baselines: await baselines.baselines(),
+    tickets: await baselines.tickets(),
+    proxy: await baselines.proxyState(),
+  }));
+
+  ipcMain.handle('ticket:create', async (_e, args: { baselineId: string; name: string; note: string }) => {
+    try {
+      const all = await baselines.baselines();
+      const base = all.find((b) => b.id === args.baselineId);
+      const source = base ? Store.load().connections.find((c) => c.id === base.sourceConnectionId) : undefined;
+      if (!base || !source) return { ok: false as const, error: 'The base or the connection it came from no longer exists.' };
+      const made = await baselines.createTicket({ ...args, source });
+      return { ok: true as const, ...made };
+    } catch (err) {
+      return { ok: false as const, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  ipcMain.handle('ticket:start', async (_e, id: string) => {
+    try {
+      return { ok: true as const, ticket: await baselines.startTicket(id) };
+    } catch (err) {
+      return { ok: false as const, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  ipcMain.handle('ticket:stop', async (_e, id: string) => {
+    await baselines.stopTicket(id);
+  });
+
+  ipcMain.handle('baseline:rename', (_e, args: { id: string; label: string }) => baselines.renameBaseline(args.id, args.label));
+
+  ipcMain.handle('ticket:connection', async (_e, id: string) => {
+    const t = (await baselines.tickets()).find((x) => x.id === id);
+    const source = t && Store.load().connections.find((c) => c.id === t.sourceConnectionId);
+    return source ? baselines.branchConnection(id, source) : null;
+  });
+
+  ipcMain.handle('ticket:delete', async (_e, id: string) => {
+    const t = await baselines.deleteTicket(id);
+    if (t) await db.closeConnection(t.connectionId).catch(() => undefined);
+    return { connectionId: t?.connectionId ?? null };
+  });
+
+  ipcMain.handle('proxy:configure', (_e, next: Partial<ProxyConfig> & { enabled?: boolean }) => baselines.configureProxy(next));
+  ipcMain.handle('proxy:route', async (_e, target: ProxyTarget) => {
+    try {
+      return { ok: true as const, state: await baselines.routeProxy(target) };
+    } catch (err) {
+      return { ok: false as const, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+  /// The sidebar connection for the proxy, built here so a stored password
+  /// is copied without crossing to the window. Null when it is off.
+  ipcMain.handle('proxy:connection', async () => {
+    const state = await baselines.proxyState();
+    if (!state.running) return null;
+    const all = await baselines.baselines();
+    const conns = Store.load().connections;
+    const source = conns.find((c) => all.some((b) => b.sourceConnectionId === c.id));
+    if (!source) return null;
+    const target = state.config.target;
+    const tickets = target.kind === 'ticket' ? await baselines.tickets() : [];
+    const name = target.kind === 'ticket' ? tickets.find((x) => x.id === target.id)?.name ?? 'a branch' : 'your server';
+    return baselines.proxyConnection(source, state.config.port, name);
+  });
+
+  ipcMain.handle('proxy:clients', () => baselines.proxyClients().catch(() => []));
+
+  // The background helper: keeps the proxy and ticket copies running while
+  // overdb is closed. Installed only from here, at a person's request.
+  ipcMain.handle('helper:status', () => baselines.helperStatus());
+  ipcMain.handle('helper:enable', async () => {
+    try {
+      return { ok: true as const, status: await baselines.enableHelper() };
+    } catch (err) {
+      return { ok: false as const, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+  ipcMain.handle('helper:disable', async () => {
+    try {
+      return { ok: true as const, status: await baselines.disableHelper() };
+    } catch (err) {
+      return { ok: false as const, error: err instanceof Error ? err.message : String(err) };
+    }
   });
 
   ipcMain.handle('ai:detect', () => detectTools());
@@ -1401,6 +1980,7 @@ app.whenReady().then(() => {
 
   registerIpc();
   createWindow();
+  void baselines.resumeProxy();
   installMenu((command) => mainWindow?.webContents.send('main:event', { kind: 'menu', command }));
   initAutoUpdater(() => mainWindow);
 
@@ -1409,9 +1989,39 @@ app.whenReady().then(() => {
   });
 });
 
-app.on('before-quit', () => {
+let instancesStopped = false;
+app.on('before-quit', (event) => {
   closeAllTunnels();
   void db.closeAll();
+  // A mysqld left running would hold its port and its data directory past
+  // overdb's lifetime. Stopping one is a clean InnoDB shutdown, so quitting
+  // waits for it.
+  if (!instancesStopped) {
+    event.preventDefault();
+    void (async () => {
+      // Quitting stops the proxy and every ticket copy. When services may be
+      // using them, that is a question, not a side effect.
+      const use = await baselines.inUse().catch(() => ({ proxy: false, connections: 0, running: [] as string[] }));
+      if (use.proxy || use.running.length > 0) {
+        const lines = [
+          ...(use.proxy ? [`Your services connect through overdb${use.connections ? ` (${use.connections} open connection${use.connections === 1 ? '' : 's'})` : ''}. Quitting stops the proxy, so they reach no database until overdb is open again.`] : []),
+          ...(use.running.length ? [`Running branches stop too (their data is kept): ${use.running.join(', ')}.`] : []),
+        ];
+        const { response } = await dialog.showMessageBox({
+          type: 'warning',
+          buttons: ['Quit anyway', 'Cancel'],
+          defaultId: 1,
+          cancelId: 1,
+          message: 'Quit overdb?',
+          detail: lines.join('\n\n'),
+        });
+        if (response !== 0) return;
+      }
+      instancesStopped = true;
+      await baselines.shutdown().catch(() => undefined);
+      app.quit();
+    })();
+  }
 });
 
 app.on('window-all-closed', () => {

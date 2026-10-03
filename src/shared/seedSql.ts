@@ -85,7 +85,7 @@ function list(v: unknown): unknown[] {
 
 /// The last ```json block, or failing that the outermost {...} in the text.
 /// Models put prose around JSON however firmly they are told not to.
-function jsonBody(raw: string): string | null {
+export function jsonBody(raw: string): string | null {
   const fenced = [...raw.matchAll(/```(?:json)?\s*\n([\s\S]*?)```/gi)].map((m) => m[1].trim());
   const block = fenced.filter((b) => b.startsWith('{')).pop();
   if (block) return block;

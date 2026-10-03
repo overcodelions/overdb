@@ -43,13 +43,13 @@ describe('buildSchemaContext', () => {
     // table, so the byte budget truncated exactly the join target the
     // question needed — the model then reported that `client` "isn't in the
     // schema I was given" while it sat one FK away in the database.
-    const ctx = buildSchemaContext(bigSnapshot(), 'find me all panel widgets from the client hp');
+    const ctx = buildSchemaContext(bigSnapshot(), 'find me all panel widgets from the client acme');
     expect(ctx.included).toContain('panel_widget');
     expect(ctx.included).toContain('client');
   });
 
   it('still finds the neighbour when the question misspells it', () => {
-    const ctx = buildSchemaContext(bigSnapshot(), 'find me all panel widgets from the lcient hp');
+    const ctx = buildSchemaContext(bigSnapshot(), 'find me all panel widgets from the lcient acme');
     expect(ctx.included).toContain('client');
   });
 

@@ -134,6 +134,24 @@ export function CommandPalette(): JSX.Element | null {
             run: close(() => setSheet({ kind: 'seed', connectionId: selection.id })),
           }]
         : []),
+      // A baseline is copied from your own local server, so it is offered
+      // only there.
+      ...(selection?.kind === 'connection' &&
+      connections.some((c) => c.id === selection.id && c.engine !== 'dynamodb' && c.env === 'local')
+        ? [{
+            id: 'baseline',
+            label: 'Create a base…',
+            hint: 'local',
+            keywords: 'base baseline subset minimal copy ticket tenant recipe branch',
+            run: close(() => setSheet({ kind: 'baseline', connectionId: selection.id })),
+          }]
+        : []),
+      {
+        id: 'tickets',
+        label: 'Branches…',
+        keywords: 'branch ticket copy base baseline proxy clone services switch databases',
+        run: close(() => setSheet({ kind: 'tickets' })),
+      },
       { id: 'new-connection', label: 'New connection…', run: close(() => setSheet({ kind: 'newConnection' })) },
       { id: 'new-envset', label: 'New environment set…', run: close(() => setSheet({ kind: 'newEnvSet' })) },
       { id: 'import', label: 'Import connections…', keywords: 'datagrip dbeaver pgpass intellij', run: close(() => setSheet({ kind: 'importConnections' })) },

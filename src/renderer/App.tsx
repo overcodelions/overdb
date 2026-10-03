@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { isTarget, routeTo, targetItems, useTickets, useTicketsLive } from './ticketsStore';
 import { BottomRail } from './BottomRail';
 import { CommandPalette } from './CommandPalette';
 import { ConfirmHost } from './ConfirmHost';
@@ -46,6 +47,8 @@ export function App(): JSX.Element {
     };
   }, []);
 
+  useTicketsLive();
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const mod = e.metaKey || e.ctrlKey;
@@ -62,6 +65,15 @@ export function App(): JSX.Element {
       } else if (mod && e.key === '\\') {
         e.preventDefault();
         useStore.getState().toggleSidebar();
+      } else if (e.metaKey && e.altKey && /^Digit[0-9]$/.test(e.code)) {
+        // ⌥⌘0 your server, ⌥⌘1–9 ticket copies: where services go, from
+        // anywhere. ⌘0 is the View menu's Actual Size, so ⌥ joins it.
+        const tk = useTickets.getState();
+        if (!tk.proxy?.running) return;
+        const item = targetItems(tk).find((i) => i.digit === Number(e.code.slice(5)));
+        if (!item) return;
+        e.preventDefault();
+        if (!isTarget(tk, item.target)) void routeTo(item);
       } else if (mod && e.key.toLowerCase() === 't') {
         // A clean slate on the connection you are looking at. Only when one
         // is selected — there is nothing to open a tab on otherwise.

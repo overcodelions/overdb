@@ -1153,6 +1153,11 @@ export function QueryPane(): JSX.Element {
         <span className="ml-1 text-[13px] font-semibold text-ink truncate max-w-[220px]" title={conn.name}>
           {conn.name}
         </span>
+        {conn.id === 'overdb-proxy' && (
+          <span className="shrink-0 text-[11px] text-ink-muted" title="This connection goes through the proxy, so it queries whatever the Services switch in the title bar points at.">
+            follows the Services switch
+          </span>
+        )}
         {schemaList && schemaList.length > 0 && (
           <>
             <span className="text-ink-faint" aria-hidden="true">/</span>
@@ -1267,6 +1272,24 @@ export function QueryPane(): JSX.Element {
               onSelect={() => {
                 setMoreMenu(false);
                 setSheet({ kind: 'pickTables', connectionId: conn.id });
+              }}
+            />
+            {conn.env === 'local' && conn.engine !== 'dynamodb' && (
+              <MenuItem
+                label="Create a base…"
+                detail="A small copy of this database, enough to log in — branches start from it"
+                onSelect={() => {
+                  setMoreMenu(false);
+                  setSheet({ kind: 'baseline', connectionId: conn.id });
+                }}
+              />
+            )}
+            <MenuItem
+              label="Branches…"
+              detail="A branch per ticket, and what your services see"
+              onSelect={() => {
+                setMoreMenu(false);
+                setSheet({ kind: 'tickets' });
               }}
             />
             <MenuDivider />

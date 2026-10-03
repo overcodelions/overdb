@@ -25,6 +25,9 @@ import type { HistoryEntry, RunRecord, SavedQuery } from './history';
 import type { SshTunnel } from './sshTunnel';
 import type { SeedGate } from './seedGate';
 import type { SeedInvestigation, SeedScript, SeedScriptCheck } from './seedSql';
+import type { BaselineRecipe, FindRequest, TableStat } from './baseline';
+import type { BuildProgress } from './baselineBuild';
+import type { BaselineRecord, HelperStatus, ProxyClient, ProxyConfig, ProxyState, ProxyTarget, TicketState } from './instances';
 export type { SshTunnel } from './sshTunnel';
 export type { FormatStyle } from './formatSql';
 export type { HistoryEntry, RunRecord, SavedQuery } from './history';
@@ -179,6 +182,14 @@ export interface Connection {
   /// a finding to overcli. Only used when the connection is in no env set —
   /// a set's link covers all its members. See src/shared/overcliHandoff.ts.
   repoPaths?: string[];
+  /// Which schemas each linked repo's code uses, by repo path. See
+  /// src/shared/repoLinks.ts.
+  repoSchemas?: Record<string, string[]>;
+  /// The linked repo a base recipe is saved in.
+  recipeRepo?: string;
+  /// A branch, or the proxy's own connection: the connection it was made
+  /// from, whose repos and env set it uses.
+  branchOf?: string;
 }
 
 /// A durable grouping — "these are Payments". The sidebar's collapsible
@@ -227,6 +238,11 @@ export interface EnvSet {
   /// overcli. On the set rather than each member: every env is the same
   /// codebase. See src/shared/overcliHandoff.ts.
   repoPaths?: string[];
+  /// Which schemas each linked repo's code uses, by repo path: with one
+  /// service per schema, reading the code means reading the right repos.
+  repoSchemas?: Record<string, string[]>;
+  /// The linked repo a base recipe is saved in.
+  recipeRepo?: string;
 }
 
 // ---------------------------------------------------------------------
@@ -392,6 +408,10 @@ export interface AppSettings {
   /// back after "Not now" is nagging; one that never appears again after it
   /// is the deal the button offered.
   dismissedHints: string[];
+  /// Where a database map is kept: overdb's own folder (the default — it
+  /// stays on this machine), or `.overdb/map/` in the repo a base recipe is
+  /// saved in, to share it with the team through git.
+  mapLocation: 'overdb' | 'repo';
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -407,6 +427,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   formatStyle: 'default',
   panesFull: true,
   dismissedHints: [],
+  mapLocation: 'overdb',
 };
 
 /// One turn of an Ask thread, as persisted.
@@ -462,7 +483,7 @@ export interface StoreSnapshot {
   /// Remembered values for the placeholders in pasted SQL, keyed by slot
   /// (src/shared/params.ts). App-wide rather than per connection, because
   /// each binding carries its OWN per-environment and per-connection
-  /// overrides — "the HP client" is one question whose answer differs by
+  /// overrides — "the Acme client" is one question whose answer differs by
   /// where it is asked, and splitting the library per connection would
   /// make you re-answer it everywhere.
   ///
@@ -555,6 +576,11 @@ export interface IPCInvokeMap {
   'overcli:send': (draft: HandoffDraft) => { ok: true; id: string } | { ok: false; error: string };
   /// Folder picker for linking a database to the repo that uses it.
   'overcli:pickRepo': (args: { name: string }) => string | null;
+  /// Which of the connection's schemas a repo's code uses, by a scan of
+  /// the repo: names and counts only, never contents.
+  'repo:suggestSchemas': (args: { connectionId: string; path: string }) =>
+    | { ok: true; schemas: string[]; suggested: string[] }
+    | { ok: false; error: string };
   /// Build the sample shop database — three SQLite files, one per
   /// environment — and return where each one is. See src/main/sample.ts.
   'app:createSample': () => { local: string; staging: string; prod: string };
@@ -792,7 +818,15 @@ export interface IPCInvokeMap {
   ///
   /// The gate, plus the repo the connection is linked to (the same link the
   /// overcli handoff uses), if any.
-  'seed:check': (connectionId: string) => { gate: SeedGate | null; repo: string | null; error?: string };
+  'seed:check': (connectionId: string) => {
+    gate: SeedGate | null;
+    repo: string | null;
+    /// The schema the session is on, which a seed starts from, and every
+    /// schema it could also cover.
+    schema?: string | null;
+    schemas?: string[];
+    error?: string;
+  };
   /// Read the schema — and, with `readRepo` and claude, the code — and come
   /// back with findings and a plan in words. `revise` redoes the plan from
   /// the previous one and an instruction, without reading the code again.
@@ -804,8 +838,36 @@ export interface IPCInvokeMap {
     need: string;
     size: SeedSize;
     readRepo: boolean;
+    /// Schemas the seed covers besides the session's own.
+    alsoSchemas?: string[];
+    /// Plan from the database map when there is one (the default).
+    useMap?: boolean;
     revise?: { previous: SeedInvestigation; instruction: string };
-  }) => { ok: true; investigation: SeedInvestigation; readCode: boolean } | { ok: false; error: string };
+  }) =>
+    | { ok: true; investigation: SeedInvestigation; readCode: boolean; mapTables?: number }
+    | { ok: false; error: string };
+  /// The database map for a connection's env set (or the connection): where
+  /// it is kept, what it holds, and how far the code and schemas have moved
+  /// since. `status.map` null means none yet. See src/shared/dbMap.ts.
+  'map:status': (connectionId: string) =>
+    | {
+        ok: true;
+        status: {
+          file: string;
+          repos: number;
+          map: { builtAt: string; updatedAt: string; tables: number; links: number; learned: number; schemas: string[] } | null;
+          freshness: import('./dbMap').MapFreshness | null;
+        } | null;
+      }
+    | { ok: false; error: string };
+  /// Map the database from its linked repos, or refresh what changed.
+  /// Progress arrives as `map:progress` events for `jobId`.
+  'map:build': (args: { jobId: string; connectionId: string; refresh: boolean }) =>
+    | { ok: true; tables: number; links: number; dropped: number; failures: string[] }
+    | { ok: false; error: string };
+  'map:cancel': (jobId: string) => void;
+  /// The schemas a ticket's text is about, by where the map puts its tables.
+  'map:schemasFor': (args: { connectionId: string; text: string }) => string[];
   /// Turn an approved plan into a seed, a teardown and a verify query, and
   /// check them against the catalog before returning. A script that fails
   /// the check is retried once with the problems named, then returned with
@@ -816,9 +878,103 @@ export interface IPCInvokeMap {
     tool: AiTool;
     need: string;
     investigation: SeedInvestigation;
+    alsoSchemas?: string[];
   }) => { ok: true; script: SeedScript; check: SeedScriptCheck } | { ok: false; error: string; check?: SeedScriptCheck };
   /// Stop an investigation or a write in flight. Its answer is discarded.
   'seed:cancel': (jobId: string) => void;
+
+  /// Baseline discovery — see docs/design/baselines.md. Local connections
+  /// only, and reads only: the catalog of every schema, the server's table
+  /// statistics, and bounded searches for starting points. Nothing here
+  /// writes to the database.
+  ///
+  /// The catalog and sizes, the repo the connection is linked to, and the
+  /// recipe saved there before, if any.
+  'baseline:discover': (connectionId: string) =>
+    | {
+        ok: true;
+        snapshot: SchemaSnapshot;
+        stats: TableStat[];
+        repo: string | null;
+        recipe: BaselineRecipe | null;
+        recipePath: string;
+        recipeError?: string;
+      }
+    | { ok: false; error: string };
+  /// One bounded search for a starting point (at most 50 rows).
+  'baseline:find': (args: { connectionId: string; req: FindRequest }) =>
+    | { ok: true; rows: Cell[][] }
+    | { ok: false; error: string };
+  /// Distinct values of a few columns among a table's first `sample` rows:
+  /// what a polymorphic type column names. Bounded both ways.
+  'baseline:distinct': (args: { connectionId: string; schema: string; table: string; columns: string[]; sample: number; limit: number }) =>
+    | { ok: true; rows: Cell[][] }
+    | { ok: false; error: string };
+  /// Count one table's rows that belong to the starting points — a single
+  /// COUNT, for a size estimate that knows how big this tenant is.
+  'baseline:measure': (args: { connectionId: string; schema: string; table: string; column: string; values: string[] }) =>
+    | { ok: true; rows: number }
+    | { ok: false; error: string };
+  /// Write the recipe to the linked repo's `.overdb/baseline.json`, or to
+  /// overdb's own data when there is no repo.
+  'baseline:save': (args: { connectionId: string; recipe: BaselineRecipe }) =>
+    | { ok: true; path: string }
+    | { ok: false; error: string };
+  /// Build the saved recipe into a baseline: an instance overdb starts from
+  /// the mysqld on this machine, filled by a builder process that reads your
+  /// server and writes only to that instance, then stopped. Progress
+  /// arrives as `baseline:progress` events for `jobId`.
+  'baseline:build': (args: { jobId: string; connectionId: string }) =>
+    | { ok: true; baseline: BaselineRecord }
+    | { ok: false; error: string };
+  'baseline:cancelBuild': (jobId: string) => void;
+  /// Read the linked repo with claude for what the schema cannot say —
+  /// read-only tools, like the seed investigation. Steps arrive as
+  /// `baseline:codeStep` events; the answer comes back raw for the window
+  /// to check against its catalog (src/shared/baselineCode.ts).
+  'baseline:readCode': (args: {
+    jobId: string;
+    connectionId: string;
+    input: {
+      tenant: string | null;
+      startingPoints: string[];
+      unlinkedLogins: string[];
+      ambiguous: Array<{ link: string; alternatives: string[] }>;
+      emptied: Array<{ table: string; reason: string }>;
+    };
+  }) => { ok: true; output: string } | { ok: false; error: string };
+  'baseline:cancelReadCode': (jobId: string) => void;
+  /// Name a baseline; a rebuild keeps the name.
+  'baseline:rename': (args: { id: string; label: string }) => void;
+  'baseline:instances': () => { baselines: BaselineRecord[]; tickets: TicketState[]; proxy: ProxyState };
+  /// A ticket copy: a clone of a baseline, started on its own port, and the
+  /// connection that reaches it — for the window to add to its list.
+  'ticket:create': (args: { baselineId: string; name: string; note: string }) =>
+    | { ok: true; ticket: TicketState; connection: Connection }
+    | { ok: false; error: string };
+  'ticket:start': (id: string) => { ok: true; ticket: TicketState } | { ok: false; error: string };
+  'ticket:stop': (id: string) => void;
+  /// Stops it, deletes its data, and says which connection to remove.
+  'ticket:delete': (id: string) => { connectionId: string | null };
+  /// A branch's connection, made again from its record — for one that went
+  /// missing from the connection list. Null when its source is gone.
+  'ticket:connection': (id: string) => Connection | null;
+  /// The proxy: on or off, its port and socket, where your own server is.
+  'proxy:configure': (next: Partial<ProxyConfig> & { enabled?: boolean }) => ProxyState;
+  /// Send new connections somewhere else and close the open ones.
+  'proxy:route': (target: ProxyTarget) =>
+    | { ok: true; state: ProxyState & { dropped: number } }
+    | { ok: false; error: string };
+  'proxy:clients': () => ProxyClient[];
+  /// "Services see · PROJ-123": a read-only connection to the proxy, to
+  /// query what services reach. Null while the proxy is off.
+  'proxy:connection': () => Connection | null;
+  /// The background helper (src/helper/index.ts): whether it is installed
+  /// and answering. Enabling installs a LaunchAgent and hands it the proxy
+  /// and the copies; disabling removes it and takes them back.
+  'helper:status': () => HelperStatus;
+  'helper:enable': () => { ok: true; status: HelperStatus } | { ok: false; error: string };
+  'helper:disable': () => { ok: true; status: HelperStatus } | { ok: false; error: string };
 
   /// Which AI CLIs are installed. The whole AI surface hides when none are.
   'ai:detect': () => { claude: boolean; codex: boolean; gemini: boolean };
@@ -865,6 +1021,10 @@ export type MainToRendererEvent =
   | { kind: 'txn:state'; connectionId: string; open: boolean; statements: number; expiresAt: number | null }
   /// A line for the seed flow's live log while a model investigates.
   | { kind: 'seed:step'; jobId: string; step: SeedStep }
+  | { kind: 'map:progress'; jobId: string; repo: string | null; step: { kind: string; text: string } }
+  /// A line of a baseline build's progress.
+  | { kind: 'baseline:progress'; jobId: string; progress: BuildProgress }
+  | { kind: 'baseline:codeStep'; jobId: string; step: SeedStep }
   /// A menu item the window has to carry out — opening a help sheet, the
   /// palette. See src/main/menu.ts.
   | { kind: 'menu'; command: MenuCommand }

@@ -2,6 +2,8 @@ import { useMemo, useState } from 'react';
 import type { Connection, EnvKind } from '@shared/types';
 import { variantLabel } from '@shared/engines';
 import { useStore } from './store';
+import { RepoLinksPanel } from './RepoLinks';
+import { MapCard } from './MapCard';
 
 /// An environment set is the same logical database in several places —
 /// local, staging, prod. Picking members is therefore the whole form, and
@@ -188,6 +190,19 @@ export function EnvSetForm({
             ))}
           </select>
         </label>
+
+        {existing && members.length > 0 && (
+          <div className="flex flex-col gap-1.5">
+            <span className="text-[11px] font-medium text-ink-muted">Code</span>
+            <p className="text-[11px] text-ink-faint leading-snug">
+              The repos whose code uses this database, and which schemas each one uses — so reading the code for a seed
+              or a base reads the right service. Saved as you change it.
+            </p>
+            <RepoLinksPanel connectionId={(members.find((c) => c.env === 'local') ?? members[0]).id} showRecipe />
+            <span className="text-[11px] font-medium text-ink-muted mt-2">Map</span>
+            <MapCard connectionId={(members.find((c) => c.env === 'local') ?? members[0]).id} />
+          </div>
+        )}
       </div>
 
       <div className="shrink-0 border-t border-card px-5 py-3 flex items-center gap-3">

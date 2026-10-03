@@ -107,7 +107,14 @@ assumptions: be honest. If the code did not confirm something the plan depends
 on, say so here — an unconfirmed guess stated plainly is worth more than a
 confident wrong one. Use [] when there are none.`;
 
-export function investigatePrompt(input: SeedPromptInput, repo: { readable: boolean }): string {
+/// `map`: what overdb's map of the database records for the tables the need
+/// touches — read from the code earlier — so a plan needs no reading now.
+export function investigatePrompt(input: SeedPromptInput, repo: { readable: boolean; map?: string }): string {
+  const mapped = repo.map
+    ? `\n\n${repo.map}\n\nTrust the map's values, JSON shapes, rules and links, and cite them with their
+refs (source "code"). Where the plan needs something the map does not record,
+say so in "assumptions".`
+    : '';
   const how = repo.readable
     ? `You are running inside the repository whose code uses this database. Use Read,
 Grep and Glob to find what the schema cannot tell you: the values the code writes
@@ -117,7 +124,10 @@ for the code the need is about). Cite what you rely on as path:line.
 
 Do not open .env files, credentials, keys or anything outside the repository.
 Stop reading once you know enough to plan; this is not an audit.`
-    : `You cannot see the application's code, only the schema. Where the plan depends
+    : repo.map
+      ? `You cannot read the application's code now. What it says about these tables is in
+overdb's map below.`
+      : `You cannot see the application's code, only the schema. Where the plan depends
 on something only the code would know — allowed status values, JSON shapes, app
 rules — say so in "assumptions" rather than guessing silently.`;
 
@@ -125,7 +135,7 @@ rules — say so in "assumptions" rather than guessing silently.`;
 
 ${context(input)}
 
-${how}
+${how}${mapped}
 
 Do NOT write any SQL yet. First the person approves a plan in words.
 

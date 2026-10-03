@@ -1,10 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { AiTool, Cell, SeedSize, SeedStep } from '@shared/types';
 import type { GateCheck } from '@shared/seedGate';
-import { repoLinkOwner } from '@shared/overcliHandoff';
 import { bareTicketKey } from '@shared/seedSql';
 import { useStore } from './store';
+import { useTickets } from './ticketsStore';
+import { PROXY_CONNECTION_ID } from './TicketSection';
 import { useSeed, type SeedPhase } from './seedStore';
+import { RepoLinksPanel } from './RepoLinks';
+import { MapCard } from './MapCard';
+import { schemasMentioned } from '@shared/repoLinks';
 
 // The Seed for a ticket sheet. The flow and every rule it keeps live in
 // seedStore.ts; this file only draws it.
@@ -74,7 +78,67 @@ function useElapsed(from: number | null): number {
   return from ? Math.max(0, Math.round((now - from) / 1000)) : 0;
 }
 
-export function SeedSheet({ connectionId }: { connectionId: string }): JSX.Element {
+export function SeedSheet({ connectionId }: { connectionId: string }): JSX.Element | null {
+  // "What services see" is read-only by design and goes through the proxy,
+  // so seeding it means seeding what it points at: the branch your services
+  // use, or your own server.
+  const tickets = useTickets();
+  const setSheetNow = useStore((s) => s.setSheet);
+  const through = connectionId === PROXY_CONNECTION_ID;
+  const [fresh, setFresh] = useState(false);
+  useEffect(() => {
+    // Read the proxy and the branches now, not from the last poll: which one
+    // services use may have just changed.
+    void useTickets.getState().refresh().finally(() => setFresh(true));
+  }, []);
+  useEffect(() => {
+    if (!through || !fresh) return;
+    const target = tickets.proxy?.config.target;
+    const to =
+      target?.kind === 'ticket'
+        ? tickets.tickets.find((t) => t.id === target.id)?.connectionId
+        : tickets.baselines[0]?.sourceConnectionId;
+    setSheetNow(to ? { kind: 'seed', connectionId: to } : null);
+  }, [through, fresh, tickets, setSheetNow]);
+  const exists = useStore((s) => s.connections.some((c) => c.id === connectionId));
+  if (through || !fresh) return null;
+  if (!exists) {
+    return (
+      <div className="flex flex-col items-start gap-3 px-8 py-8 text-[12px] text-ink">
+        <h2 className="text-sm font-semibold">That connection is gone</h2>
+        <p className="text-ink-muted max-w-[520px]">It was removed from your connections, so there is nothing to seed. A branch gets its connection back on its own while the connection it was made from still exists.</p>
+        <button className="px-3 py-1.5 rounded-md border border-card" onClick={() => setSheetNow(null)}>Close</button>
+      </div>
+    );
+  }
+
+  // A stopped branch refuses connections; say that, and start it, rather
+  // than letting the safety check report a refused connection.
+  const branch = tickets.tickets.find((t) => t.connectionId === connectionId);
+  if (branch && !branch.running) {
+    const busy = tickets.busy[branch.id];
+    return (
+      <div className="flex flex-col min-h-0 h-full text-[12px] text-ink">
+        <div className="flex-1 flex flex-col items-start gap-3 px-8 py-8">
+          <h2 className="text-sm font-semibold">{branch.name} is stopped</h2>
+          <p className="text-ink-muted max-w-[520px]">
+            Start it to seed it. Its data is as you left it; it gets its port back if it is free.
+          </p>
+          {tickets.error && <p className="text-bad">{tickets.error}</p>}
+          <div className="flex gap-2">
+            <button className="px-3 py-1.5 rounded-md bg-accent text-white font-semibold disabled:opacity-50" disabled={!!busy} onClick={() => void tickets.start(branch.id)}>
+              {busy ? `${busy}…` : `Start ${branch.name}`}
+            </button>
+            <button className="px-3 py-1.5 rounded-md border border-card" onClick={() => setSheetNow(null)}>Close</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+  return <SeedSheetFor connectionId={connectionId} />;
+}
+
+function SeedSheetFor({ connectionId }: { connectionId: string }): JSX.Element {
   const conn = useStore((s) => s.connections.find((c) => c.id === connectionId));
   const setSheet = useStore((s) => s.setSheet);
   const seed = useSeed();
@@ -201,27 +265,76 @@ function GateList({ checks }: { checks: GateCheck[] }): JSX.Element {
   );
 }
 
+/// Which schemas the seed covers: the session's own, and any others the
+/// ticket needs — a ticket about one service's data starts from another's
+/// tab more often than not. Suggested from the ticket's words.
+function SchemaScope(): JSX.Element {
+  const seed = useSeed();
+  const own = seed.schema!;
+  const also = seed.alsoSchemas;
+  const free = seed.schemas.filter((s) => s !== own && !also.includes(s));
+  // The map knows where a ticket's tables live; words in schema names are
+  // the fallback when there is no map or it has nothing.
+  const [fromMap, setFromMap] = useState<string[]>([]);
+  useEffect(() => {
+    if (!seed.hasMap || !seed.connectionId || !seed.need.trim()) return setFromMap([]);
+    const id = seed.connectionId;
+    const t = setTimeout(() => void window.overdb.invoke('map:schemasFor', { connectionId: id, text: seed.need }).then(setFromMap), 500);
+    return () => clearTimeout(t);
+  }, [seed.hasMap, seed.connectionId, seed.need]);
+  const hinted = useMemo(
+    () =>
+      [...new Set([...fromMap, ...schemasMentioned(seed.need, seed.schemas, [own, ...also])])]
+        .filter((s) => s !== own && !also.includes(s) && seed.schemas.includes(s))
+        .slice(0, 3),
+    [fromMap, seed.need, seed.schemas, own, also],
+  );
+  return (
+    <div className={`${CARD} p-3 flex flex-col gap-2`}>
+      <span className={LABEL}>Schemas it seeds</span>
+      <div className="flex flex-wrap items-center gap-1">
+        <span className="inline-flex items-center h-5 px-1.5 rounded bg-wash-strong font-mono text-[10.5px]" title="The schema this tab is on">{own}</span>
+        {also.map((s) => (
+          <span key={s} className="inline-flex items-center gap-1 h-5 pl-1.5 pr-0.5 rounded bg-accent/15 font-mono text-[10.5px]">
+            {s}
+            <button aria-label={`Leave out ${s}`} onClick={() => seed.setAlsoSchemas(also.filter((x) => x !== s))} className="w-4 h-4 rounded text-ink-muted hover:text-ink">×</button>
+          </span>
+        ))}
+        {free.length > 0 && (
+          <select
+            aria-label="Add a schema"
+            value=""
+            onChange={(e) => e.target.value && seed.setAlsoSchemas([...also, e.target.value])}
+            className="field h-5 px-1 text-[10.5px]"
+          >
+            <option value="">+ schema</option>
+            {free.map((s) => <option key={s} value={s}>{s}</option>)}
+          </select>
+        )}
+      </div>
+      {hinted.length > 0 && (
+        <p className="text-[11px] leading-relaxed">
+          The ticket sounds like it is about{' '}
+          {hinted.map((s, i) => (
+            <span key={s}>
+              {i > 0 && ', '}
+              <button className="font-mono text-accent hover:underline" onClick={() => seed.setAlsoSchemas([...also, s])}>+ {s}</button>
+            </span>
+          ))}
+        </p>
+      )}
+    </div>
+  );
+}
+
 function Describe(): JSX.Element {
   const seed = useSeed();
-  const connections = useStore((s) => s.connections);
-  const envSets = useStore((s) => s.envSets);
-  const linkRepos = useStore((s) => s.linkRepos);
   const installed = (['claude', 'codex', 'gemini'] as AiTool[]).filter((t) => seed.tools?.[t]);
   const passed = seed.gate?.checks.filter((c) => c.ok).length ?? 0;
   const total = seed.gate?.checks.length ?? 0;
   const canGo = !!seed.gate?.ok && !!seed.tool && seed.need.trim().length > 0;
   const bareTicket = bareTicketKey(seed.need);
   const readsCode = !!seed.repo && seed.tool === 'claude' && seed.readRepo;
-
-  const linkRepo = async () => {
-    if (!seed.connectionId) return;
-    const owner = repoLinkOwner(seed.connectionId, connections, envSets);
-    if (!owner) return;
-    const picked = await window.overdb.invoke('overcli:pickRepo', { name: owner.name });
-    if (!picked) return;
-    await linkRepos(owner, [picked]);
-    await useSeed.getState().recheck();
-  };
 
   return (
     <>
@@ -288,21 +401,27 @@ function Describe(): JSX.Element {
             {seed.gate ? <GateList checks={seed.gate.checks} /> : <GateList checks={[{ id: 'size', ok: null, label: 'Checking this connection…' }]} />}
           </div>
 
+          {seed.schema && seed.schemas.length > 1 && <SchemaScope />}
+
+          {seed.connectionId && seed.gate?.ok && (seed.repo || seed.hasMap) && (
+            <div className={`${CARD} p-3 flex flex-col gap-2`}>
+              <span className={LABEL}>Database map</span>
+              <MapCard connectionId={seed.connectionId} onChange={() => void useSeed.getState().mapChanged()} />
+            </div>
+          )}
+
           {seed.repo ? (
             <div className={`${CARD} p-3 flex flex-col gap-2`}>
-              <div className="flex items-center justify-between">
-                <span className={LABEL}>Reads the code in</span>
-                <button onClick={() => void linkRepo()} className="text-[11px] text-accent hover:underline">Change</button>
-              </div>
-              <div className="font-mono text-[11px] truncate" title={seed.repo}>{tildify(seed.repo)}</div>
+              <span className={LABEL}>Reads the code in</span>
+              {seed.connectionId && <RepoLinksPanel connectionId={seed.connectionId} onChange={() => void useSeed.getState().recheck()} />}
               {seed.tool === 'claude' ? (
                 <>
                   <label className="flex items-center gap-2 text-[12px]">
                     <input type="checkbox" checked={seed.readRepo} onChange={(e) => seed.setReadRepo(e.target.checked)} className="accent-[rgb(var(--c-accent))]" />
-                    Read the code while planning
+                    {seed.hasMap ? 'Also read the code now (slower — the map usually has it)' : 'Read the code while planning'}
                   </label>
                   <p className="text-[11px] text-ink-muted leading-relaxed">
-                    Read, Grep and Glob only, inside this folder. No shell, no MCP servers, and <span className="font-mono">.env</span> files are denied — it can’t reach the database.
+                    The repos for this database’s schemas, each told which schemas it owns. Read, Grep and Glob only. No shell, no MCP servers, and <span className="font-mono">.env</span> files are denied — it can’t reach the database.
                   </p>
                 </>
               ) : (
@@ -317,7 +436,7 @@ function Describe(): JSX.Element {
               <p className="text-[11px] leading-relaxed">
                 Allowed status values, JSON shapes and app rules won’t be known, so the rows may insert cleanly and still not produce the screen you need.
               </p>
-              <button onClick={() => void linkRepo()} className={`${BTN} self-start h-[26px] px-2.5 text-[11px]`}>Link a repo…</button>
+              {seed.connectionId && <RepoLinksPanel connectionId={seed.connectionId} onChange={() => void useSeed.getState().recheck()} />}
             </div>
           )}
 
@@ -467,7 +586,7 @@ function Investigate(): JSX.Element {
           <div className="flex-1 min-w-0 truncate">
             <b className="font-semibold">Investigating</b>
             <span className="text-ink-muted">
-              {' '}— reading the schema{reading ? ` and the code in ${tildify(seed.repo!)}` : ''} · {elapsed} s
+              {' '}— reading the schema{reading ? ' and the linked code' : seed.hasMap ? ' and the map' : ''} · {elapsed} s
             </span>
           </div>
           <button className={`${BTN} h-[26px] px-2.5 text-[11px]`} onClick={() => seed.stop()}>Stop</button>

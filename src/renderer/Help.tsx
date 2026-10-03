@@ -389,6 +389,8 @@ export const SHORTCUTS: { title: string; items: [keys: string, what: string][] }
       ['⌘\\', 'Show or hide the sidebar'],
       ['⌘F', 'Filter the sidebar'],
       ['⌘,', 'Settings'],
+      ['⌥⌘0', 'Send your services to your own server (when the proxy is on)'],
+      ['⌥⌘1–9', 'Send your services to a branch, in the order they were made'],
       ['⌘/', 'This list'],
       ['Esc', 'Close a sheet or the palette'],
     ],

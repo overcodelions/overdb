@@ -53,7 +53,9 @@ export type Sheet =
   | { kind: 'editEnvSet'; id: string }
   | { kind: 'pickTables'; connectionId: string }
   /// Seed for a ticket. See seedStore.ts.
-  | { kind: 'seed'; connectionId: string };
+  | { kind: 'seed'; connectionId: string }
+  | { kind: 'baseline'; connectionId: string }
+  | { kind: 'tickets' };
 
 export interface ConfirmRequest {
   title: string;
@@ -246,6 +248,16 @@ interface State {
   /// Link a connection or env set to the repo(s) that use it, for handing
   /// findings to overcli. Saved without reconnecting, like the pins.
   linkRepos(owner: RepoLinkOwner, repoPaths: string[]): Promise<void>;
+  /// Change one owner's repo links: which repos, which schemas each one's
+  /// code uses, and where a base recipe is saved.
+  editRepoLinks(
+    owner: RepoLinkOwner,
+    fn: (cur: { repoPaths: string[]; repoSchemas: Record<string, string[]>; recipeRepo?: string }) => {
+      repoPaths: string[];
+      repoSchemas: Record<string, string[]>;
+      recipeRepo?: string;
+    },
+  ): Promise<void>;
   /// The drift view's own settings for a set, saved as they change.
   setDriftPrefs(id: string, patch: Pick<EnvSet, 'ignoreTables' | 'baselineOnly'>): Promise<void>;
   removeEnvSet(id: string): Promise<void>;
@@ -1053,6 +1065,8 @@ export const useStore = create<State>((set, get) => ({
       ignoreTables: existing?.ignoreTables,
       baselineOnly: existing?.baselineOnly,
       repoPaths: existing?.repoPaths,
+      repoSchemas: existing?.repoSchemas,
+      recipeRepo: existing?.recipeRepo,
     };
     const envSets = existing
       ? get().envSets.map((e) => (e.id === envSet.id ? envSet : e))
@@ -1060,6 +1074,29 @@ export const useStore = create<State>((set, get) => ({
     set({ envSets });
     await window.overdb.invoke('store:saveEnvSets', envSets);
     get().toast(existing ? `Saved ${envSet.name}.` : `Created ${envSet.name}.`);
+  },
+
+  async editRepoLinks(owner, fn) {
+    const apply = <T extends { repoPaths?: string[]; repoSchemas?: Record<string, string[]>; recipeRepo?: string }>(h: T): T => {
+      const next = fn({ repoPaths: h.repoPaths ?? [], repoSchemas: h.repoSchemas ?? {}, recipeRepo: h.recipeRepo });
+      const keep = new Set(next.repoPaths);
+      const schemas = Object.fromEntries(Object.entries(next.repoSchemas).filter(([p]) => keep.has(p)));
+      return {
+        ...h,
+        repoPaths: next.repoPaths.length ? next.repoPaths : undefined,
+        repoSchemas: Object.keys(schemas).length ? schemas : undefined,
+        recipeRepo: next.recipeRepo && keep.has(next.recipeRepo) ? next.recipeRepo : undefined,
+      };
+    };
+    if (owner.kind === 'envSet') {
+      const envSets = get().envSets.map((e) => (e.id === owner.id ? apply(e) : e));
+      set({ envSets });
+      await window.overdb.invoke('store:saveEnvSets', envSets);
+    } else {
+      const connections = get().connections.map((c) => (c.id === owner.id ? apply(c) : c));
+      set({ connections });
+      await window.overdb.invoke('store:saveConnections', connections);
+    }
   },
 
   async linkRepos(owner, repoPaths) {

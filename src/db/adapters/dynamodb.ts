@@ -234,7 +234,7 @@ function keySchemaOf(
 }
 
 /// PartiQL takes its parameters in DynamoDB's own wire shape, so a plain
-/// `'hp'` from the values bar has to be dressed as `{ S: 'hp' }`. Anything
+/// `'acme'` from the values bar has to be dressed as `{ S: 'acme' }`. Anything
 /// that already looks like an AttributeValue is passed through untouched —
 /// the row editor builds those itself.
 function asAttributeValue(value: unknown): AttributeValue {

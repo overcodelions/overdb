@@ -22,6 +22,116 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   table and column real, parents before children, and a teardown that
   deletes exactly what the seed made. Commit saves both as saved queries.
   From the Seed button on a local connection, or ⌘K.
+- Create a base: the first half of giving each ticket its own database
+  (docs/design/baselines.md). On a local connection, overdb reads every
+  schema's catalog and table sizes, finds the tenant — the table most
+  others point at, by foreign key or by a column named for its key — and
+  asks which tenant and which logins you work with, in your words. It
+  searches every table that keeps logins, not just `users`, and says what
+  it finds: a login in a second users table, an admin on another account,
+  an inactive lookalike. Then it sorts every table — only rows for your
+  starting points, copy whole, start empty (logs, queues), leave out
+  (backups, scratch copies), schema only — with a reason and a size
+  estimate, and lists the links it guessed from column names so you can
+  turn any off. They choose rows only and are never drawn as foreign keys.
+  Choose which schemas the base holds. Tenancy has levels — overdb
+  finds them the way it finds the tenant (`partner` within `client`) — and
+  any level can be narrowed to some of its rows, by name or to the ones your
+  logins belong to: what carries a `partner_id` then keeps only those
+  partners', plus the client's own rows that belong to no partner. A login
+  table keeps your logins and every row the client would keep anyway. The
+  size estimate counts the chosen tenant's real share of one large table
+  rather than assuming an average one.
+  The recipe saves to `.overdb/baseline.json` in the linked repo. With a
+  linked repo and `claude`, Check with the code reads it (Read, Grep and
+  Glob only) for what the schema can't say — how a second users table
+  reaches an account, which of two tables a column means, which emptied
+  table logging in needs — and each suggestion is applied by hand. From the
+  more menu on a local connection, or ⌘K.
+- Build a base (MySQL). overdb starts its own `mysqld` from the one on
+  this machine (`--no-defaults`, its own directory, port and socket — your
+  server and its my.cnf are never touched), and a builder process copies
+  the recipe into it: every schema and table, the starting points' rows and
+  everything tied to them, small tables whole, missing parents fetched so
+  no real foreign key points at nothing, then views, routines, triggers and
+  the accounts your services connect as. Then it stops the instance; its
+  data directory is the base. On a real 11 GB database: 773 tables and
+  754k rows in under 20 seconds.
+- Branches. A branch is a clone of the base (copy-on-write
+  on APFS, so instant and nearly free), running on its own port, with its
+  own connection in the sidebar — seed it with Seed for a ticket, break it,
+  delete it. The proxy listens where your services already connect (a TCP
+  port and, for MySQL, the Unix socket) and forwards byte for byte to your
+  own server or any branch; switching closes the connections it
+  carries so each service's pool reconnects to the new one. Loopback only.
+  Two ways to point services at it: a spare port (3310 by default) that
+  each service is pointed at once, leaving your own server where it is —
+  the recommended path — or taking over 3306 and `/tmp/mysql.sock`, which
+  needs your own server moved once (overdb shows the lines to add and never
+  edits another program's config). A port that is taken says who holds it.
+  Keep running when overdb is closed moves the proxy and the branches into a
+  small background helper — a LaunchAgent running overdb's own binary as
+  node, started at login, removable from the same panel — and taking over
+  3306 requires it, so quitting overdb can never leave services with no
+  database. Without it, quitting asks first when services may be using the
+  proxy or a branch. In the sidebar, branches nest under the connection
+  they were made from — each with its status, a SERVICES badge on the one
+  your services reach, Seed and a menu on hover — with the base and
+  Rebuild below them. The Services switch in the title bar ("Services → PROJ-123") picks
+  where services go in one click, or ⌥⌘0 (your server) and ⌥⌘1–9 (branches);
+  it moves your services only, never what a tab queries. While the
+  proxy runs, What services see under the branches is a read-only
+  connection to query exactly that — renamed and reconnected when you
+  switch, gone when it is off. Every branch has a How to
+  connect guide built from its own address: use it in overdb, point one
+  service at it (`.env`, JDBC/Spring, the mysql client — the password is
+  never shown), point every service at it through the proxy, and go back.
+- Repos know their schemas. An env set (or a connection in no set) links
+  any number of repos, and each says which schemas its code uses — overdb
+  suggests them by scanning the repo for datasource config and
+  `schema.table` names (names and counts only; `.env`, keys and dependency
+  folders are never opened), and you confirm. Reading the code for a seed or
+  a base reads the repos for the schemas in play, each told which schemas
+  it owns, rather than whichever repo was linked first; extra repos are
+  added with their secrets denied the same way. Branches and What services
+  see use the repos of the connection they came from. A base recipe saves
+  in the repo you mark for it. Linking a repo from Seed or the base adds
+  to the list instead of replacing it; the set's edit sheet shows them all.
+- Database maps. Map this database (on the Seed screen, or in an env set's
+  edit sheet) reads each linked repo once — read-only, the same limits as
+  every code reading — and writes down what only the code knows about each
+  table: what a row is, which repo and module own it, the values its status
+  and type columns take, the shape of its JSON, the rules the app enforces,
+  and the links the code makes that no foreign key does, across schemas,
+  each with a path:line. Every name is checked against the real catalog and
+  invented ones are left out. Big catalogs are mapped in parts of 50 tables,
+  three passes at a time, saved as each finishes. A seed then plans from the
+  slice of the map its ticket touches, in one call, without reading the
+  code; the map also suggests which schemas a ticket is about. Reading the
+  code is still there (Also read the code now), and what it finds is added
+  to the map for the next seed. The map records each repo's commit and a
+  fingerprint of each schema, says when it is behind ("3 commits ahead",
+  "orders changed"), and Refresh re-reads only the files git says changed.
+  Kept in overdb's own folder by default; Settings › Database maps can keep
+  it in the recipe repo's `.overdb/map/` to share it through git.
+- A seed can cover more than one schema. It starts from the schema the tab
+  is on, suggests others from the ticket's own words (a ticket about
+  learners suggests the learning schema), and any can be added; their
+  tables join the plan schema-qualified, after the tab's own. Reading the
+  code for a seed reads every linked repo, the ones for its schemas first.
+- Seed on What services see seeds what it points at — the branch your
+  services use, or your own server — instead of refusing a read-only
+  connection. A stopped branch offers to start instead of reporting a
+  refused connection.
+- The sidebar asks where, then what: an environment switch at the top (All,
+  Local, Sandbox, Staging, Prod — whichever you have, remembered), and
+  environment sets as the groups below it, each with the connections it has
+  in that environment and Compare to open the set across all of them.
+  Connections in no set are listed after. Search looks across every
+  environment. Starring floats a row to the top of its group, and the star
+  by the search box shows only starred ones — there is no Pinned section
+  repeating them. Opening a connection the tab hides moves to its
+  environment.
 - SQLite reports how many rows a write changed, so an INSERT says
   "3 rows inserted" instead of nothing.
 - Fix it in overcli: a plan, or a statement in the slow-query pane, can be

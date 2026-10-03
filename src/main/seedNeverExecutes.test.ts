@@ -41,6 +41,15 @@ describe('the seed investigation', () => {
     expect(args.find((a) => a.startsWith('--disallowedTools='))).toContain('Read(./**/.env*)');
   });
 
+  it('denies secrets in every extra repo it may read, by absolute path', () => {
+    const more = investigateArgs('', ['/code/billing-svc']);
+    expect(more.join(' ')).toContain('--add-dir /code/billing-svc');
+    const deny = more.find((a) => a.startsWith('--disallowedTools='))!;
+    expect(deny).toContain('Read(//code/billing-svc/**/.env*)');
+    expect(deny).toContain('Read(//code/billing-svc/**/*.key)');
+    expect(deny).toContain('Read(./**/.env*)');
+  });
+
   it('is only ever started with those arguments', () => {
     const src = read('src', 'main', 'ai.ts');
     const spawns = [...src.matchAll(/spawn\(([^)]*\))/g)].map((m) => m[1]);

@@ -7,6 +7,7 @@
 import type { ConnectSpec, SchemaSnapshot } from '../db/adapter';
 import type { HealthScope } from '../shared/health';
 import type { Cell, ColumnMeta } from '../shared/types';
+import type { FindRequest, TableStat } from '../shared/baseline';
 
 export type HostRequest =
   | { id: string; op: 'connect'; spec: ConnectSpec }
@@ -33,6 +34,23 @@ export type HostRequest =
   /// scanned except where the server has no estimate and `countUnknown`
   /// asks for a bounded count instead.
   | { id: string; op: 'seedStats'; schema: string; countUnknown: boolean; cap: number }
+  /// Baseline discovery (docs/design/baselines.md): rows and bytes for
+  /// every table in these schemas from the server's statistics, one catalog
+  /// query. A table the statistics call empty is checked with one
+  /// `SELECT 1 … LIMIT 1`, because InnoDB's estimate says 0 for a small
+  /// table it has not sampled yet, and "empty" means "copy nothing".
+  | { id: string; op: 'baselineStats'; schemas: string[] }
+  /// A bounded search of one table for a starting point. The SQL is built
+  /// here from the request by src/shared/baseline.ts — identifiers quoted,
+  /// the term bound — so no statement text crosses the wire.
+  | { id: string; op: 'baselineFind'; req: FindRequest }
+  /// How many rows of one table belong to the starting points: one bounded
+  /// COUNT, to turn the size estimate from "an average tenant" into this one.
+  /// The distinct values of a few columns among a table's first `sample`
+  /// rows — a polymorphic pair's type names, Django's content types. The
+  /// sample bounds the scan; the limit bounds the answer.
+  | { id: string; op: 'baselineDistinct'; schema: string; table: string; columns: string[]; sample: number; limit: number }
+  | { id: string; op: 'baselineCount'; schema: string; table: string; column: string; values: string[] }
   | { id: string; op: 'close' };
 
 export type HostResponse =
@@ -57,6 +75,12 @@ export interface SeedStatsValue {
   /// The highest id any table in the schema has handed out, when the
   /// server keeps one (AUTO_INCREMENT, a sequence, SQLite's rowid).
   maxId: number | null;
+}
+
+export type BaselineStatsValue = TableStat[];
+
+export interface BaselineFindValue {
+  rows: Cell[][];
 }
 
 export interface PingValue {

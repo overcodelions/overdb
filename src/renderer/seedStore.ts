@@ -50,6 +50,13 @@ interface SeedState {
   gate: SeedGate | null;
   gateError: string | null;
   repo: string | null;
+  /// The schema the session is on, every schema the seed could cover, and
+  /// the ones it covers besides its own.
+  schema: string | null;
+  schemas: string[];
+  alsoSchemas: string[];
+  /// There is a database map to plan from.
+  hasMap: boolean;
   tools: Record<AiTool, boolean> | null;
   tool: AiTool | null;
 
@@ -79,6 +86,10 @@ interface SeedState {
   setNeed(need: string): void;
   setSize(size: SeedSize): void;
   setReadRepo(on: boolean): void;
+  setAlsoSchemas(schemas: string[]): void;
+  /// The map was made or changed: plan from it, and stop reading the code
+  /// by default.
+  mapChanged(): Promise<void>;
   setTool(tool: AiTool): void;
   setPhase(phase: SeedPhase): void;
   setSaveQueries(on: boolean): void;
@@ -108,6 +119,10 @@ const INITIAL = {
   gate: null,
   gateError: null,
   repo: null,
+  schema: null as string | null,
+  schemas: [] as string[],
+  alsoSchemas: [] as string[],
+  hasMap: false,
   tools: null,
   tool: null,
   jobId: null,
@@ -200,9 +215,12 @@ export const useSeed = create<SeedState>((set, get) => ({
       gate: check.gate,
       gateError: check.error ?? null,
       repo: check.repo,
+      schema: check.schema ?? null,
+      schemas: check.schemas ?? [],
       tools,
       tool,
     });
+    await get().mapChanged();
   },
 
   async recheck() {
@@ -211,7 +229,7 @@ export const useSeed = create<SeedState>((set, get) => ({
     set({ checking: true });
     const check = await window.overdb.invoke('seed:check', connectionId);
     if (get().connectionId !== connectionId) return;
-    set({ checking: false, gate: check.gate, gateError: check.error ?? null, repo: check.repo });
+    set({ checking: false, gate: check.gate, gateError: check.error ?? null, repo: check.repo, schema: check.schema ?? null, schemas: check.schemas ?? [] });
   },
 
   async close() {
@@ -227,6 +245,16 @@ export const useSeed = create<SeedState>((set, get) => ({
   setNeed: (need) => set({ need }),
   setSize: (size) => set({ size }),
   setReadRepo: (readRepo) => set({ readRepo }),
+  setAlsoSchemas: (alsoSchemas) => set({ alsoSchemas }),
+  async mapChanged() {
+    const { connectionId } = get();
+    if (!connectionId) return;
+    const res = await window.overdb.invoke('map:status', connectionId).catch(() => null);
+    if (get().connectionId !== connectionId) return;
+    const hasMap = !!(res?.ok && res.status?.map);
+    // With a map, reading the code is the slow extra, not the default.
+    set(hasMap !== get().hasMap ? { hasMap, readRepo: !hasMap } : { hasMap });
+  },
   setTool: (tool) => set({ tool }),
   setPhase: (phase) => set({ phase, error: null }),
   setSaveQueries: (saveQueries) => set({ saveQueries }),
@@ -241,7 +269,7 @@ export const useSeed = create<SeedState>((set, get) => ({
       investigation: null, script: null, check: null, problems: [], confirmed: [],
     });
     const res = await window.overdb.invoke('seed:investigate', {
-      jobId, connectionId, tool, need, size, readRepo,
+      jobId, connectionId, tool, need, size, readRepo, alsoSchemas: get().alsoSchemas, useMap: true,
     });
     if (get().jobId !== jobId) return;
     if (!res.ok) {
@@ -257,7 +285,7 @@ export const useSeed = create<SeedState>((set, get) => ({
     const jobId = crypto.randomUUID();
     set({ jobId, busy: 'revise', startedAt: Date.now(), error: null });
     const res = await window.overdb.invoke('seed:investigate', {
-      jobId, connectionId, tool, need, size, readRepo: false,
+      jobId, connectionId, tool, need, size, readRepo: false, alsoSchemas: get().alsoSchemas,
       revise: { previous: investigation, instruction },
     });
     if (get().jobId !== jobId) return;
@@ -285,7 +313,7 @@ export const useSeed = create<SeedState>((set, get) => ({
     if (!connectionId || !tool || !investigation) return;
     const jobId = crypto.randomUUID();
     set({ jobId, busy: 'write', startedAt: Date.now(), error: null, problems: [] });
-    const res = await window.overdb.invoke('seed:write', { jobId, connectionId, tool, need, investigation });
+    const res = await window.overdb.invoke('seed:write', { jobId, connectionId, tool, need, investigation, alsoSchemas: get().alsoSchemas });
     if (get().jobId !== jobId) return;
     if (!res.ok) {
       set({ busy: null, jobId: null, error: res.error, problems: res.check?.problems ?? [] });

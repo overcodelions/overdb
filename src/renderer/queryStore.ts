@@ -10,6 +10,7 @@ import { bindFor, paramSlots, previewBound, resolveParams, unfilledParams } from
 import { useStore } from './store';
 import { useFanout } from './fanoutStore';
 import { useSeed } from './seedStore';
+import { useBaseline } from './baselineStore';
 
 export type TabStatus = 'pending' | 'running' | 'done' | 'error' | 'cancelled';
 
@@ -827,6 +828,14 @@ export function subscribeToMainEvents(): () => void {
       // waiting on Commit has to hear about it.
       const seed = useSeed.getState();
       if (!event.open && seed.connectionId === event.connectionId) seed.txnClosed();
+      return;
+    }
+    if (event.kind === 'baseline:codeStep') {
+      useBaseline.getState().codeStep(event.jobId, event.step);
+      return;
+    }
+    if (event.kind === 'baseline:progress') {
+      useBaseline.getState().progress(event.jobId, event.progress);
       return;
     }
     if (event.kind === 'seed:step') {

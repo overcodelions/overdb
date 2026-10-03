@@ -21,7 +21,8 @@ import type { Engine } from '../shared/engines';
 import { SqliteAdapter } from '../db/adapters/sqlite';
 import type { DbAdapter } from '../db/adapter';
 import { cleanError } from './cleanError';
-import type { HostRequest, HostResponse, SeedStatsValue } from './protocol';
+import type { BaselineFindValue, BaselineStatsValue, HostRequest, HostResponse, SeedStatsValue } from './protocol';
+import { findSql } from '../shared/baseline';
 import { quoteIdent } from '../shared/orderBy';
 
 /// Electron's utilityProcess exposes `parentPort`; child_process.fork uses
@@ -145,6 +146,54 @@ async function seedStats(a: DbAdapter, schema: string, countUnknown: boolean, ca
       t.capped = n > cap;
       if (t.capped) break;
     }
+  }
+  return out;
+}
+
+/// Sizes for baseline discovery — see the 'baselineStats' request.
+async function baselineStats(a: DbAdapter, schemas: string[]): Promise<BaselineStatsValue> {
+  if (schemas.length === 0) return [];
+  const q = (name: string) => quoteIdent(name, engine ?? 'postgres');
+  const num = (v: unknown): number | null => {
+    if (v === null || v === undefined || v === '') return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  };
+  const out: BaselineStatsValue = [];
+  if (engine === 'mysql') {
+    await a.query('SET SESSION information_schema_stats_expiry = 0').catch(() => undefined);
+    const r = await a.query(
+      `SELECT TABLE_SCHEMA, TABLE_NAME, TABLE_ROWS, DATA_LENGTH + INDEX_LENGTH FROM information_schema.TABLES
+        WHERE TABLE_TYPE = 'BASE TABLE' AND TABLE_SCHEMA IN (${schemas.map(() => '?').join(', ')})`,
+      schemas,
+    );
+    for (const [s, t, rows, bytes] of r.rows) out.push({ schema: String(s), table: String(t), rows: num(rows), bytes: num(bytes) });
+  } else if (engine === 'postgres') {
+    const r = await a.query(
+      `SELECT n.nspname, c.relname, c.reltuples, pg_total_relation_size(c.oid) FROM pg_class c
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE c.relkind IN ('r', 'p') AND n.nspname = ANY($1)`,
+      [schemas],
+    );
+    // -1 is "never analyzed", which is not the same as empty.
+    for (const [s, t, rows, bytes] of r.rows) {
+      const n = num(rows);
+      out.push({ schema: String(s), table: String(t), rows: n !== null && n >= 0 ? Math.round(n) : null, bytes: num(bytes) });
+    }
+  } else if (engine === 'sqlite') {
+    for (const s of schemas) {
+      const r = await a.query(`SELECT name FROM ${q(s)}.sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`);
+      for (const [name] of r.rows) {
+        const c = await a.query(`SELECT COUNT(*) FROM ${q(s)}.${q(String(name))}`);
+        out.push({ schema: s, table: String(name), rows: num(c.rows[0]?.[0]), bytes: null });
+      }
+    }
+    return out;
+  }
+  for (const t of out) {
+    if (t.rows !== 0 && t.rows !== null) continue;
+    const r = await a.query(`SELECT 1 FROM ${q(t.schema)}.${q(t.table)} LIMIT 1`).catch(() => null);
+    if (r) t.rows = r.rows.length === 0 ? 0 : null;
   }
   return out;
 }
@@ -361,6 +410,38 @@ wire.onMessage((req) => {
             value: await seedStats(require_(), req.schema, req.countUnknown, req.cap),
           });
           return;
+        case 'baselineStats':
+          wire.send({ kind: 'reply', id: req.id, ok: true, value: await baselineStats(require_(), req.schemas) });
+          return;
+        case 'baselineDistinct': {
+          const qi = (n: string) => quoteIdent(n, engine ?? 'postgres');
+          const target = engine === 'sqlite' ? qi(req.table) : `${qi(req.schema)}.${qi(req.table)}`;
+          const cols = req.columns.map(qi).join(', ');
+          const sample = Math.max(1, Math.min(200_000, Math.floor(req.sample)));
+          const limit = Math.max(1, Math.min(5_000, Math.floor(req.limit)));
+          const r = await require_().query(
+            `SELECT DISTINCT ${cols} FROM (SELECT ${cols} FROM ${target} LIMIT ${sample}) sampled LIMIT ${limit}`,
+            [],
+            limit,
+          );
+          wire.send({ kind: 'reply', id: req.id, ok: true, value: r.rows });
+          return;
+        }
+        case 'baselineCount': {
+          const qi = (n: string) => quoteIdent(n, engine ?? 'postgres');
+          const target = engine === 'sqlite' ? qi(req.table) : `${qi(req.schema)}.${qi(req.table)}`;
+          const values = req.values.slice(0, 1000);
+          const holders = values.map((_, i) => (engine === 'postgres' ? `$${i + 1}` : '?')).join(', ');
+          const r = await require_().query(`SELECT COUNT(*) FROM ${target} WHERE ${qi(req.column)} IN (${holders || 'NULL'})`, values, 1);
+          wire.send({ kind: 'reply', id: req.id, ok: true, value: Number(r.rows[0]?.[0] ?? 0) });
+          return;
+        }
+        case 'baselineFind': {
+          const { sql, params } = findSql(engine ?? 'postgres', req.req);
+          const r = await require_().query(sql, params, req.req.limit);
+          wire.send({ kind: 'reply', id: req.id, ok: true, value: { rows: r.rows } satisfies BaselineFindValue });
+          return;
+        }
         case 'run':
           wire.send({ kind: 'reply', id: req.id, ok: true, value: { started: true } });
           await runQuery(req);

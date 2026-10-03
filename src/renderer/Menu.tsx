@@ -8,6 +8,8 @@ import { useEffect, useRef, type ReactNode } from 'react';
 // phase and stopped there, because the query pane also listens for it (to
 // cancel a run) and closing a menu must not cancel anything.
 
+const ITEMS = '[role="menuitem"]:not([disabled]), [role="menuitemradio"]:not([disabled])';
+
 export function Dropdown({
   open,
   onClose,
@@ -52,7 +54,9 @@ export function Dropdown({
   // A menu opened from the keyboard should be usable from the keyboard.
   useEffect(() => {
     if (!open || role !== 'menu') return;
-    panel.current?.querySelector<HTMLElement>('[role="menuitem"]:not([disabled])')?.focus();
+    // A radio menu starts on the checked choice, not on whatever follows it.
+    const el = panel.current;
+    (el?.querySelector<HTMLElement>('[role="menuitemradio"][aria-checked="true"]:not([disabled])') ?? el?.querySelector<HTMLElement>(ITEMS))?.focus();
   }, [open, role]);
 
   if (!open) return null;
@@ -60,7 +64,7 @@ export function Dropdown({
   const onKeyDown = (e: React.KeyboardEvent) => {
     if (role !== 'menu' || (e.key !== 'ArrowDown' && e.key !== 'ArrowUp')) return;
     e.preventDefault();
-    const items = [...(panel.current?.querySelectorAll<HTMLElement>('[role="menuitem"]:not([disabled])') ?? [])];
+    const items = [...(panel.current?.querySelectorAll<HTMLElement>(ITEMS) ?? [])];
     const at = items.indexOf(document.activeElement as HTMLElement);
     const next = e.key === 'ArrowDown' ? (at + 1) % items.length : (at - 1 + items.length) % items.length;
     items[next]?.focus();

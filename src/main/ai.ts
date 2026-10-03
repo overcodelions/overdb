@@ -179,7 +179,11 @@ export const INVESTIGATE_TOOLS = ['Read', 'Grep', 'Glob'] as const;
 
 /// Everything after `claude`. `=` forms throughout: the variadic options
 /// would otherwise swallow the arguments after them.
-export function investigateArgs(model: string): string[] {
+/// `addDirs`: more repos claude may read besides the working directory —
+/// with their secrets denied the same way, by absolute path.
+export function investigateArgs(model: string, addDirs: readonly string[] = []): string[] {
+  const deny = ['Read(./.env*)', 'Read(./**/.env*)', 'Read(./**/*.pem)', 'Read(./**/*.key)'];
+  for (const d of addDirs) deny.push(`Read(/${d}/.env*)`, `Read(/${d}/**/.env*)`, `Read(/${d}/**/*.pem)`, `Read(/${d}/**/*.key)`);
   return [
     '-p',
     '-',
@@ -188,7 +192,8 @@ export function investigateArgs(model: string): string[] {
     `--tools=${INVESTIGATE_TOOLS.join(',')}`,
     '--restricted',
     '--strict-mcp-config',
-    '--disallowedTools=Read(./.env*),Read(./**/.env*),Read(./**/*.pem),Read(./**/*.key)',
+    `--disallowedTools=${deny.join(',')}`,
+    ...addDirs.flatMap((d) => ['--add-dir', d]),
     '--permission-mode=dontAsk',
     '--no-session-persistence',
     ...modelFlag('claude', model),
@@ -250,9 +255,9 @@ export interface Investigation {
 
 export function runInvestigation(
   prompt: string,
-  opts: { cwd: string; model?: string; timeoutMs?: number; onStep: (step: InvestigationStep) => void },
+  opts: { cwd: string; addDirs?: readonly string[]; model?: string; timeoutMs?: number; onStep: (step: InvestigationStep) => void },
 ): Investigation {
-  const child = spawn('claude', investigateArgs(opts.model ?? ''), { cwd: opts.cwd, env: process.env });
+  const child = spawn('claude', investigateArgs(opts.model ?? '', opts.addDirs ?? []), { cwd: opts.cwd, env: process.env });
   let stdout = '';
   let stderr = '';
   let pending = '';

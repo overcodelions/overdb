@@ -4,6 +4,8 @@ import { EnvSetForm } from './EnvSetForm';
 import { AboutSheet, BasicsSheet, ShortcutsSheet } from './Help';
 import { ImportSheet } from './ImportSheet';
 import { SeedSheet } from './SeedSheet';
+import { BaselineSheet } from './BaselineSheet';
+import { TicketsSheet } from './TicketsSheet';
 import { TablePicker } from './TablePicker';
 import { useStore } from './store';
 import { FORMAT_STYLES, formatSql } from '@shared/formatSql';
@@ -46,7 +48,7 @@ export function SheetHost(): JSX.Element | null {
       // height — it cannot jump — so it sits in the middle, where a tall
       // dialog belongs.
       className={`fixed inset-0 z-40 flex justify-center bg-black/40 ${
-        sheet.kind === 'seed' ? 'items-center py-6' : `items-start ${help ? 'pt-14' : 'pt-24'}`
+        sheet.kind === 'seed' || sheet.kind === 'baseline' || sheet.kind === 'tickets' ? 'items-center py-6' : `items-start ${help ? 'pt-14' : 'pt-24'}`
       }`}
       onClick={() => setSheet(null)}
     >
@@ -54,7 +56,7 @@ export function SheetHost(): JSX.Element | null {
         className={`${
           help
             ? 'w-[760px] max-w-[calc(100vw-48px)] max-h-[80vh] overflow-hidden'
-            : sheet.kind === 'seed'
+            : sheet.kind === 'seed' || sheet.kind === 'baseline' || sheet.kind === 'tickets'
               // A five-step flow with a plan and a script side by side: it
               // needs a fixed frame, or every step resizes under the pointer.
               // Grows with the window up to a comfortable reading size: a
@@ -81,6 +83,8 @@ export function SheetHost(): JSX.Element | null {
           <EnvSetForm id={sheet.id} onDone={() => setSheet(null)} />
         )}
         {sheet.kind === 'seed' && <SeedSheet connectionId={sheet.connectionId} />}
+        {sheet.kind === 'baseline' && <BaselineSheet connectionId={sheet.connectionId} />}
+        {sheet.kind === 'tickets' && <TicketsSheet />}
         {sheet.kind === 'pickTables' && (
           <TablePicker connectionId={sheet.connectionId} onClose={() => setSheet(null)} />
         )}
@@ -243,6 +247,24 @@ function SettingsSheet(): JSX.Element {
               </Note>
             </>
           )}
+        </Group>
+
+        <Group title="Database maps">
+          <Field label="Keep maps">
+            <select
+              className="field px-2 py-1 text-xs w-48"
+              value={draft.mapLocation ?? 'overdb'}
+              onChange={(e) => patch({ mapLocation: e.target.value as typeof settings.mapLocation })}
+            >
+              <option value="overdb">In overdb, on this machine</option>
+              <option value="repo">In the recipe repo, .overdb/map/</option>
+            </select>
+          </Field>
+          <Note>
+            A map is what overdb learned about a database by reading its code once, so seeds plan in seconds. Kept in
+            overdb’s own folder it stays on this machine; in the repo a base recipe is saved in, your team shares it
+            through git.
+          </Note>
         </Group>
       </div>
 
