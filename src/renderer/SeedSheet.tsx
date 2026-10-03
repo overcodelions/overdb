@@ -6,7 +6,7 @@ import { useStore } from './store';
 import { useTickets } from './ticketsStore';
 import { PROXY_CONNECTION_ID } from './TicketSection';
 import { useSeed, type SeedPhase } from './seedStore';
-import { RepoLinksPanel } from './RepoLinks';
+import { RepoLinksPanel, RepoNames } from './RepoLinks';
 import { MapCard } from './MapCard';
 import { schemasMentioned } from '@shared/repoLinks';
 
@@ -406,14 +406,14 @@ function Describe(): JSX.Element {
           {seed.connectionId && seed.gate?.ok && (seed.repo || seed.hasMap) && (
             <div className={`${CARD} p-3 flex flex-col gap-2`}>
               <span className={LABEL}>Database map</span>
-              <MapCard connectionId={seed.connectionId} onChange={() => void useSeed.getState().mapChanged()} />
+              <MapCard compact connectionId={seed.connectionId} onChange={() => void useSeed.getState().mapChanged()} />
             </div>
           )}
 
           {seed.repo ? (
             <div className={`${CARD} p-3 flex flex-col gap-2`}>
               <span className={LABEL}>Reads the code in</span>
-              {seed.connectionId && <RepoLinksPanel connectionId={seed.connectionId} onChange={() => void useSeed.getState().recheck()} />}
+              {seed.connectionId && <RepoNames connectionId={seed.connectionId} />}
               {seed.tool === 'claude' ? (
                 <>
                   <label className="flex items-center gap-2 text-[12px]">

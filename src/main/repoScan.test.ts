@@ -2,7 +2,7 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
-import { scanRepoSchemas } from './repoScan';
+import { scanRepoSchemas, scanTableMentions } from './repoScan';
 import { suggestSchemas } from '../shared/repoLinks';
 
 const root = path.join(os.tmpdir(), `overdb-reposcan-${process.pid}`);
@@ -27,5 +27,25 @@ describe('scanning a repo for the schemas its code uses', () => {
     expect(ev.secretdb).toEqual({ config: 0, code: 0 });
     expect(ev.inventory).toEqual({ config: 0, code: 0 });
     expect(suggestSchemas(ev, root)).toEqual(['orders']);
+  });
+});
+
+describe('finding which files name each table', () => {
+  it('matches SQL names and ORM class names, and never reads secrets, config or dependencies', async () => {
+    const at = path.join(root, 'mentions');
+    const put = async (rel: string, text: string) => {
+      await fs.mkdir(path.dirname(path.join(at, rel)), { recursive: true });
+      await fs.writeFile(path.join(at, rel), text);
+    };
+    await put('src/orders/OrderLineRepository.java', 'interface OrderLineRepository extends Repo<OrderLine> {}');
+    await put('db/V1__init.sql', 'create table order_line (id int); create table invoice (id int);');
+    await put('src/billing/invoices.ts', 'const invoices = await db.invoices.findMany();');
+    await put('.env', 'TABLE=audit_log');
+    await put('config/app.yml', 'audit_log: true');
+    await put('node_modules/x/index.js', 'audit_log');
+    const m = await scanTableMentions(at, ['shop.order_line', 'shop.invoice', 'shop.audit_log']);
+    expect(m.get('shop.order_line')).toEqual(['db/V1__init.sql', 'src/orders/OrderLineRepository.java']);
+    expect(m.get('shop.invoice')).toEqual(['db/V1__init.sql', 'src/billing/invoices.ts']);
+    expect(m.get('shop.audit_log')).toEqual([]);
   });
 });

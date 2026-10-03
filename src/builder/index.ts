@@ -37,7 +37,9 @@ export type BuilderRequest = {
 export type BuilderMessage =
   | { kind: 'progress'; progress: BuildProgress }
   | { kind: 'done'; report: BuildReport }
-  | { kind: 'failed'; error: string };
+  /// `sql`: the statement the server refused, when it was one — the build
+  /// log keeps it, so a failure says what was being asked, not only why not.
+  | { kind: 'failed'; error: string; sql?: string };
 
 interface Wire {
   send(msg: BuilderMessage): void;
@@ -84,6 +86,10 @@ function open(ep: Endpoint): Promise<Connection> {
       dateStrings: true,
       supportBigNumbers: true,
       bigNumberStrings: true,
+      // MariaDB keeps JSON as LONGTEXT flagged `format=json`, which mysql2
+      // parses unless told not to — and a parsed array goes back into an
+      // INSERT as a row of '[object Object]'s. Text in, text out.
+      jsonStrings: true,
       typeCast(field, next) {
         if (field.type === 'JSON') return field.string('utf8');
         if (field.type === 'GEOMETRY') return field.buffer();
@@ -207,12 +213,21 @@ async function build(req: BuilderRequest, progress: (p: BuildProgress) => void):
     const withRows = plan.tables.filter((t) => t.rows.kind !== 'none');
     progress({ stage: 'rows', text: `Copying rows into ${withRows.length} tables`, done: 0, total: withRows.length });
     for (const [i, t] of withRows.entries()) {
-      const n = await copyTable(t, copy, copyIn, target);
+      // One table the server will not take rows for is named in the report
+      // and left with what it got; the other few hundred still copy.
+      let n = 0;
+      let failed: string | null = null;
+      try {
+        n = await copyTable(t, copy, copyIn, target);
+      } catch (err) {
+        failed = err instanceof Error ? err.message : String(err);
+        report.skipped.push({ what: `Rows for ${tableKey(t.ref)}`, reason: failed });
+      }
       if (n > 0) report.copied[tableKey(t.ref)] = n;
       report.rows += n;
       progress({
         stage: 'rows',
-        text: `${tableKey(t.ref)}: ${n.toLocaleString()} rows`,
+        text: failed ? `${tableKey(t.ref)}: not copied — ${failed}` : `${tableKey(t.ref)}: ${n.toLocaleString()} rows`,
         done: i + 1,
         total: withRows.length,
       });
@@ -220,20 +235,34 @@ async function build(req: BuilderRequest, progress: (p: BuildProgress) => void):
 
     if (plan.fills.length > 0) {
       progress({ stage: 'parents', text: `Completing ${plan.fills.length} foreign keys` });
+      const failedFills = new Set<(typeof plan.fills)[number]>();
       for (let round = 0; round < FILL_ROUNDS; round++) {
         let added = 0;
         for (const f of plan.fills) {
-          const missing = await rows<{ v: unknown }>(
-            target,
-            `SELECT DISTINCT c.${q(f.column)} AS v FROM ${qt(f.child)} c
-               LEFT JOIN ${qt(f.parent)} p ON p.${q(f.refColumn)} = c.${q(f.column)}
-              WHERE c.${q(f.column)} IS NOT NULL AND p.${q(f.refColumn)} IS NULL${f.when ? ` AND c.${q(f.when.column)} = ?` : ''}`,
-            f.when ? [f.when.value] : [],
-          );
-          if (missing.length === 0) continue;
-          const n = await copyIn(f.parent, f.refColumn, missing.map((m) => m.v));
-          added += n;
-          report.copied[tableKey(f.parent)] = (report.copied[tableKey(f.parent)] ?? 0) + n;
+          if (failedFills.has(f)) continue;
+          // Completing a key is best effort — foreign key checks are off, so
+          // a parent that cannot be fetched leaves a dangling id, not a
+          // broken base. One that fails is named in the report and the
+          // rest carry on, rather than the whole build stopping on it.
+          try {
+            const missing = await rows<{ v: unknown }>(
+              target,
+              `SELECT DISTINCT c.${q(f.column)} AS v FROM ${qt(f.child)} c
+                 LEFT JOIN ${qt(f.parent)} p ON p.${q(f.refColumn)} = c.${q(f.column)}
+                WHERE c.${q(f.column)} IS NOT NULL AND p.${q(f.refColumn)} IS NULL${f.when ? ` AND c.${q(f.when.column)} = ?` : ''}`,
+              f.when ? [f.when.value] : [],
+            );
+            if (missing.length === 0) continue;
+            const n = await copyIn(f.parent, f.refColumn, missing.map((m) => m.v));
+            added += n;
+            report.copied[tableKey(f.parent)] = (report.copied[tableKey(f.parent)] ?? 0) + n;
+          } catch (err) {
+            failedFills.add(f);
+            report.skipped.push({
+              what: `Parents for ${tableKey(f.child)}.${f.column} → ${tableKey(f.parent)}.${f.refColumn}`,
+              reason: err instanceof Error ? err.message : String(err),
+            });
+          }
         }
         report.filled += added;
         report.rows += added;
@@ -416,12 +445,27 @@ async function recreateUsers(
   await target.query('FLUSH PRIVILEGES');
 }
 
+/// An account statement with its password or hash masked: `IDENTIFIED BY
+/// '…'`, `BY PASSWORD '…'`, `AS '…'` (MySQL) and `USING '…'` (MariaDB).
+export function redactSecrets(sql: string): string {
+  if (!/\bIDENTIFIED\b|\bPASSWORD\b/i.test(sql)) return sql;
+  return sql.replace(/\b(BY|AS|USING|PASSWORD)(\s*(?:PASSWORD\s*)?(?:\(\s*)?)'(?:[^'\\]|\\.)*'/gi, "$1$2'…'");
+}
+
 const wire = transport();
 wire.onMessage((req) => {
   if (req.op !== 'build') return;
   build(req, (progress) => wire.send({ kind: 'progress', progress }))
     .then((report) => wire.send({ kind: 'done', report }))
-    .catch((err) => wire.send({ kind: 'failed', error: err instanceof Error ? err.message : String(err) }))
+    .catch((err) => {
+      // mysql2 puts the statement on its errors; long ones are cut.
+      // A password never reaches the log: the accounts step sets them.
+      const sql =
+        typeof (err as { sql?: unknown })?.sql === 'string'
+          ? redactSecrets((err as { sql: string }).sql).slice(0, 4000)
+          : undefined;
+      wire.send({ kind: 'failed', error: err instanceof Error ? err.message : String(err), ...(sql ? { sql } : {}) });
+    })
     .finally(() => setTimeout(() => process.exit(0), 50));
 });
 

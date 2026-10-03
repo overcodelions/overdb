@@ -75,3 +75,66 @@ export async function scanRepoSchemas(repo: string, schemas: readonly string[]):
   for (let i = 0; i < files.length; i += 64) await Promise.all(files.slice(i, i + 64).map(one));
   return evidence;
 }
+
+// What an ORM calls a table's class, past the table's own name:
+// `CampaignAssetRepository` for `campaign_asset`.
+const CLASS_SUFFIX = /(repository|repo|dao|entity|model|mapper|record|service|table|dto|controller|row|s)$/;
+/// SQL, code, and the XML ORMs keep their mappings in. Configuration is
+/// left out: a table named in a YAML file says little about how it is used.
+const MENTION = /\.(sql|prisma|[cm]?[jt]sx?|py|rb|java|kt|kts|scala|go|php|cs|ex|exs|rs|groovy|clj|erb|twig|xml)$/i;
+
+/// Which files name each table, so a mapping pass reads those files instead
+/// of searching the whole repo for them, and tables nothing names are not
+/// handed to claude at all. A table is named as written (`campaign_asset`)
+/// or as the class mapped to it (`CampaignAsset`, `campaignAssets`,
+/// `CampaignAssetDao`). Over-matching costs a few extra files; missing a
+/// table costs its whole description, so the match is generous. Only paths
+/// leave here, relative to the repo; secrets files are never opened.
+export async function scanTableMentions(repo: string, tables: readonly string[]): Promise<Map<string, string[]>> {
+  const found = new Map<string, Set<string>>(tables.map((t) => [t, new Set()]));
+  const bySnake = new Map<string, string[]>();
+  const bySquash = new Map<string, string[]>();
+  const add = (m: Map<string, string[]>, k: string, t: string) => {
+    if (k.length < 3) return;
+    const list = m.get(k);
+    if (list) list.includes(t) || list.push(t);
+    else m.set(k, [t]);
+  };
+  for (const t of tables) {
+    const name = (t.includes('.') ? t.slice(t.indexOf('.') + 1) : t).toLowerCase();
+    add(bySnake, name, t);
+    const squash = name.replace(/_/g, '');
+    add(bySquash, squash, t);
+    if (squash.endsWith('s')) add(bySquash, squash.slice(0, -1), t);
+  }
+
+  const files: string[] = [];
+  for await (const file of walk(repo)) {
+    const rel = path.relative(repo, file);
+    if (SECRET.test(rel) || !MENTION.test(file)) continue;
+    files.push(file);
+    if (files.length >= MAX_FILES) break;
+  }
+
+  const one = async (file: string) => {
+    const stat = await fs.stat(file).catch(() => null);
+    if (!stat || stat.size > MAX_BYTES) return;
+    const text = await fs.readFile(file, 'utf-8').catch(() => '');
+    const rel = path.relative(repo, file);
+    const seen = new Set<string>();
+    for (const tok of text.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? []) {
+      if (seen.has(tok)) continue;
+      seen.add(tok);
+      const lower = tok.toLowerCase();
+      const hits = [...(bySnake.get(lower) ?? [])];
+      if (!tok.includes('_')) {
+        hits.push(...(bySquash.get(lower) ?? []));
+        const bare = lower.replace(CLASS_SUFFIX, '');
+        if (bare !== lower) hits.push(...(bySquash.get(bare) ?? []), ...(bySquash.get(bare.replace(CLASS_SUFFIX, '')) ?? []));
+      }
+      for (const t of hits) found.get(t)!.add(rel);
+    }
+  };
+  for (let i = 0; i < files.length; i += 64) await Promise.all(files.slice(i, i + 64).map(one));
+  return new Map([...found].map(([t, s]) => [t, [...s].sort()]));
+}

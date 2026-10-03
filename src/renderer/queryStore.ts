@@ -114,11 +114,16 @@ export const HEALTH_TAB = -5;
 /// the result of your own Run by way of clicking a tab.
 export const HISTORY_TAB = -6;
 
-/// The standing tabs — log, slow queries, health and the diagram — which a
+/// The database map: what the code says about each table, and the repos it
+/// was read from. Standing, like the diagram — a property of the database,
+/// not of the statement you ran.
+export const MAP_TAB = -7;
+
+/// The standing tabs — log, slow queries, health, the diagram and the map — which a
 /// run must not pull focus away from. Returns null for anything else,
 /// meaning "this is a result tab, move it".
 function standing(active: number): number | null {
-  return active === LOG_TAB || active === SLOW_TAB || active === ERD_TAB || active === HEALTH_TAB
+  return active === LOG_TAB || active === SLOW_TAB || active === ERD_TAB || active === HEALTH_TAB || active === MAP_TAB
     ? active
     : null;
 }
@@ -764,9 +769,29 @@ export const useQuery = create<QueryState>((set, get) => ({
   },
 
   reset() {
-    set({ tabs: [], active: 0, running: false });
+    set({ tabs: [], active: pendingPane ?? 0, running: false });
+    pendingPane = null;
   },
 }));
+
+/// A pane asked for while its connection was being selected. Selecting a
+/// connection resets the query pane, so the request waits for that reset
+/// rather than racing it.
+let pendingPane: number | null = null;
+
+/// Open a standing pane on a connection from outside the query pane — the
+/// Map pane from a sheet's "Open map". Closes the sheet on the way.
+export function openPane(connectionId: string, pane: number): void {
+  const st = useStore.getState();
+  st.setSheet(null);
+  const sel = st.selection;
+  if (sel?.kind === 'connection' && sel.id === connectionId) {
+    useQuery.getState().setActive(pane);
+    return;
+  }
+  pendingPane = pane;
+  st.select({ kind: 'connection', id: connectionId });
+}
 
 /// Installed once from App. Returns the unsubscribe.
 /// The application menu's items, carried out in the window. See

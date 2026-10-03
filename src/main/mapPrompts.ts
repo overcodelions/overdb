@@ -13,7 +13,19 @@ export interface MapPromptInput {
   changed: string[] | null;
   /// A big catalog is mapped in parts: the tables this pass describes.
   /// Links may still point at any table in the catalog.
-  focus?: { tables: string[]; part: number; of: number };
+  focus?: { tables: string[]; part: number; of: number; files?: string[]; moreFiles?: number };
+}
+
+/// The files a scan found naming the part's tables: where to read, so the
+/// pass does not search the whole repository for them.
+function files(focus: NonNullable<MapPromptInput['focus']>): string {
+  if (!focus.files?.length) return '';
+  return `
+
+These files name those tables. Read them first, and open other files only to
+follow what they use (a base class, an enum, a constant). Do not search the
+whole repository:
+${focus.files.map((f) => `- ${f}`).join('\n')}${focus.moreFiles ? `\n- …and ${focus.moreFiles} more that name them, if these are not enough` : ''}`;
 }
 
 export function mapPrompt(input: MapPromptInput): string {
@@ -30,7 +42,7 @@ out.`;
   const focus = input.focus
     ? `\n\nThis is part ${input.focus.part} of ${input.focus.of}. Describe ONLY these tables (links from them
 may point at any table above):
-${input.focus.tables.join(', ')}`
+${input.focus.tables.join(', ')}${files(input.focus)}`
     : '';
 
   return `You are helping inside overdb, a database client, to write down how an

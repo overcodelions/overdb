@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react';
 import type { Connection, EnvKind } from '@shared/types';
 import { variantLabel } from '@shared/engines';
 import { useStore } from './store';
-import { RepoLinksPanel } from './RepoLinks';
+import { RepoNames } from './RepoLinks';
 import { MapCard } from './MapCard';
 
 /// An environment set is the same logical database in several places —
@@ -195,12 +195,11 @@ export function EnvSetForm({
           <div className="flex flex-col gap-1.5">
             <span className="text-[11px] font-medium text-ink-muted">Code</span>
             <p className="text-[11px] text-ink-faint leading-snug">
-              The repos whose code uses this database, and which schemas each one uses — so reading the code for a seed
-              or a base reads the right service. Saved as you change it.
+              The repos whose code uses this database, and the map read from them, live in the Map pane — one place for
+              every environment in the set.
             </p>
-            <RepoLinksPanel connectionId={(members.find((c) => c.env === 'local') ?? members[0]).id} showRecipe />
-            <span className="text-[11px] font-medium text-ink-muted mt-2">Map</span>
-            <MapCard connectionId={(members.find((c) => c.env === 'local') ?? members[0]).id} />
+            <RepoNames connectionId={(members.find((c) => c.env === 'local') ?? members[0]).id} />
+            <MapCard compact connectionId={(members.find((c) => c.env === 'local') ?? members[0]).id} />
           </div>
         )}
       </div>

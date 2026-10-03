@@ -174,6 +174,61 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   while a member is down, and when the network or the window comes back.
 
 ### Changed
+- The sidebar lists every connection under its environment, whether or
+  not a set holds it, so a local database is under Local rather than only
+  inside the sets it belongs to. Sets moved to a dock below the list: one
+  row each, dots for the environments it spans, and Compare. Under an
+  environment tab, sets with nothing there fade rather than disappear.
+- Mapping a database is much faster. A quick scan, with no AI, first finds
+  which files name each table (as written, or as the class an ORM maps to
+  it). Tables no file names are left out, and each pass is handed the files
+  for its tables instead of searching the whole repo; tables that live in
+  the same part of the code share a pass. The schema the connection uses is
+  mapped first, and the card says when seeds can use the map while the rest
+  carries on. "Map them too" asks about the left-out tables later.
+- The database map has its own pane, Map, in the bottom rail beside
+  Diagram: the repos it reads (linked and changed there), whether it is up
+  to date, and every mapped table — its purpose, where its code lives, the
+  values its columns take, JSON shapes, rules and links, each cited to a
+  line. Seed, Create a base and a set's form show one line for the map and
+  the repos, with the way to the pane.
+- Mapping uses the standard model, `sonnet`, rather than the everyday one.
+  Settings has a Map model field to change it. Five passes run at once,
+  up from three, and the Map pane says up front that a first map takes
+  from a few minutes to about 20 for a large database. Each map keeps a
+  record of its last run — what each repo's scan found and how long each
+  pass took.
+- A base settles its links from the map before asking anyone. A guess the
+  code agrees with is confirmed, one the code points elsewhere is
+  corrected, and links the column names never suggested are added — each
+  citing where in the code. The tenant and its levels are found with those
+  links too, and the links to check shrink to what the map could not say.
+- The diagram draws the map's links from the code alongside foreign keys:
+  dashed, in the AI colour, with what the code does and where on hover. A
+  switch turns them off.
+- Linking repos takes several at once: the folder picker allows more than
+  one (hold ⌘), and each repo's schemas are suggested together.
+
+### Fixed
+- A base built from MariaDB copies JSON columns. MariaDB keeps JSON as
+  text flagged as JSON, which the driver parsed into objects and wrote back
+  as `'[object Object]'` lists ("Operand should contain 1 column(s)"); the
+  builder now reads JSON as text, as it does for MySQL's own JSON type. A
+  table whose rows cannot be copied is named in the report and the build
+  carries on.
+- A base build that cannot fetch the parent rows for one foreign key
+  names it under what could not be recreated and carries on, instead of
+  stopping the whole build. Every build writes a log (in overdb's
+  `instances/logs`, the last 20 kept) with each step, the plan's size and,
+  when it fails, the error, the statement the server refused (passwords
+  masked) and the server's own last log lines; a failed build has a Show
+  the log button.
+- The links a base settled from the database map are saved in its recipe,
+  so the build follows the same links that were reviewed.
+- Building a base from a MariaDB server works. MariaDB's mysqld has no
+  `--initialize`, so its data directory is made with `mariadb-install-db`
+  (root with an empty password, like MySQL's), and it is started without
+  the MySQL-only X Plugin and binlog switches it refuses.
 - The editor header is sorted by what each control is. Where you are and
   what state it's in sit on the left: the connection, the schema, one chip
   for writes and the transaction mode (click it to change either, or which

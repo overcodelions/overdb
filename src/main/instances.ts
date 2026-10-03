@@ -17,6 +17,16 @@ export interface Mysqld {
   path: string;
   /// `9.2.0`.
   version: string;
+  /// Read from `--version` when the binary is found. Absent on a record
+  /// saved before it was kept; flavorOf works it out from the version.
+  flavor?: 'mysql' | 'mariadb';
+}
+
+/// MariaDB makes its data directory with a separate script and does not
+/// know MySQL's X Plugin or binlog switches. Its versions start at 10, where
+/// MySQL's never have, which settles a binary whose flavor was not kept.
+export function flavorOf(bin: Mysqld): 'mysql' | 'mariadb' {
+  return bin.flavor ?? (Number(bin.version.split('.')[0]) >= 10 ? 'mariadb' : 'mysql');
 }
 
 /// Where a mysqld usually lives: Homebrew on Apple silicon and Intel, the
@@ -53,9 +63,10 @@ function run(file: string, args: string[], timeoutMs = 120_000): Promise<{ code:
   });
 }
 
-export async function mysqldVersion(file: string): Promise<string | null> {
+export async function mysqldVersion(file: string): Promise<{ version: string; flavor: 'mysql' | 'mariadb' } | null> {
   const r = await run(file, ['--version'], 15_000);
-  return r.code === 0 ? r.out.match(/Ver\s+(\d+\.\d+\.\d+)/)?.[1] ?? null : null;
+  const version = r.code === 0 ? r.out.match(/Ver\s+(\d+\.\d+\.\d+)/)?.[1] : undefined;
+  return version ? { version, flavor: /mariadb/i.test(r.out) ? 'mariadb' : 'mysql' } : null;
 }
 
 /// A mysqld for a server of `serverVersion`: the same major.minor if one is
@@ -66,8 +77,8 @@ export async function findMysqld(serverVersion: string): Promise<Mysqld | null> 
   for (const file of await candidates()) {
     const ok = await fs.access(file).then(() => true).catch(() => false);
     if (!ok) continue;
-    const version = await mysqldVersion(file);
-    if (version && !found.some((f) => f.version === version)) found.push({ path: file, version });
+    const v = await mysqldVersion(file);
+    if (v && !found.some((f) => f.version === v.version)) found.push({ path: file, ...v });
   }
   if (found.length === 0) return null;
   const want = serverVersion.match(/^(\d+\.\d+)/)?.[1];
@@ -87,12 +98,41 @@ export function compareVersions(a: string, b: string): number {
 /// the server makes one for a fresh install.
 export async function initialize(bin: Mysqld, datadir: string): Promise<void> {
   await fs.mkdir(path.dirname(datadir), { recursive: true });
+  if (flavorOf(bin) === 'mariadb') return initializeMariadb(bin, datadir);
   const log = path.join(path.dirname(datadir), 'initialize.log');
   const r = await run(bin.path, ['--no-defaults', '--initialize-insecure', `--datadir=${datadir}`, `--log-error=${log}`]);
   if (r.code !== 0) {
     const tail = await fs.readFile(log, 'utf-8').catch(() => r.out);
     throw new Error(`mysqld could not create a data directory: ${lastLines(tail)}`);
   }
+}
+
+/// MariaDB's mysqld has no `--initialize`: its install script makes the
+/// directory, beside mysqld in Homebrew and under `scripts/` in a tarball.
+/// Root gets a plain password login, empty, like MySQL's
+/// `--initialize-insecure`, rather than MariaDB's default of the unix socket
+/// for the OS user who ran the script.
+async function initializeMariadb(bin: Mysqld, datadir: string): Promise<void> {
+  const binDir = path.dirname(bin.path);
+  const basedir = path.dirname(binDir);
+  let script: string | null = null;
+  for (const dir of [binDir, path.join(basedir, 'scripts')]) {
+    for (const name of ['mariadb-install-db', 'mysql_install_db']) {
+      const file = path.join(dir, name);
+      if (!script && (await fs.access(file).then(() => true).catch(() => false))) script = file;
+    }
+  }
+  if (!script) throw new Error(`MariaDB's install script (mariadb-install-db) is not beside ${bin.path}.`);
+  await fs.mkdir(datadir, { recursive: true });
+  const r = await run(script, [
+    '--no-defaults',
+    `--basedir=${basedir}`,
+    `--datadir=${datadir}`,
+    '--auth-root-authentication-method=normal',
+    '--skip-test-db',
+    '--skip-name-resolve',
+  ]);
+  if (r.code !== 0) throw new Error(`mariadb-install-db could not create a data directory: ${lastLines(r.out)}`);
 }
 
 function lastLines(text: string, n = 4): string {
@@ -167,8 +207,9 @@ export async function start(id: string, bin: Mysqld, datadir: string, port?: num
       `--socket=${socket}`,
       `--pid-file=${path.join(dir, 'mysqld.pid')}`,
       `--log-error=${log}`,
-      '--mysqlx=OFF',
-      '--disable-log-bin',
+      // MySQL only: MariaDB has no X Plugin and keeps no binlog by default,
+      // and refuses to start on a switch it does not know.
+      ...(flavorOf(bin) === 'mysql' ? ['--mysqlx=OFF', '--disable-log-bin'] : []),
       '--innodb-buffer-pool-size=64M',
     ],
     { stdio: 'ignore', detached: false },

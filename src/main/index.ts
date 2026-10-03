@@ -73,7 +73,8 @@ import {
 } from '../shared/seedSql';
 import { repoLinkOwner } from '../shared/overcliHandoff';
 import { appSchemas, recipeHome, repoLinks, reposFor, reposInOrder, reposNote, suggestSchemas, type RepoLink } from '../shared/repoLinks';
-import { scanRepoSchemas } from './repoScan';
+import { scanRepoSchemas, scanTableMentions } from './repoScan';
+import { planMapParts } from './mapParts';
 import {
   catalogLines,
   emptyMap,
@@ -87,6 +88,7 @@ import {
   type DbMap,
 } from '../shared/dbMap';
 import { gitBehind, gitChanged, gitHead, loadMap, mapPath, saveMap } from './mapper';
+import type { MapRun } from '../shared/dbMap';
 import { mapPrompt } from './mapPrompts';
 import type { BaselineFindValue, BaselineStatsValue, SeedStatsValue } from '../dbhost/protocol';
 import { findLinks, parseRecipe, plansFromRecipe, type BaselineRecipe, type FindRequest } from '../shared/baseline';
@@ -266,6 +268,13 @@ function registerIpc(): void {
     if (isSafeExternalUrl(url)) shell.openExternal(url);
   });
 
+  // Show one of overdb's own logs in Finder. Only files under overdb's own
+  // folder: the renderer cannot point this anywhere else on the disk.
+  ipcMain.handle('app:showLog', (_e, file: string) => {
+    const resolved = path.resolve(file);
+    if (resolved.startsWith(path.join(app.getPath('userData'), path.sep)) && resolved.endsWith('.log')) shell.showItemInFolder(resolved);
+  });
+
   ipcMain.handle('update:quitAndInstall', () => quitAndInstall());
 
   ipcMain.handle('app:pickSqliteFile', async () => {
@@ -297,6 +306,16 @@ function registerIpc(): void {
       properties: ['openDirectory'],
     });
     return res.canceled || res.filePaths.length === 0 ? null : res.filePaths[0];
+  });
+
+  ipcMain.handle('repo:pickMany', async (_e, args: { name: string }) => {
+    const res = await dialog.showOpenDialog({
+      title: `Which repos have the code that uses ${args?.name ?? 'this database'}?`,
+      message: 'Choose one or more — hold ⌘ to pick several.',
+      buttonLabel: 'Link repos',
+      properties: ['openDirectory', 'multiSelections'],
+    });
+    return res.canceled ? [] : res.filePaths;
   });
 
   ipcMain.handle('app:pickFolder', async () => {
@@ -840,9 +859,14 @@ function registerIpc(): void {
     const fps: Record<string, string> = {};
     for (const sc of snap?.schemas ?? []) if (mapped.includes(sc.name)) fps[sc.name] = schemaFingerprint(sc);
     const learned = Object.values(map.tables).reduce((n, t) => n + t.rules.filter((r) => r.learnedAt).length, 0);
+    // Tables the map has nothing on: mostly ones no code names, which a
+    // first map leaves out.
+    const unmapped = (snap?.schemas ?? [])
+      .filter((sc) => mapped.includes(sc.name))
+      .reduce((n, sc) => n + sc.tables.filter((t) => t.kind === 'table' && !map.tables[`${sc.name}.${t.name}`.toLowerCase()]).length, 0);
     return {
       file: where.file,
-      map: { builtAt: map.builtAt, updatedAt: map.updatedAt, tables: Object.keys(map.tables).length, links: map.links.length, learned, schemas: mapped },
+      map: { builtAt: map.builtAt, updatedAt: map.updatedAt, tables: Object.keys(map.tables).length, links: map.links.length, learned, unmapped, schemas: mapped },
       repos: links.length,
       freshness: freshness(map, { repos, schemas: fps }),
     };
@@ -856,7 +880,7 @@ function registerIpc(): void {
     }
   });
 
-  ipcMain.handle('map:build', async (_e, args: { jobId: string; connectionId: string; refresh: boolean }) => {
+  ipcMain.handle('map:build', async (_e, args: { jobId: string; connectionId: string; refresh: boolean; rest?: boolean }) => {
     const say = (repo: string | null, step: { kind: string; text: string }) =>
       mainWindow?.webContents.send('main:event', { kind: 'map:progress', jobId: args.jobId, repo, step });
     let cancelled = false;
@@ -869,18 +893,41 @@ function registerIpc(): void {
       const plan = await mapPlan(args.connectionId);
       if (plan.links.length === 0) return { ok: false as const, error: 'Link the repos whose code uses this database first.' };
       const before = await loadMap(where.file);
-      let map = before && args.refresh ? before : emptyMap(where.owner);
-      const model = Store.load().settings.aiModel.claude || undefined;
+      if (args.rest && !before) return { ok: false as const, error: 'Map the database first.' };
+      let map = before && (args.refresh || args.rest) ? before : emptyMap(where.owner);
+      // The standard tier (Sonnet), unless Settings says otherwise.
+      const model = Store.load().settings.aiMapModel || undefined;
       let dropped = 0;
       const failures: string[] = [];
 
-      // One pass per repo, or several for a big catalog — one answer can
-      // only describe so many tables — three passes at a time.
+      // A scan first, with no AI: which files name each table. Tables no
+      // file names are left out, the rest go in passes that each read one
+      // area of the code from a list of files rather than searching the
+      // repo, and the schema the connection works in goes first so a seed
+      // can use the map before it is finished. See mapParts.ts. A refresh
+      // still reads only what git says changed.
       const PART = 50;
-      type Task = { l: RepoLink; schemas: string[]; snap: SchemaSnapshot; changed: string[] | null; head: string | null; focus?: { tables: string[]; part: number; of: number } };
+      // Five passes at once: each is a claude session reading its own files,
+      // and with three a database spread over many repos spent most of its
+      // time queued.
+      const PASSES = 5;
+      const run: MapRun = { startedAt: new Date().toISOString(), ...(model ? { model } : {}), concurrency: PASSES, scans: [], passes: [] };
+      const current = await currentSchemaOf(args.connectionId);
+      type Focus = { tables: string[]; part: number; of: number; files?: string[]; moreFiles?: number };
+      type Task = { l: RepoLink; schemas: string[]; snap: SchemaSnapshot; changed: string[] | null; head: string | null; first: boolean; focus?: Focus };
       const tasks: Task[] = [];
       const remaining = new Map<string, number>();
+      let leftOut = 0;
+      const mapped = (l: RepoLink, head: string | null, snap: SchemaSnapshot, schemas: string[]) => {
+        const fps = Object.fromEntries(snap.schemas.filter((x) => schemas.includes(x.name)).map((x) => [x.name, schemaFingerprint(x)]));
+        map = {
+          ...map,
+          repos: [...map.repos.filter((r) => r.path !== l.path), { path: l.path, head, mappedAt: new Date().toISOString(), schemas }],
+          schemas: { ...map.schemas, ...fps },
+        };
+      };
       for (const l of plan.links) {
+        if (cancelled) break;
         const schemas = plan.schemasOf(l);
         if (schemas.length === 0) continue;
         const head = await gitHead(l.path);
@@ -897,16 +944,70 @@ function registerIpc(): void {
         const names = snap.schemas
           .filter((x) => schemas.includes(x.name))
           .flatMap((x) => x.tables.filter((t) => t.kind === 'table').map((t) => `${x.name}.${t.name}`));
-        // A refresh reads only what changed, whatever the catalog's size.
-        const parts = changed || names.length <= PART ? [null] : Array.from({ length: Math.ceil(names.length / PART) }, (_, i) => names.slice(i * PART, (i + 1) * PART));
-        parts.forEach((p, i) => tasks.push({ l, schemas, snap, changed, head, focus: p ? { tables: p, part: i + 1, of: parts.length } : undefined }));
-        remaining.set(l.path, parts.length);
+        let parts: Array<Omit<Focus, 'part' | 'of'> & { first: boolean }> | null;
+        if (changed) {
+          parts = null;
+        } else if (args.rest) {
+          // What the scan left out, asked about anyway: no file list to
+          // narrow the search, so these read the repo as passes used to.
+          const left = names.filter((n) => !map.tables[n.toLowerCase()]);
+          parts = Array.from({ length: Math.ceil(left.length / PART) }, (_, i) => ({ tables: left.slice(i * PART, (i + 1) * PART), first: false }));
+        } else {
+          say(l.path, { kind: 'note', text: `Finding which files name each of ${names.length} tables` });
+          const t0 = Date.now();
+          const planned = planMapParts({ tables: names, mentions: await scanTableMentions(l.path, names), first: current ? [current] : [] });
+          leftOut += planned.leftOut.length;
+          parts = planned.parts;
+          run.scans.push({ repo: path.basename(l.path), named: names.length - planned.leftOut.length, total: names.length, parts: parts.length, ms: Date.now() - t0 });
+          say(l.path, {
+            kind: 'note',
+            text: `${names.length - planned.leftOut.length} of ${names.length} tables are named in the code · ${parts.length} part${parts.length === 1 ? '' : 's'} · ${Math.max(1, Math.round((Date.now() - t0) / 1000))} s`,
+          });
+        }
+        if (parts?.length === 0) {
+          if (!args.rest) mapped(l, head, snap, schemas);
+          continue;
+        }
+        const of = parts?.length ?? 1;
+        if (parts) parts.forEach((p, i) => tasks.push({ l, schemas, snap, changed, head, first: p.first, focus: { ...p, part: i + 1, of } }));
+        else tasks.push({ l, schemas, snap, changed, head, first: false });
+        remaining.set(l.path, of);
       }
+      // The first schema's passes from every repo before anything else.
+      tasks.sort((a, b) => Number(b.first) - Number(a.first));
+      let firstLeft = tasks.filter((t) => t.first).length;
+      const later = tasks.length - firstLeft;
+      // How far along, for the pane's counter: `done/total`, as its own kind
+      // of step so it is never shown as a line of the log.
+      const total = tasks.length;
+      let finished = 0;
+      const count = () => say(null, { kind: 'parts', text: `${finished}/${total}` });
+      count();
 
       const one = async (t: Task) => {
         if (cancelled) return;
+        try {
+          await pass(t);
+        } finally {
+          finished += 1;
+          if (!cancelled) count();
+        }
+      };
+      const pass = async (t: Task) => {
+        if (cancelled) return;
+        const began = Date.now();
+        const timed = (ok: boolean) =>
+          run.passes.push({
+            repo: path.basename(t.l.path),
+            part: t.focus?.part ?? 1,
+            of: t.focus?.of ?? 1,
+            tables: t.focus?.tables.length ?? 0,
+            files: t.focus?.files?.length ?? 0,
+            ms: Date.now() - began,
+            ok,
+          });
         const { l, schemas, snap, changed, head, focus } = t;
-        const label = focus ? ` · part ${focus.part} of ${focus.of}` : '';
+        const label = focus && focus.of > 1 ? ` · part ${focus.part} of ${focus.of}` : '';
         say(l.path, { kind: 'note', text: `${changed ? `Refreshing from ${changed.length} changed files` : 'Mapping'} · ${schemas.join(', ')}${label}` });
         const job = runInvestigation(mapPrompt({ repo: l.path, schemas, catalog: catalogLines(snap, schemas), changed, focus }), {
           cwd: l.path,
@@ -918,47 +1019,53 @@ function registerIpc(): void {
         const result = await job.result;
         if (cancelled) return;
         if (!result.ok) {
+          timed(false);
           failures.push(`${path.basename(l.path)}${label}: ${result.error ?? 'claude did not answer'}`);
           say(l.path, { kind: 'note', text: `Stopped${label}: ${result.error ?? 'no answer'}` });
           return;
         }
         const part = parseMapAnswer(result.output, snap, l.path);
         if ('error' in part) {
+          timed(false);
           failures.push(`${path.basename(l.path)}${label}: ${part.error}`);
           return;
         }
+        timed(true);
         dropped += part.dropped;
         map = mergeInto(map, part);
         // A repo counts as mapped at its commit once its last part is in.
         const left = (remaining.get(l.path) ?? 1) - 1;
         remaining.set(l.path, left);
-        if (left === 0) {
-          const fps = Object.fromEntries(snap.schemas.filter((x) => schemas.includes(x.name)).map((x) => [x.name, schemaFingerprint(x)]));
-          map = {
-            ...map,
-            repos: [...map.repos.filter((r) => r.path !== l.path), { path: l.path, head, mappedAt: new Date().toISOString(), schemas }],
-            schemas: { ...map.schemas, ...fps },
-          };
-        }
+        if (left === 0 && !args.rest) mapped(l, head, snap, schemas);
         // Saved after every pass, so a long map that is stopped keeps what
         // it has.
+        map = { ...map, lastRun: run };
         await saveMap(where.file, map);
         say(l.path, { kind: 'note', text: `Kept ${Object.keys(part.tables).length} tables and ${part.links.length} links${label}` });
+        if (t.first && --firstLeft === 0 && later > 0) {
+          say(null, { kind: 'note', text: `Ready to seed in ${current} — the rest keeps mapping` });
+        }
       };
       await Promise.all(
-        Array.from({ length: Math.min(3, tasks.length) }, async () => {
+        Array.from({ length: Math.min(PASSES, tasks.length) }, async () => {
           while (tasks.length && !cancelled) await one(tasks.shift()!);
         }),
       );
       if (cancelled) return { ok: false as const, error: 'Stopped. What was mapped so far is kept.' };
       if (Object.keys(map.tables).length === 0) return { ok: false as const, error: failures[0] ?? 'Nothing in the code described these tables.' };
+      map = { ...map, lastRun: { ...run, finishedAt: new Date().toISOString() } };
       await saveMap(where.file, map);
-      return { ok: true as const, tables: Object.keys(map.tables).length, links: map.links.length, dropped, failures };
+      return { ok: true as const, tables: Object.keys(map.tables).length, links: map.links.length, dropped, leftOut, failures };
     } catch (err) {
       return { ok: false as const, error: err instanceof Error ? err.message : String(err) };
     } finally {
       mapJobs.delete(args.jobId);
     }
+  });
+
+  ipcMain.handle('map:read', async (_e, connectionId: string) => {
+    const where = await mapFileFor(connectionId).catch(() => null);
+    return where ? loadMap(where.file) : null;
   });
 
   ipcMain.handle('map:cancel', (_e, jobId: string) => {
@@ -1300,7 +1407,8 @@ function registerIpc(): void {
       return { ok: true as const, baseline };
     } catch (err) {
       console.error('baseline:build failed', err);
-      return { ok: false as const, error: err instanceof Error ? err.message : String(err) };
+      const log = (err as { log?: string })?.log;
+      return { ok: false as const, error: err instanceof Error ? err.message : String(err), ...(log ? { log } : {}) };
     } finally {
       builds.delete(args.jobId);
     }

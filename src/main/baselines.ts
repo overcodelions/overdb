@@ -113,7 +113,7 @@ function runBuilder(req: BuilderRequest, onProgress: (p: BuildProgress) => void,
         resolve(msg.report);
       } else {
         settled = true;
-        reject(new Error(msg.error));
+        reject(Object.assign(new Error(msg.error), msg.sql ? { sql: msg.sql } : {}));
       }
     });
     proc.on('exit', () => {
@@ -146,9 +146,19 @@ export async function buildBaseline(args: BuildArgs): Promise<BaselineRecord> {
   const id = randomUUID();
   const dir = path.join(root(), 'baselines', id);
   const datadir = path.join(dir, 'data');
-  const say = args.onProgress;
+  const log = await openBuildLog();
+  log.write(`Base for ${args.source.name}, from ${args.serverVersion}`);
+  log.write(`mysqld ${bin.path} (${instances.flavorOf(bin)} ${bin.version})`);
+  const kinds = args.plan.tables.reduce<Record<string, number>>((m, t) => ({ ...m, [t.rows.kind]: (m[t.rows.kind] ?? 0) + 1 }), {});
+  log.write(
+    `Plan: ${args.plan.schemas.length} schemas, ${args.plan.tables.length} tables (${Object.entries(kinds).map(([k, n]) => `${n} ${k}`).join(', ')}), ${args.plan.fills.length} keys to complete`,
+  );
+  const say = (p: BuildProgress) => {
+    log.write(`${p.stage.padEnd(8)} ${p.text}`);
+    args.onProgress(p);
+  };
   try {
-    say({ stage: 'start', text: `Creating an empty MySQL ${bin.version} instance` });
+    say({ stage: 'start', text: `Creating an empty ${instances.flavorOf(bin) === 'mariadb' ? 'MariaDB' : 'MySQL'} ${bin.version} instance` });
     await instances.initialize(bin, datadir);
     if (args.signal.cancelled) throw new Error('Stopped.');
     const inst = await instances.start(id, bin, datadir);
@@ -185,6 +195,9 @@ export async function buildBaseline(args: BuildArgs): Promise<BaselineRecord> {
       bytes: await instances.dirBytes(datadir),
       report,
     };
+    log.write(`Built: ${report.tables} tables, ${report.rows} rows, ${report.filled} parent rows filled, in ${Math.round(report.durationMs / 1000)} s`);
+    for (const x of report.skipped) log.write(`skipped  ${x.what}: ${x.reason}`);
+    await log.close();
     const old = await updateRecords(root(), (r) => {
       const was = r.baselines.filter((b) => b.sourceConnectionId === args.source.id);
       r.baselines = [...r.baselines.filter((b) => b.sourceConnectionId !== args.source.id), record];
@@ -194,9 +207,40 @@ export async function buildBaseline(args: BuildArgs): Promise<BaselineRecord> {
     return record;
   } catch (err) {
     await instances.stop(id).catch(() => undefined);
+    log.write(`FAILED   ${err instanceof Error ? err.message : String(err)}`);
+    const sql = (err as { sql?: string })?.sql;
+    if (sql) log.write(`statement:\n${sql}`);
+    // The server's own account of it, before its directory goes.
+    for (const name of ['initialize.log', 'mysqld.log']) {
+      const tail = await fs.readFile(path.join(dir, name), 'utf-8').catch(() => '');
+      if (tail.trim()) log.write(`${name}, last lines:\n${tail.trim().split('\n').slice(-25).join('\n')}`);
+    }
+    await log.close();
     await fs.rm(dir, { recursive: true, force: true }).catch(() => undefined);
-    throw err;
+    throw Object.assign(err instanceof Error ? err : new Error(String(err)), { log: log.path });
   }
+}
+
+/// Where build logs are kept: the last few, beside the instances, kept
+/// whether the build worked or not — a failed build removes its own
+/// directory, and without this nothing would say what it was doing.
+const KEEP_LOGS = 20;
+
+async function openBuildLog(): Promise<{ path: string; write(line: string): void; close(): Promise<void> }> {
+  const dir = path.join(root(), 'logs');
+  await fs.mkdir(dir, { recursive: true });
+  const old = (await fs.readdir(dir).catch(() => [] as string[])).filter((n) => n.startsWith('build-')).sort();
+  for (const n of old.slice(0, Math.max(0, old.length - (KEEP_LOGS - 1)))) await fs.rm(path.join(dir, n), { force: true });
+  const file = path.join(dir, `build-${new Date().toISOString().replace(/[:.]/g, '-')}.log`);
+  let chain = fs.writeFile(file, '');
+  return {
+    path: file,
+    write(line) {
+      const at = new Date().toISOString().slice(11, 19);
+      chain = chain.then(() => fs.appendFile(file, `${at}  ${line}\n`)).catch(() => undefined);
+    },
+    close: () => chain,
+  };
 }
 
 /// Give a baseline a name of your choosing; a rebuild keeps it.

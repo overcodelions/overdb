@@ -5,11 +5,14 @@ import type { SeedStep } from '@shared/types';
 import { parseCodeReading, type CodeReading, type LinkVerdict, type TableSuggestion } from '@shared/baselineCode';
 import { repoLinkOwner } from '@shared/overcliHandoff';
 import { recipeHome, repoLinks } from '@shared/repoLinks';
+import { linksFromMap } from '@shared/mapLinks';
+import type { DbMap } from '@shared/dbMap';
 import { useStore } from './store';
 import type { BaselineRecord } from '@shared/instances';
 import {
   buildRecipe,
   findLinks,
+  withExtraLinks,
   linkKey,
   loginTables,
   nameColumns,
@@ -89,6 +92,10 @@ interface BaselineState {
   snapshot: SchemaSnapshot | null;
   stats: TableStat[];
   links: Link[];
+  /// The database map, when there is one: its links settle guesses before
+  /// anyone is asked (see src/shared/mapLinks.ts).
+  map: DbMap | null;
+  fromMap: { confirmed: number; corrected: number; added: number } | null;
   candidates: TenantCandidate[];
   repo: string | null;
   recipePath: string | null;
@@ -145,6 +152,8 @@ interface BaselineState {
   buildStartedAt: number | null;
   buildLog: BuildProgress[];
   buildError: string | null;
+  /// The failed build's log file.
+  buildLogFile: string | null;
   built: BaselineRecord | null;
 
   open(connectionId: string): Promise<void>;
@@ -190,6 +199,8 @@ interface BaselineState {
   applyLink(v: LinkVerdict): void;
   applyTable(t: TableSuggestion): void;
   applyAll(): void;
+  /// The map was built or refreshed: read it again and settle the links.
+  mapChanged(): Promise<void>;
 }
 
 const INITIAL = {
@@ -198,6 +209,8 @@ const INITIAL = {
   error: null,
   step: 'start' as BaselineStep,
   snapshot: null,
+  map: null as DbMap | null,
+  fromMap: null as BaselineState['fromMap'],
   stats: [],
   links: [],
   candidates: [],
@@ -238,6 +251,7 @@ const INITIAL = {
   buildStartedAt: null,
   buildLog: [] as BuildProgress[],
   buildError: null,
+  buildLogFile: null,
   built: null,
 };
 
@@ -279,14 +293,22 @@ async function labelOf(connectionId: string, snapshot: SchemaSnapshot, ref: Tabl
   return (res.ok && res.rows[0] ? res.rows[0].map(text).filter(Boolean).join(' · ') : '') || key;
 }
 
+/// Links with the map's applied, and how many it settled.
+function settle(map: DbMap | null, snapshot: SchemaSnapshot, links: Link[]): { links: Link[]; counts: BaselineState['fromMap'] } {
+  if (!map) return { links, counts: null };
+  const r = linksFromMap(map, snapshot, links);
+  return { links: r.links, counts: { confirmed: r.confirmed, corrected: r.corrected, added: r.added } };
+}
+
 export const useBaseline = create<BaselineState>((set, get) => ({
   ...INITIAL,
 
   async open(connectionId) {
     set({ ...INITIAL, connectionId, loading: true, logins: [] });
-    const [res, tools] = await Promise.all([
+    const [res, tools, map] = await Promise.all([
       window.overdb.invoke('baseline:discover', connectionId),
       window.overdb.invoke('ai:detect'),
+      window.overdb.invoke('map:read', connectionId).catch(() => null),
     ]);
     if (get().connectionId !== connectionId) return;
     set({ claude: tools.claude });
@@ -294,7 +316,11 @@ export const useBaseline = create<BaselineState>((set, get) => ({
       set({ loading: false, error: res.error });
       return;
     }
-    const links = [...findLinks(res.snapshot), ...(res.recipe?.extraLinks ?? [])];
+    // The map's links first, so the tenant and its levels are found with
+    // what the code says, not only what the names suggest.
+    const found = withExtraLinks(findLinks(res.snapshot), res.recipe?.extraLinks ?? []);
+    const settled = map ? linksFromMap(map, res.snapshot, found) : null;
+    const links = settled?.links ?? found;
     const candidates = tenantCandidates(res.snapshot, links);
     const top = candidates[0];
     const previous = res.recipe;
@@ -311,6 +337,8 @@ export const useBaseline = create<BaselineState>((set, get) => ({
       snapshot: res.snapshot,
       stats: res.stats,
       links,
+      map,
+      fromMap: settled && { confirmed: settled.confirmed, corrected: settled.corrected, added: settled.added },
       candidates,
       repo: res.repo,
       recipePath: res.recipePath,
@@ -321,7 +349,7 @@ export const useBaseline = create<BaselineState>((set, get) => ({
       schemasOn: previous?.schemas.filter((x) => res.snapshot.schemas.some((y) => y.name === x)) ?? res.snapshot.schemas.map((x) => x.name),
       schemaFamily: schemaPerTenant(res.snapshot),
       // What the last recipe read from the data, until it is read again.
-      polyLinks: previous?.extraLinks ?? [],
+      polyLinks: (previous?.extraLinks ?? []).filter((l) => l.source === 'poly'),
       levels: tenant ? tenancyLevels(res.snapshot, links, tenant) : [],
       narrowing: Object.fromEntries(
         (previous?.starts ?? [])
@@ -390,8 +418,17 @@ export const useBaseline = create<BaselineState>((set, get) => ({
     set({
       polyLinks: found,
       polyProgress: null,
-      links: [...findLinks(snapshot), ...found],
+      links: settle(get().map, snapshot, [...findLinks(snapshot), ...found]).links,
     });
+  },
+
+  async mapChanged() {
+    const { connectionId, snapshot, polyLinks } = get();
+    if (!connectionId || !snapshot) return;
+    const map = await window.overdb.invoke('map:read', connectionId).catch(() => null);
+    if (get().connectionId !== connectionId) return;
+    const r = settle(map, snapshot, [...findLinks(snapshot), ...polyLinks]);
+    set({ map, links: r.links, fromMap: r.counts });
   },
 
   close() {
@@ -697,7 +734,9 @@ export const useBaseline = create<BaselineState>((set, get) => ({
       linksOff: s.linksOff,
       plans: plansFor(s),
       overrides: s.overrides,
-      extraLinks: s.polyLinks,
+      // What the data and the code said, so the build follows the links
+      // that were reviewed rather than the column-name guesses alone.
+      extraLinks: [...s.polyLinks, ...s.links.filter((l) => l.cited && l.source !== 'poly')],
     });
     const res = await window.overdb.invoke('baseline:save', { connectionId: s.connectionId, recipe });
     set(res.ok ? { saving: false, savedPath: res.path, previous: recipe } : { saving: false, saveError: res.error });
@@ -708,10 +747,10 @@ export const useBaseline = create<BaselineState>((set, get) => ({
     const { connectionId, savedPath } = get();
     if (!connectionId || !savedPath) return;
     const jobId = crypto.randomUUID();
-    set({ step: 'build', buildJob: jobId, buildStartedAt: Date.now(), buildLog: [], buildError: null, built: null });
+    set({ step: 'build', buildJob: jobId, buildStartedAt: Date.now(), buildLog: [], buildError: null, buildLogFile: null, built: null });
     const res = await window.overdb.invoke('baseline:build', { jobId, connectionId });
     if (get().buildJob !== jobId) return;
-    set(res.ok ? { buildJob: null, built: res.baseline } : { buildJob: null, buildError: res.error });
+    set(res.ok ? { buildJob: null, built: res.baseline } : { buildJob: null, buildError: res.error, buildLogFile: res.log ?? null });
   },
 
   stopBuild() {

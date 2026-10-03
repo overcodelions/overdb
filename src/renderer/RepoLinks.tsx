@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { repoLinkOwner } from '@shared/overcliHandoff';
 import { appSchemas, repoLinks, type RepoLink } from '@shared/repoLinks';
 import { useStore } from './store';
+import { MAP_TAB, openPane } from './queryStore';
 
 // The repos whose code uses a database, and which schemas each one's code
 // uses. Kept on the env set (or the connection, when it is in no set), so
@@ -16,22 +17,38 @@ function baseName(p: string): string {
   return p.split('/').filter(Boolean).pop() ?? p;
 }
 
-/// Pick a folder, link it, and ask the repo which schemas it uses. Returns
-/// the path linked, or null if none was picked.
-export async function addRepo(connectionId: string): Promise<string | null> {
+/// Pick one or more folders, link them, and ask each repo which schemas it
+/// uses. Returns the paths linked, empty if none were picked.
+export async function addRepos(connectionId: string): Promise<string[]> {
   const st = useStore.getState();
   const owner = repoLinkOwner(connectionId, st.connections, st.envSets);
-  if (!owner) return null;
-  const picked = await window.overdb.invoke('overcli:pickRepo', { name: owner.name });
-  if (!picked) return null;
-  await st.editRepoLinks(owner, (cur) => ({ ...cur, repoPaths: cur.repoPaths.includes(picked) ? cur.repoPaths : [...cur.repoPaths, picked] }));
+  if (!owner) return [];
+  const picked = await window.overdb.invoke('repo:pickMany', { name: owner.name });
+  if (picked.length === 0) return [];
+  await st.editRepoLinks(owner, (cur) => ({ ...cur, repoPaths: [...cur.repoPaths, ...picked.filter((p) => !cur.repoPaths.includes(p))] }));
   const probe = st.connections.find((c) => c.id === connectionId)?.branchOf ?? connectionId;
-  const res = await window.overdb.invoke('repo:suggestSchemas', { connectionId: probe, path: picked });
-  if (res.ok && res.suggested.length) {
-    await useStore.getState().editRepoLinks(owner, (cur) => ({ ...cur, repoSchemas: { ...cur.repoSchemas, [picked]: res.suggested } }));
-    st.toast(`Linked ${baseName(picked)} — its code looks like it uses ${res.suggested.join(', ')}. Change it below if not.`);
+  const found = await Promise.all(
+    picked.map(async (p) => {
+      const res = await window.overdb.invoke('repo:suggestSchemas', { connectionId: probe, path: p });
+      return { path: p, suggested: res.ok ? res.suggested : [] };
+    }),
+  );
+  const known = found.filter((f) => f.suggested.length);
+  if (known.length) {
+    await useStore.getState().editRepoLinks(owner, (cur) => ({
+      ...cur,
+      repoSchemas: { ...cur.repoSchemas, ...Object.fromEntries(known.map((f) => [f.path, f.suggested])) },
+    }));
+  }
+  if (picked.length === 1) {
+    st.toast(
+      known.length
+        ? `Linked ${baseName(picked[0])} — its code looks like it uses ${known[0].suggested.join(', ')}. Change it below if not.`
+        : `Linked ${baseName(picked[0])}. Choose which schemas its code uses.`,
+    );
   } else {
-    st.toast(`Linked ${baseName(picked)}. Choose which schemas its code uses.`);
+    const unsure = found.filter((f) => !f.suggested.length).map((f) => baseName(f.path));
+    st.toast(`Linked ${picked.length} repos.${unsure.length ? ` Choose which schemas ${unsure.join(', ')} use${unsure.length === 1 ? 's' : ''}.` : ' Check the schemas suggested for each below.'}`);
   }
   return picked;
 }
@@ -39,11 +56,14 @@ export async function addRepo(connectionId: string): Promise<string | null> {
 export function RepoLinksPanel({
   connectionId,
   showRecipe = false,
+  grid = false,
   onChange,
 }: {
   connectionId: string;
   /// Show which repo a base recipe is saved in.
   showRecipe?: boolean;
+  /// Cards across the width, for a pane with room; a single column otherwise.
+  grid?: boolean;
   onChange?(): void;
 }): JSX.Element | null {
   const connections = useStore((s) => s.connections);
@@ -90,13 +110,14 @@ export function RepoLinksPanel({
   };
   const add = async () => {
     setBusy('new');
-    const picked = await addRepo(connectionId);
+    const picked = await addRepos(connectionId);
     setBusy(null);
-    if (picked) onChange?.();
+    if (picked.length) onChange?.();
   };
 
   return (
     <div className="flex flex-col gap-1.5 text-[12px]">
+      <div className={grid ? 'grid gap-2 [grid-template-columns:repeat(auto-fill,minmax(300px,1fr))]' : 'flex flex-col gap-1.5'}>
       {links.map((l: RepoLink) => {
         const free = all.filter((s) => !l.schemas?.includes(s));
         return (
@@ -149,12 +170,33 @@ export function RepoLinksPanel({
           </div>
         );
       })}
+      </div>
       <button
         onClick={() => void add()}
         disabled={busy === 'new'}
         className="self-start h-[26px] px-2.5 rounded-md border border-card text-[11px] hover:bg-wash-strong disabled:opacity-50"
       >
-        {busy === 'new' ? 'Linking…' : links.length ? 'Add another repo…' : 'Link a repo…'}
+        {busy === 'new' ? 'Linking…' : links.length ? 'Add repos…' : 'Link repos…'}
+      </button>
+    </div>
+  );
+}
+
+/// The linked repos in one line, for a sheet that reads them: which ones,
+/// and the way to the Map pane, where they are changed.
+export function RepoNames({ connectionId }: { connectionId: string }): JSX.Element | null {
+  const connections = useStore((s) => s.connections);
+  const envSets = useStore((s) => s.envSets);
+  const owner = repoLinkOwner(connectionId, connections, envSets);
+  if (!owner) return null;
+  const links = repoLinks(owner, connections, envSets);
+  return (
+    <div className="flex items-center gap-2 min-w-0 text-[12px]">
+      <span className="flex-1 min-w-0 truncate" title={links.map((l) => tildify(l.path)).join('\n')}>
+        {links.map((l) => `${baseName(l.path)}${l.schemas?.length ? ` (${l.schemas.join(', ')})` : ''}`).join(', ') || 'None linked'}
+      </span>
+      <button className="shrink-0 text-[11px] text-accent hover:underline" onClick={() => openPane(connectionId, MAP_TAB)}>
+        Change in Map
       </button>
     </div>
   );

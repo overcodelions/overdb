@@ -71,6 +71,7 @@ import { ResultGrid } from './ResultGrid';
 import { ChartView } from './ChartView';
 import { RailSlot } from './BottomRail';
 import { ErdView } from './ErdView';
+import { MapPane } from './MapPane';
 import { HealthPane } from './HealthPane';
 import { HistoryPane } from './HistoryPane';
 import { buildUpdate, editTarget, previewUpdate, type KeyedTable } from '@shared/rowEdit';
@@ -82,6 +83,7 @@ import {
   HEALTH_TAB,
   HISTORY_TAB,
   LOG_TAB,
+  MAP_TAB,
   SLOW_TAB,
   useQuery,
   type ResultTab,
@@ -497,13 +499,12 @@ export function QueryPane(): JSX.Element {
 
   /// Whether a standing pane has the whole main column.
   ///
-  /// Only health and slow queries: they are the two that were redesigned
-  /// to use the room, and each renders its own control to give it back.
-  /// The diagram, history and log keep the docked layout, which is what
-  /// they were drawn for — an expanded pane with no way out is worse than
-  /// a cramped one.
+  /// Only health, slow queries and the map: the ones designed to use the
+  /// room, and each renders its own control to give it back. The diagram,
+  /// history and log keep the docked layout, which is what they were drawn
+  /// for — an expanded pane with no way out is worse than a cramped one.
   const paneFull =
-    panesFull && (active === HEALTH_TAB || active === SLOW_TAB);
+    panesFull && (active === HEALTH_TAB || active === SLOW_TAB || active === MAP_TAB);
   const toggleFull = () => saveSettings({ panesFull: !panesFull });
   /// Back to the answer you last ran, which is tab 0 when there is one.
   const closePane = () => setActive(tabs.length > 0 ? 0 : LOG_TAB);
@@ -1737,6 +1738,7 @@ export function QueryPane(): JSX.Element {
         ) : active === ERD_TAB ? (
           <ErdView
             snapshot={schema}
+            connectionId={conn.id}
             connectionName={conn.name}
             onPickTable={(sc, table) =>
               // Double-clicking a table in the diagram is "show me this" —
@@ -1746,6 +1748,19 @@ export function QueryPane(): JSX.Element {
                 text: ensureTerminated(
                   formatSql(`select * from ${sc}.${table} limit 100`, formatStyle),
                 ),
+                nonce: p.nonce + 1,
+              }))
+            }
+          />
+        ) : active === MAP_TAB ? (
+          <MapPane
+            connectionId={conn.id}
+            full={paneFull}
+            onToggleFull={toggleFull}
+            onClose={closePane}
+            onPickTable={(sc, table) =>
+              setInject((p) => ({
+                text: ensureTerminated(formatSql(`select * from ${sc}.${table} limit 100`, formatStyle)),
                 nonce: p.nonce + 1,
               }))
             }
@@ -2036,6 +2051,13 @@ export function QueryPane(): JSX.Element {
             title="The foreign-key graph, drawn from the constraints this server holds"
           >
             Diagram
+          </RailPane>
+          <RailPane
+            on={active === MAP_TAB}
+            onClick={() => setActive(MAP_TAB)}
+            title="What the code says about each table, read once from the linked repos — and the repos themselves"
+          >
+            Map
           </RailPane>
           <RailPane
             on={active === SLOW_TAB}

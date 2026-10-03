@@ -72,6 +72,20 @@ export interface DbMap {
   /// By `schema.table`, lower case.
   tables: Record<string, MapTable>;
   links: MapLink[];
+  /// How the last build or refresh went, for judging its speed: what each
+  /// repo's scan found and how long each pass took. Replaced by every run.
+  lastRun?: MapRun;
+}
+
+export interface MapRun {
+  startedAt: string;
+  /// Absent while it runs, and when it was stopped.
+  finishedAt?: string;
+  model?: string;
+  /// Passes run at once.
+  concurrency: number;
+  scans: Array<{ repo: string; named: number; total: number; parts: number; ms: number }>;
+  passes: Array<{ repo: string; part: number; of: number; tables: number; files: number; ms: number; ok: boolean }>;
 }
 
 // ---- the catalog ---------------------------------------------------------

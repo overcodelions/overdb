@@ -58,8 +58,10 @@ const ENV_ON: Record<EnvKind, string> = {
 /// The sidebar is two questions: which environment you are in, then which
 /// database. The switch at the top answers the first — you work in one at a
 /// time, and a team with five connections per environment cannot see them
-/// all at once anyway. Environment sets (one database, in each place) are
-/// the groups below it; branches nest under the connection they came from.
+/// all at once anyway. Every connection is listed under its environment,
+/// whether or not a set holds it; environment sets (one database, in each
+/// place) are how you compare, so they sit in a dock below the list.
+/// Branches nest under the connection they came from.
 export function Sidebar(): JSX.Element {
   const allConnections = useStore((s) => s.connections);
   const ticketState = useTickets();
@@ -138,20 +140,18 @@ export function Sidebar(): JSX.Element {
   const matchIds = new Set(matches.map((c) => c.id));
   const byPin = (a: { pinned?: boolean }, b: { pinned?: boolean }) => Number(!!b.pinned) - Number(!!a.pinned);
 
+  // Sets are how you compare, not where a connection lives: every
+  // connection is listed under its environment, and the sets sit in a dock
+  // below, one row each. A search keeps a set whose name or members match.
   const sets = active
-    .map((e) => {
-      const nameHit = !!q && e.name.toLowerCase().includes(q);
-      const members = e.memberIds
-        .map((id) => connections.find((c) => c.id === id))
-        .filter((c): c is Connection => !!c && (nameHit ? inScope(c) : matchIds.has(c.id)))
-        .sort((a, b) => byPin(a, b) || ENV_ORDER.indexOf(a.env) - ENV_ORDER.indexOf(b.env));
-      return { set: e, members };
+    .filter((e) => {
+      if (starred && !e.pinned) return false;
+      if (!q) return true;
+      return e.name.toLowerCase().includes(q) || e.memberIds.some((id) => matchIds.has(id));
     })
-    .filter((g) => g.members.length > 0 || (!q && !starred && current === 'all' && g.set.memberIds.length === 0))
-    .sort((a, b) => byPin(a.set, b.set));
-  const inSet = new Set(active.flatMap((e) => e.memberIds));
+    .sort(byPin);
   const inGroup = new Set(groups.flatMap((g) => g.connectionIds));
-  const loose = matches.filter((c) => !inSet.has(c.id) && !inGroup.has(c.id)).sort(byPin);
+  const loose = matches.filter((c) => !inGroup.has(c.id)).sort(byPin);
   const looseByEnv = ENV_ORDER.map((e) => ({ env: e, items: loose.filter((c) => c.env === e) })).filter((b) => b.items.length > 0);
   // Branches whose connection was deleted still need a home.
   const orphans = ticketState.tickets.some((t) => !connections.some((c) => c.id === t.sourceConnectionId));
@@ -160,9 +160,6 @@ export function Sidebar(): JSX.Element {
   // A filter that hides its results inside a folded section is broken, so
   // searching overrides the fold rather than fighting it.
   const isFolded = (key: string) => !q && Boolean(collapsed[key]);
-  // Env tags on rows only where the tab is not already saying it.
-  const envShown = current === 'all' || !!q;
-
   const withBranches = (c: Connection, opts: { showEnv: boolean }) => (
     <div key={c.id}>
       <ConnectionRow connection={c} showEnv={opts.showEnv} />
@@ -176,7 +173,7 @@ export function Sidebar(): JSX.Element {
   );
 
   const nothingMatched = (q.length > 0 || starred) && matches.length === 0 && sets.length === 0;
-  const nothingHere = !q && !starred && connections.length > 0 && matches.length === 0 && sets.length === 0;
+  const nothingHere = !q && !starred && connections.length > 0 && matches.length === 0;
 
   return (
     <div className="h-full flex flex-col bg-surface-muted border-r border-card">
@@ -266,26 +263,8 @@ export function Sidebar(): JSX.Element {
           </div>
         )}
 
-        {sets.map(({ set, members }) => (
-          <SetGroup
-            key={set.id}
-            envSet={set}
-            here={members.length}
-            env={q ? 'search' : current}
-            folded={isFolded(`set:${set.id}`)}
-            onToggle={() => toggle(`set:${set.id}`)}
-            selected={selection?.kind === 'envSet' && selection.id === set.id}
-          >
-            {members.length === 0 ? (
-              <Empty>No connections yet — edit the set to add some.</Empty>
-            ) : (
-              members.map((c) => withBranches(c, { showEnv: envShown }))
-            )}
-          </SetGroup>
-        ))}
-
         {groups.map((g) => {
-          const items = connections.filter((c) => g.connectionIds.includes(c.id) && matchIds.has(c.id) && !inSet.has(c.id));
+          const items = connections.filter((c) => g.connectionIds.includes(c.id) && matchIds.has(c.id));
           if (items.length === 0) return null;
           return (
             <Section
@@ -295,7 +274,7 @@ export function Sidebar(): JSX.Element {
               collapsed={isFolded(`group:${g.id}`)}
               onToggle={() => toggle(`group:${g.id}`)}
             >
-              {items.map((c) => withBranches(c, { showEnv: envShown }))}
+              {items.map((c) => withBranches(c, { showEnv: true }))}
             </Section>
           );
         })}
@@ -304,11 +283,12 @@ export function Sidebar(): JSX.Element {
           <Section label="Connections">
             <Empty>No connections yet. Add one below, or import from a tool you already use.</Empty>
           </Section>
-        ) : current === 'all' && !q && looseByEnv.length > 1 ? (
+        ) : (
           looseByEnv.map(({ env: e, items }) => (
             <Section
               key={e}
-              label={sets.length ? `${ENV_NAME[e]} · not in a set` : ENV_NAME[e]}
+              label={ENV_NAME[e]}
+              lead={<span aria-hidden="true" className={`w-1.5 h-1.5 rounded-full ${ENV_DOT[e]}`} />}
               count={items.length}
               collapsed={isFolded(`env:${e}`)}
               onToggle={() => toggle(`env:${e}`)}
@@ -316,79 +296,120 @@ export function Sidebar(): JSX.Element {
               {items.map((c) => withBranches(c, { showEnv: false }))}
             </Section>
           ))
-        ) : loose.length > 0 ? (
-          <Section
-            label={sets.length ? 'Not in a set' : 'Connections'}
-            count={loose.length}
-            collapsed={isFolded(`loose:${current}`)}
-            onToggle={() => toggle(`loose:${current}`)}
-            action={sets.length ? undefined : { title: 'New environment set', onClick: () => setSheet({ kind: 'newEnvSet' }) }}
-          >
-            {loose.map((c) => withBranches(c, { showEnv: envShown }))}
-          </Section>
-        ) : null}
-
-        {!q && !starred && sets.length === 0 && connections.length > 1 && (
-          <Empty>
-            <button className="text-accent hover:underline" onClick={() => setSheet({ kind: 'newEnvSet' })}>Make an environment set</button>{' '}
-            to group the same database across local, staging and prod.
-          </Empty>
         )}
       </div>
+
+      {connections.length > 1 && (sets.length > 0 || (!q && !starred)) && (
+        <SetDock
+          sets={sets}
+          env={q ? 'all' : current}
+          folded={Boolean(collapsed['dock:sets'])}
+          onToggle={() => toggle('dock:sets')}
+        />
+      )}
     </div>
   );
 }
 
-/// An environment set as a group: its name, how many of its connections
-/// this tab shows, and Compare — which opens the set itself, across every
-/// environment, whatever tab you are on.
-function SetGroup({
-  envSet,
-  here,
+const ENV_DOT: Record<EnvKind, string> = {
+  local: 'bg-good',
+  dev: 'bg-good',
+  sandbox: 'bg-accent',
+  staging: 'bg-warn',
+  prod: 'bg-bad',
+  other: 'bg-ink-faint',
+};
+
+/// The sets, below the list and always in view: one row each, the
+/// environments it spans as dots, and Compare. Under an environment tab the
+/// sets that have nothing there step back rather than disappear — they are
+/// still one click away, and a set that vanishes reads as deleted.
+function SetDock({
+  sets,
   env,
   folded,
   onToggle,
-  selected,
-  children,
 }: {
-  envSet: EnvSet;
-  here: number;
-  env: EnvKind | 'all' | 'search';
+  sets: EnvSet[];
+  env: EnvKind | 'all';
   folded: boolean;
   onToggle(): void;
-  selected: boolean;
-  children: React.ReactNode;
 }): JSX.Element {
+  const selection = useStore((s) => s.selection);
+  const setSheet = useStore((s) => s.setSheet);
+  return (
+    <div className="shrink-0 max-h-[40%] flex flex-col border-t border-card bg-surface/40">
+      <div className="flex items-center px-3 pt-2 pb-1">
+        <button
+          onClick={onToggle}
+          aria-expanded={!folded}
+          className="flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider text-ink-faint hover:text-ink-muted"
+        >
+          <svg width="8" height="8" viewBox="0 0 8 8" aria-hidden="true" className={`transition-transform ${folded ? '' : 'rotate-90'}`}>
+            <path d="M2 1l4 3-4 3z" fill="currentColor" />
+          </svg>
+          Sets · compare
+        </button>
+        {sets.length > 0 && <span className="ml-1.5 text-[10px] tabular-nums text-ink-faint/70">{sets.length}</span>}
+        <div className="flex-1" />
+        <button onClick={() => setSheet({ kind: 'newEnvSet' })} className="text-[10.5px] text-accent hover:underline">
+          New set
+        </button>
+      </div>
+      {!folded && (
+        <div className="min-h-0 overflow-y-auto pb-1.5">
+          {sets.length === 0 ? (
+            <Empty>Make a set to compare the same database across local, staging and prod.</Empty>
+          ) : (
+            sets.map((s) => (
+              <SetRow key={s.id} envSet={s} env={env} selected={selection?.kind === 'envSet' && selection.id === s.id} />
+            ))
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SetRow({ envSet, env, selected }: { envSet: EnvSet; env: EnvKind | 'all'; selected: boolean }): JSX.Element {
   const select = useStore((s) => s.select);
   const setSheet = useStore((s) => s.setSheet);
   const askConfirm = useStore((s) => s.askConfirm);
   const removeEnvSet = useStore((s) => s.removeEnvSet);
   const togglePin = useStore((s) => s.togglePin);
   const connections = useStore((s) => s.connections);
-  const envCount = new Set(envSet.memberIds.map((id) => connections.find((c) => c.id === id)?.env).filter(Boolean)).size;
-  const detail =
-    env === 'all' ? `set · ${envCount} env${envCount === 1 ? '' : 's'}` : env === 'search' ? `set · ${here} found` : `set · ${here} here`;
+  const members = envSet.memberIds.map((id) => connections.find((c) => c.id === id)).filter((c): c is Connection => !!c);
+  const envs = ENV_ORDER.filter((e) => members.some((c) => c.env === e));
+  const away = env !== 'all' && !envs.includes(env);
+  const open = () => select({ kind: 'envSet', id: envSet.id });
 
   return (
-    <div className="pt-1.5 pb-0.5">
-      <div className={`group mx-1.5 flex items-center gap-1.5 pl-1.5 pr-1 py-1 rounded-md ${selected ? 'sidebar-row-selected' : 'hover:bg-card'}`}>
-        <button onClick={onToggle} aria-expanded={!folded} aria-label={folded ? `Show ${envSet.name}` : `Fold ${envSet.name}`} className="w-3.5 h-4 flex items-center justify-center text-ink-faint hover:text-ink">
-          <svg width="8" height="8" viewBox="0 0 8 8" aria-hidden="true" className={`transition-transform ${folded ? '' : 'rotate-90'}`}>
-            <path d="M2 1l4 3-4 3z" fill="currentColor" />
-          </svg>
-        </button>
-        <button onClick={onToggle} className="flex-1 min-w-0 flex items-center gap-1.5 text-left" tabIndex={-1}>
-          <span className="text-accent shrink-0">
-            <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-              <path d="M8 2L14 5.2 8 8.4 2 5.2 8 2Z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
-              <path d="M2 8.4l6 3.2 6-3.2" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
-              <path d="M2 11.4l6 3.2 6-3.2" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" opacity="0.45" />
-            </svg>
-          </span>
-          <span className="text-xs font-semibold text-ink truncate">{envSet.name}</span>
-          <span className="text-[10px] text-ink-faint truncate">{detail}</span>
-        </button>
-        <span className="shrink-0 hidden group-hover:flex group-focus-within:flex items-center">
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={open}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          open();
+        }
+      }}
+      title={members.length ? `${envSet.name}: ${members.map((c) => c.name).join(', ')}` : `${envSet.name} has no connections yet`}
+      className={`group sidebar-row h-[26px] px-3 flex items-center gap-2 cursor-default ${selected ? 'sidebar-row-selected' : 'hover:bg-card'} ${
+        away && !selected ? 'opacity-40 hover:opacity-100' : ''
+      }`}
+    >
+      <span className="shrink-0 max-w-[55%] text-[11.5px] font-semibold text-ink truncate">{envSet.name}</span>
+      <span className="shrink-0 flex gap-[3px]" aria-hidden="true">
+        {envs.map((e) => (
+          <span key={e} className={`w-1.5 h-1.5 rounded-full ${ENV_DOT[e]}`} />
+        ))}
+      </span>
+      <span className="flex-1 min-w-0 text-[10px] text-ink-faint truncate">
+        {envs.length ? envs.map((e) => ENV_NAME[e].toLowerCase()).join(' · ') : 'empty'}
+      </span>
+      {envSet.pinned && <span className="shrink-0 text-accent text-[10px] group-hover:hidden" aria-label="Starred">★</span>}
+      <span className="shrink-0 hidden group-hover:flex group-focus-within:flex items-center" onClick={(e) => e.stopPropagation()}>
           <button
             onClick={() => void togglePin('envSet', envSet.id)}
             title={envSet.pinned ? `Unstar ${envSet.name}` : `Star ${envSet.name}`}
@@ -427,17 +448,13 @@ function SetGroup({
               <path d="M3 3l6 6M9 3l-6 6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
             </svg>
           </button>
-        </span>
-        {envSet.pinned && <span className="shrink-0 text-accent group-hover:hidden" aria-label="Starred">★</span>}
-        <button
-          onClick={() => select({ kind: 'envSet', id: envSet.id })}
-          title={`Open ${envSet.name} across every environment: drift, and queries on all of them`}
-          className="shrink-0 ml-0.5 px-1.5 h-5 rounded text-[10.5px] text-accent hover:bg-accent/15"
-        >
-          Compare
-        </button>
-      </div>
-      {!folded && <div className="pl-2.5">{children}</div>}
+      </span>
+      <span
+        title={`Open ${envSet.name} across every environment: drift, and queries on all of them`}
+        className="shrink-0 text-[10.5px] text-accent"
+      >
+        Compare
+      </span>
     </div>
   );
 }
@@ -546,6 +563,7 @@ function ConnectionRow({
 
 function Section({
   label,
+  lead,
   action,
   count,
   collapsed,
@@ -553,6 +571,8 @@ function Section({
   children,
 }: {
   label: string;
+  /// A mark before the label: an environment's colour.
+  lead?: React.ReactNode;
   action?: { title: string; onClick: () => void };
   /// Shown only when the section can be folded — a count on a section you
   /// can always see is telling you something you can count.
@@ -577,10 +597,12 @@ function Section({
             >
               <path d="M2 1l4 3-4 3z" fill="currentColor" />
             </svg>
+            {lead}
             {label}
           </button>
         ) : (
-          <span className="text-[10px] font-semibold uppercase tracking-wider text-ink-faint">
+          <span className="flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider text-ink-faint">
+            {lead}
             {label}
           </span>
         )}

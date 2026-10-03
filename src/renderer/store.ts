@@ -26,6 +26,7 @@ import { bufferLabel, buffersFor, nextBufferKey, ownsBuffer } from '@shared/buff
 import { copyName } from '@shared/copyName';
 import { SAMPLE_ENVS, SAMPLE_SET_NAME, sampleEnvOf } from '@shared/sample';
 import type { RepoLinkOwner } from '@shared/overcliHandoff';
+import type { SettingsSection } from './SettingsSheet';
 
 /// Selectors that derive a list must never build a fresh array on every
 /// call — zustand compares by reference, so `[]` inline re-renders the
@@ -39,7 +40,8 @@ export type Sheet =
   | { kind: 'about' }
   | { kind: 'basics' }
   | { kind: 'shortcuts' }
-  | { kind: 'settings' }
+  /// `section` opens Settings on one pane, for a link that means one setting.
+  | { kind: 'settings'; section?: SettingsSection }
   /// `found` is a server the welcome screen already discovered, so the form
   /// opens with its engine, host and port filled rather than asking again.
   | { kind: 'newConnection'; found?: { engine: Engine; host: string; port: number; version?: string } }

@@ -251,3 +251,26 @@ describe('footFor', () => {
     expect(footFor('one')).toBe('bar');
   });
 });
+
+describe('links from the database map', () => {
+  const snap = snapshot([
+    table('users'),
+    table('orders', {
+      columns: [column('id'), column('user_id'), column('coupon_code')],
+      foreignKeys: [{ name: 'orders_user_fk', columns: ['user_id'], refSchema: 'public', refTable: 'users', refColumns: ['id'] }],
+    }),
+    table('coupons', { columns: [column('id'), column('code')] }),
+  ]);
+
+  it('draws a cited link as its own kind of edge, whichever way round the map wrote it', () => {
+    const graph = buildGraph(snap, undefined, [{ from: 'public.coupons.id', to: 'public.orders.coupon_code', why: 'applies a coupon', ref: 'src/cart.ts:9' }]);
+    const code = graph.edges.filter((e) => e.source === 'code');
+    expect(code).toHaveLength(1);
+    expect(code[0]).toMatchObject({ from: 'public.orders', to: 'public.coupons', columns: ['coupon_code'], refColumns: ['id'], ref: 'src/cart.ts:9' });
+  });
+
+  it('does not draw a link a foreign key already draws, or one to a table it has not read', () => {
+    const graph = buildGraph(snap, undefined, [{ from: 'public.orders.user_id', to: 'public.users.id', why: 'x' }, { from: 'public.orders.id', to: 'other.thing.id', why: 'y' }]);
+    expect(graph.edges.filter((e) => e.source === 'code')).toHaveLength(0);
+  });
+});

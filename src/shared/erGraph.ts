@@ -49,6 +49,20 @@ export interface ErEdge {
   /// Always one row of `to` — or none, when the key is nullable.
   toCardinality: 'one' | 'zero-or-one';
   selfReference: boolean;
+  /// A foreign key the server holds, or a link the database map read from
+  /// the code. The two are drawn differently, never in the same ink.
+  source?: 'fk' | 'code';
+  /// For a code link: what the code does, and where.
+  why?: string;
+  ref?: string;
+}
+
+/// A link from the database map: both ends as `schema.table.column`.
+export interface CodeLink {
+  from: string;
+  to: string;
+  why: string;
+  ref?: string;
 }
 
 export interface ErGraph {
@@ -65,7 +79,7 @@ function qualify(schema: string | null, table: string, fallbackSchema: string): 
   return `${schema ?? fallbackSchema}.${table}`;
 }
 
-export function buildGraph(snapshot: SchemaSnapshot, schemas?: string[]): ErGraph {
+export function buildGraph(snapshot: SchemaSnapshot, schemas?: string[], codeLinks: readonly CodeLink[] = []): ErGraph {
   const wanted = schemas && schemas.length > 0 ? new Set(schemas) : null;
   const included = snapshot.schemas.filter((sc) => !wanted || wanted.has(sc.name));
 
@@ -140,7 +154,49 @@ export function buildGraph(snapshot: SchemaSnapshot, schemas?: string[]): ErGrap
     }
   }
 
+  addCodeEdges(codeLinks, nodes, edges);
   return { nodes, edges, danglingTargets: [...dangling].sort() };
+}
+
+/// The map's links between tables both in the graph, as edges marked
+/// `code`. The map names its two ends in no promised order: the end that
+/// points at the other's primary key holds the reference. A link a foreign
+/// key already draws is not drawn twice.
+function addCodeEdges(codeLinks: readonly CodeLink[], nodes: ErNode[], edges: ErEdge[]): void {
+  if (codeLinks.length === 0) return;
+  const byLower = new Map(nodes.map((n) => [n.id.toLowerCase(), n]));
+  const end = (ref: string) => {
+    const i = ref.lastIndexOf('.');
+    const node = byLower.get(ref.slice(0, i).toLowerCase());
+    const column = node?.columns.find((c) => c.name.toLowerCase() === ref.slice(i + 1).toLowerCase())?.name;
+    return node && column ? { node, column, isKey: node.primaryKey.length === 1 && node.primaryKey[0] === column } : null;
+  };
+  const seen = new Set(edges.map((e) => `${e.from}.${e.columns.join(',')}`.toLowerCase()));
+  for (const [i, l] of codeLinks.entries()) {
+    const a = end(l.from);
+    const b = end(l.to);
+    if (!a || !b) continue;
+    const [from, to] = a.isKey && !b.isKey ? [b, a] : [a, b];
+    const key = `${from.node.id}.${from.column}`.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    edges.push({
+      id: `${from.node.id}::code:${i}`,
+      name: `${from.column} (from the code)`,
+      from: from.node.id,
+      to: to.node.id,
+      columns: [from.column],
+      refColumns: [to.column],
+      fromCardinality: 'many',
+      toCardinality: 'zero-or-one',
+      selfReference: from.node.id === to.node.id,
+      source: 'code',
+      why: l.why,
+      ...(l.ref ? { ref: l.ref } : {}),
+    });
+    from.node.degree++;
+    if (from.node !== to.node) to.node.degree++;
+  }
 }
 
 /// Null-tolerant: `IndexInfo.columns` is a shared type any adapter fills

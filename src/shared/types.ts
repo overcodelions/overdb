@@ -390,6 +390,11 @@ export interface AppSettings {
   /// name is a hard error, so a guessed default would be worse than none.
   aiModel: Record<AiTool, string>;
   aiFastModel: Record<AiTool, string>;
+  /// The model claude maps a database with: the standard tier. A map is
+  /// read many times and written rarely, so it is worth more than the fast
+  /// model, and its many passes are not worth the most capable one. Blank
+  /// means claude's own default.
+  aiMapModel: string;
   /// A query slower than this offers to explain itself. 0 disables.
   slowQueryMs: number;
   /// Which SQL layout Format produces. Genuinely a matter of taste, so it
@@ -423,6 +428,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   aiTool: null,
   aiModel: { claude: '', codex: '', gemini: '' },
   aiFastModel: { claude: 'haiku', codex: '', gemini: '' },
+  aiMapModel: 'sonnet',
   slowQueryMs: 1_000,
   formatStyle: 'default',
   panesFull: true,
@@ -560,6 +566,8 @@ export interface IPCInvokeMap {
   'store:saveParams': (params: ParamBinding[]) => void;
   'app:version': () => { app: string; electron: string; node: string; chrome: string };
   'app:openExternal': (url: string) => void;
+  /// Reveal one of overdb's own log files in Finder.
+  'app:showLog': (file: string) => void;
   /// Restart into an update that has finished downloading. Without this it
   /// installs at the next quit anyway. See src/main/updater.ts.
   'update:quitAndInstall': () => void;
@@ -576,6 +584,8 @@ export interface IPCInvokeMap {
   'overcli:send': (draft: HandoffDraft) => { ok: true; id: string } | { ok: false; error: string };
   /// Folder picker for linking a database to the repo that uses it.
   'overcli:pickRepo': (args: { name: string }) => string | null;
+  /// The same picker, choosing several folders at once.
+  'repo:pickMany': (args: { name: string }) => string[];
   /// Which of the connection's schemas a repo's code uses, by a scan of
   /// the repo: names and counts only, never contents.
   'repo:suggestSchemas': (args: { connectionId: string; path: string }) =>
@@ -855,17 +865,22 @@ export interface IPCInvokeMap {
         status: {
           file: string;
           repos: number;
-          map: { builtAt: string; updatedAt: string; tables: number; links: number; learned: number; schemas: string[] } | null;
+          map: { builtAt: string; updatedAt: string; tables: number; links: number; learned: number; unmapped: number; schemas: string[] } | null;
           freshness: import('./dbMap').MapFreshness | null;
         } | null;
       }
     | { ok: false; error: string };
   /// Map the database from its linked repos, or refresh what changed.
   /// Progress arrives as `map:progress` events for `jobId`.
-  'map:build': (args: { jobId: string; connectionId: string; refresh: boolean }) =>
-    | { ok: true; tables: number; links: number; dropped: number; failures: string[] }
+  /// `rest` asks about the tables the map has nothing on, which a first
+  /// map leaves out when no file names them.
+  'map:build': (args: { jobId: string; connectionId: string; refresh: boolean; rest?: boolean }) =>
+    | { ok: true; tables: number; links: number; dropped: number; leftOut: number; failures: string[] }
     | { ok: false; error: string };
   'map:cancel': (jobId: string) => void;
+  /// The whole map, for the Map pane, the diagram and a base. Null when
+  /// there is none yet.
+  'map:read': (connectionId: string) => import('./dbMap').DbMap | null;
   /// The schemas a ticket's text is about, by where the map puts its tables.
   'map:schemasFor': (args: { connectionId: string; text: string }) => string[];
   /// Turn an approved plan into a seed, a teardown and a verify query, and
@@ -926,7 +941,8 @@ export interface IPCInvokeMap {
   /// arrives as `baseline:progress` events for `jobId`.
   'baseline:build': (args: { jobId: string; connectionId: string }) =>
     | { ok: true; baseline: BaselineRecord }
-    | { ok: false; error: string };
+    /// `log`: the build's log file, kept when it fails.
+    | { ok: false; error: string; log?: string };
   'baseline:cancelBuild': (jobId: string) => void;
   /// Read the linked repo with claude for what the schema cannot say —
   /// read-only tools, like the seed investigation. Steps arrive as

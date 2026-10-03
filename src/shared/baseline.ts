@@ -41,9 +41,10 @@ export interface TableStat {
 // Links
 // ---------------------------------------------------------------------
 
-/// A foreign key the server holds, or one proposed from a column's name.
-/// Name links choose rows; they are never drawn as foreign keys.
-export type LinkSource = 'fk' | 'name' | 'poly';
+/// A foreign key the server holds, one proposed from a column's name, or
+/// one the database map read from the code (see src/shared/mapLinks.ts).
+/// Name and code links choose rows; they are never drawn as foreign keys.
+export type LinkSource = 'fk' | 'name' | 'poly' | 'code';
 
 export interface Link {
   from: TableRef;
@@ -61,6 +62,9 @@ export interface Link {
   /// A polymorphic link holds only for rows whose type column names the
   /// target: `commentable_id → posts` when `commentable_type = 'Post'`.
   when?: { column: string; value: string };
+  /// Where the code makes this link, when the database map says so: a name
+  /// guess it confirmed or corrected, or a link only the code knew.
+  cited?: { why: string; ref?: string };
 }
 
 /// `schema.table(col) → schema.table(col)`, stable across runs: the key a
@@ -215,7 +219,7 @@ export function findLinks(snapshot: SchemaSnapshot): Link[] {
   return out;
 }
 
-function isAudit(column: string): boolean {
+export function isAudit(column: string): boolean {
   return nameTokens(column).some((t) => AUDIT_TOKENS.has(t));
 }
 
@@ -814,6 +818,17 @@ export function formatBytes(n: number): string {
 
 /// The table plans a saved recipe stands for, against the catalog as it is
 /// now: the same sort a person reviewed, with their choices applied.
+/// Links read from the catalog, plus the ones a recipe keeps: polymorphic
+/// links read from the data, and links the database map settled from the
+/// code. A settled link replaces whatever the column names guessed for the
+/// same column, so a corrected guess is never followed alongside its fix.
+export function withExtraLinks(found: readonly Link[], extra: readonly Link[]): Link[] {
+  const col = (l: Link) => `${tableKey(l.from)}.${l.columns[0]}`.toLowerCase();
+  const settled = new Set(extra.filter((l) => l.cited && !l.when).map(col));
+  const kept = new Set(extra.map(linkKey));
+  return [...found.filter((l) => !kept.has(linkKey(l)) && (l.source === 'fk' || l.when || !settled.has(col(l)))), ...extra];
+}
+
 export function plansFromRecipe(
   recipe: BaselineRecipe,
   snapshot: SchemaSnapshot,
@@ -824,7 +839,7 @@ export function plansFromRecipe(
   return sortTables({
     snapshot: onlySchemas(snapshot, recipe.schemas),
     stats,
-    links: [...links, ...(recipe.extraLinks ?? [])],
+    links: withExtraLinks(links, recipe.extraLinks ?? []),
     linksOff: new Set(recipe.linksOff),
     tenant: recipe.tenant,
     starts: recipe.starts.filter((s) => !s.narrows && (!tenantKey || tableKey(s.ref) !== tenantKey)).map((s) => s.ref),

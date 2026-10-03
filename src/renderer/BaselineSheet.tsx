@@ -10,7 +10,8 @@ import {
   type TablePlan,
 } from '@shared/baseline';
 import { useStore } from './store';
-import { RepoLinksPanel } from './RepoLinks';
+import { RepoLinksPanel, RepoNames } from './RepoLinks';
+import { MapCard } from './MapCard';
 import type { TenancyLevel } from '@shared/baseline';
 import { measuredShare, plansFor, startingPoints, useBaseline, type Login, type LoginHit } from './baselineStore';
 import { useTickets } from './ticketsStore';
@@ -202,6 +203,7 @@ function Overview(): JSX.Element {
   const max = bySchema[0]?.bytes || 1;
   const fks = b.links.filter((l) => l.source === 'fk').length;
   const named = b.links.filter((l) => l.source === 'name').length;
+  const fromCode = b.links.filter((l) => l.cited).length;
   const polyFrom = new Set(b.polyLinks.map((l) => `${tableKey(l.from)}.${l.columns[0]}`)).size;
   const family = b.snapshot && b.tenant ? tenantTables(b.snapshot, b.tenant) : [];
   const on = new Set(b.schemasOn);
@@ -239,7 +241,7 @@ function Overview(): JSX.Element {
         </p>
       )}
       <p className="text-[11px] text-ink-muted">
-        {fks} foreign keys, and {named} more links guessed from column names. The next step lists the guesses so you can turn any off.
+        {fks} foreign keys, and {named} more links guessed from column names{fromCode ? `; the map confirmed or added ${fromCode} from the code` : ''}. The next step lists the guesses so you can turn any off.
       </p>
       {b.polyPairs > 0 && (
         <p className="text-[11px] text-ink-muted">
@@ -817,7 +819,20 @@ function Build(): JSX.Element {
               </p>
               {running && <p className="text-ink-muted">{elapsed}s · {last?.text ?? 'Starting'}</p>}
             </div>
-            {b.buildError && <div role="alert" className="rounded-md border border-bad/30 bg-bad/5 px-3 py-2 text-bad-strong">{b.buildError}</div>}
+            {b.buildError && (
+              <div role="alert" className="rounded-md border border-bad/30 bg-bad/5 px-3 py-2 flex items-start gap-3">
+                <span className="flex-1 min-w-0 text-bad-strong break-words">{b.buildError}</span>
+                {b.buildLogFile && (
+                  <button
+                    className="shrink-0 text-[11px] text-ink-muted hover:text-ink underline decoration-dotted underline-offset-2"
+                    onClick={() => void window.overdb.invoke('app:showLog', b.buildLogFile!)}
+                    title={b.buildLogFile}
+                  >
+                    Show the log
+                  </button>
+                )}
+              </div>
+            )}
             <ol className="flex flex-col gap-2 max-w-[560px]">
               {STAGES.map((st) => {
                 const here = running && last?.stage === st.id;
@@ -1073,6 +1088,19 @@ function Links(): JSX.Element {
   return (
     <div className="min-h-0 flex flex-col gap-3 px-4 py-5 bg-surface-muted/60 border-l border-card">
       <CodeCheck />
+      {b.fromMap && b.fromMap.confirmed + b.fromMap.corrected + b.fromMap.added > 0 && (
+        <p className="text-[11px] text-ai leading-snug">
+          From the map:{' '}
+          {[
+            b.fromMap.confirmed && `${b.fromMap.confirmed} confirmed`,
+            b.fromMap.corrected && `${b.fromMap.corrected} pointed at the table the code uses`,
+            b.fromMap.added && `${b.fromMap.added} added that the names never suggested`,
+          ]
+            .filter(Boolean)
+            .join(', ')}
+          . Each cites where in the code.
+        </p>
+      )}
       <div>
         <div className="font-semibold">{all ? 'Every guessed link' : unsure.length > 0 ? `${unsure.length} links to check` : 'Nothing to check'}</div>
         <div className="text-ink-muted mt-0.5">
@@ -1154,8 +1182,13 @@ function CodeCheck(): JSX.Element {
         </div>
       ) : (
         <>
-          <p className="text-ink-muted">claude reads the repos for the schemas in this base, with Read, Grep and Glob only, and suggests changes you apply one by one.</p>
-          {b.connectionId && <RepoLinksPanel connectionId={b.connectionId} showRecipe onChange={() => b.reposChanged()} />}
+          <p className="text-ink-muted">
+            {b.map
+              ? 'The map has already settled what it could (below). Reading the code goes further: claude reads the repos for this base’s tenant, logins and tables, with Read, Grep and Glob only, and suggests changes you apply one by one.'
+              : 'claude reads the repos for the schemas in this base, with Read, Grep and Glob only, and suggests changes you apply one by one. A database map settles links without reading the code each time.'}
+          </p>
+          {b.connectionId && <RepoNames connectionId={b.connectionId} />}
+          {b.connectionId && <MapCard compact connectionId={b.connectionId} onChange={() => void b.mapChanged()} />}
           {b.codeError && <p role="alert" className="text-bad-strong">{b.codeError}</p>}
           <button className={`${BTN} self-start text-ai`} onClick={() => void b.readCode()}>Read the code</button>
         </>
@@ -1190,6 +1223,12 @@ function LinkRow({ link, on, onToggle }: { link: Link; on: boolean; onToggle(): 
           )}
         </label>
       </div>
+      {link.cited && (
+        <div className="ml-6 min-w-0 text-[11px] text-ai break-all">
+          From the code{link.cited.why ? `: ${link.cited.why}` : ''}
+          {link.cited.ref && <span className="block font-mono text-[10px] text-ink-muted">{link.cited.ref}</span>}
+        </div>
+      )}
       {link.alternatives.length > 0 && (
         <div className="ml-6 min-w-0 text-[11px] text-ink-muted break-all">
           or maybe {link.alternatives.slice(0, 3).map(tableKey).join(', ')}{link.alternatives.length > 3 ? '…' : ''}
