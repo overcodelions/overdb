@@ -37,6 +37,12 @@ async function* walk(root: string): AsyncGenerator<string> {
   }
 }
 
+/// A file's path in its repo, always with `/` — what the secret and
+/// dependency rules match, and what a map cites, on Windows too.
+function relPath(repo: string, file: string): string {
+  return path.relative(repo, file).split(path.sep).join('/');
+}
+
 /// A file's text when it is small enough to read, else ''. Sized and read
 /// through one handle, so the file measured is the file read.
 async function readSmall(file: string): Promise<string> {
@@ -70,7 +76,7 @@ export async function scanRepoSchemas(repo: string, schemas: readonly string[]):
   let seen = 0;
   const files: string[] = [];
   for await (const file of walk(repo)) {
-    const rel = path.relative(repo, file);
+    const rel = relPath(repo, file);
     if (SECRET.test(rel) || !(CONFIG.test(file) || CODE.test(file))) continue;
     files.push(file);
     if (++seen >= MAX_FILES) break;
@@ -123,7 +129,7 @@ export async function scanTableMentions(repo: string, tables: readonly string[])
 
   const files: string[] = [];
   for await (const file of walk(repo)) {
-    const rel = path.relative(repo, file);
+    const rel = relPath(repo, file);
     if (SECRET.test(rel) || !MENTION.test(file)) continue;
     files.push(file);
     if (files.length >= MAX_FILES) break;
@@ -131,7 +137,7 @@ export async function scanTableMentions(repo: string, tables: readonly string[])
 
   const one = async (file: string) => {
     const text = await readSmall(file);
-    const rel = path.relative(repo, file);
+    const rel = relPath(repo, file);
     const seen = new Set<string>();
     for (const tok of text.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? []) {
       if (seen.has(tok)) continue;

@@ -18,9 +18,9 @@ const git = (...args: string[]) => spawnSync('git', ['-C', root, ...args], { enc
 describe('where a map lives', () => {
   const owner = { kind: 'envSet' as const, id: 'shop/1', name: 'shop' };
   it('is overdb’s own folder unless the setting says the repo', () => {
-    expect(mapPath(owner, { location: 'overdb', userData: '/data', repo: '/code/shop' })).toBe('/data/maps/envSet-shop_1.json');
-    expect(mapPath(owner, { location: 'repo', userData: '/data', repo: '/code/shop' })).toBe('/code/shop/.overdb/map/envSet-shop_1.json');
-    expect(mapPath(owner, { location: 'repo', userData: '/data', repo: null })).toBe('/data/maps/envSet-shop_1.json');
+    expect(mapPath(owner, { location: 'overdb', userData: '/data', repo: '/code/shop' })).toBe(path.join('/data', 'maps', 'envSet-shop_1.json'));
+    expect(mapPath(owner, { location: 'repo', userData: '/data', repo: '/code/shop' })).toBe(path.join('/code/shop', '.overdb', 'map', 'envSet-shop_1.json'));
+    expect(mapPath(owner, { location: 'repo', userData: '/data', repo: null })).toBe(path.join('/data', 'maps', 'envSet-shop_1.json'));
   });
 
   it('saves and loads', async () => {
