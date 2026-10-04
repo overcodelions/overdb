@@ -1,7 +1,10 @@
 import { useMemo, useState } from 'react';
 import type { Connection, EnvKind } from '@shared/types';
 import { variantLabel } from '@shared/engines';
+import { isOverdbConnection } from '@shared/instances';
 import { useStore } from './store';
+import { RepoNames } from './RepoLinks';
+import { MapCard } from './MapCard';
 
 /// An environment set is the same logical database in several places —
 /// local, staging, prod. Picking members is therefore the whole form, and
@@ -28,7 +31,9 @@ export function EnvSetForm({
   suggested?: { name: string; memberIds: string[]; baselineId: string };
   onDone(): void;
 }): JSX.Element {
-  const connections = useStore((s) => s.connections);
+  const everything = useStore((s) => s.connections);
+  // Branches and proxy windows are overdb's own; a set is for yours.
+  const connections = useMemo(() => everything.filter((c) => !isOverdbConnection(c)), [everything]);
   const envSets = useStore((s) => s.envSets);
   const saveEnvSet = useStore((s) => s.saveEnvSet);
   const existing = id ? envSets.find((e) => e.id === id) : undefined;
@@ -188,6 +193,18 @@ export function EnvSetForm({
             ))}
           </select>
         </label>
+
+        {existing && members.length > 0 && (
+          <div className="flex flex-col gap-1.5">
+            <span className="text-[11px] font-medium text-ink-muted">Code</span>
+            <p className="text-[11px] text-ink-faint leading-snug">
+              The repos whose code uses this database, and the map read from them, live in the Map pane — one place for
+              every environment in the set.
+            </p>
+            <RepoNames connectionId={(members.find((c) => c.env === 'local') ?? members[0]).id} />
+            <MapCard compact connectionId={(members.find((c) => c.env === 'local') ?? members[0]).id} />
+          </div>
+        )}
       </div>
 
       <div className="shrink-0 border-t border-card px-5 py-3 flex items-center gap-3">

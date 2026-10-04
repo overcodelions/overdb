@@ -88,7 +88,7 @@ describe('insert', () => {
       { name: 'widget_name', typeName: 'varchar', kind: 'text', nullable: null,
         sourceTable: { schema: null, table: 'panel_widget', column: 'name' } },
     ];
-    const out = formatRows(joined, [['HP', 'Tracking']], 'insert');
+    const out = formatRows(joined, [['Acme', 'Tracking']], 'insert');
     expect(out).not.toMatch(/^insert/m);
     expect(out).toContain('client, panel_widget');
   });

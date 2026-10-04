@@ -125,9 +125,12 @@ export function repoLinkOwner(
   connections: readonly Connection[],
   envSets: readonly EnvSet[],
 ): RepoLinkOwner | null {
-  const set = envSets.find((s) => !s.archived && s.memberIds.includes(connectionId));
+  // A branch reads the code of the connection it was made from.
+  const own = connections.find((c) => c.id === connectionId);
+  const id = own?.branchOf && connections.some((c) => c.id === own.branchOf) ? own.branchOf : connectionId;
+  const set = envSets.find((s) => !s.archived && s.memberIds.includes(id));
   if (set) return { kind: 'envSet', id: set.id, name: set.name };
-  const conn = connections.find((c) => c.id === connectionId);
+  const conn = connections.find((c) => c.id === id);
   return conn ? { kind: 'connection', id: conn.id, name: conn.name } : null;
 }
 

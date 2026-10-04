@@ -3,6 +3,7 @@ import { ensureTerminated, formatSql } from '@shared/formatSql';
 import { suggestionBlock } from '@shared/suggestion';
 import { useStore } from './store';
 import { ERD_TAB, HEALTH_TAB, HISTORY_TAB, SLOW_TAB, useQuery } from './queryStore';
+import { devInstanceRefusal, isProxyConnectionId } from '@shared/instances';
 
 interface Command {
   id: string;
@@ -121,6 +122,36 @@ export function CommandPalette(): JSX.Element | null {
         label: 'Slow queries',
         hint: 'view',
         run: close(() => setActiveTab(SLOW_TAB)),
+      },
+      // Seeding needs a connection to stand on; the sheet itself says why a
+      // given one can't be seeded, so it is offered on any SQL connection.
+      ...(selection?.kind === 'connection' &&
+      connections.some((c) => c.id === selection.id && c.engine !== 'dynamodb')
+        ? [{
+            id: 'seed',
+            label: 'Seed data for a ticket…',
+            hint: 'local',
+            keywords: 'seed fixture test data insert ticket',
+            run: close(() => setSheet({ kind: 'seed', connectionId: selection.id })),
+          }]
+        : []),
+      // A base is copied from your own server or a shared dev, sandbox or
+      // staging one — never production — so it is offered only there.
+      ...(selection?.kind === 'connection' &&
+      connections.some((c) => c.id === selection.id && !c.branchOf && !isProxyConnectionId(c.id) && devInstanceRefusal(c) === null)
+        ? [{
+            id: 'baseline',
+            label: connections.find((c) => c.id === selection.id)?.env === 'local' ? 'Create a base…' : 'Copy to this machine…',
+            hint: connections.find((c) => c.id === selection.id)?.env === 'local' ? 'local' : 'base',
+            keywords: 'base baseline subset minimal copy local clone offline download machine ticket tenant recipe branch',
+            run: close(() => setSheet({ kind: 'baseline', connectionId: selection.id })),
+          }]
+        : []),
+      {
+        id: 'tickets',
+        label: 'Branches…',
+        keywords: 'branch ticket copy base baseline proxy clone services switch databases',
+        run: close(() => setSheet({ kind: 'tickets' })),
       },
       { id: 'new-connection', label: 'New connection…', run: close(() => setSheet({ kind: 'newConnection' })) },
       { id: 'new-envset', label: 'New environment set…', run: close(() => setSheet({ kind: 'newEnvSet' })) },

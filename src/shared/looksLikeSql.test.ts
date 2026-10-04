@@ -38,14 +38,14 @@ describe('looksLikeSql', () => {
   });
 
   it('recognises plain English as not SQL', () => {
-    expect(looksLikeSql('give me all the panel widgets for client hp')).toBe(false);
+    expect(looksLikeSql('give me all the panel widgets for client acme')).toBe(false);
     expect(looksLikeSql('how many orders were placed last week?')).toBe(false);
   });
 });
 
 describe('looksLikeQuestion', () => {
   it('is true for a real request', () => {
-    expect(looksLikeQuestion('give me all the panel widgets for client hp')).toBe(true);
+    expect(looksLikeQuestion('give me all the panel widgets for client acme')).toBe(true);
   });
 
   it('is false for anything that is already SQL', () => {
@@ -80,7 +80,7 @@ describe('looksLikeSqlShapedProse', () => {
     expect(
       looksLikeSqlShapedProse('select allt he panels that are for partners in north america'),
     ).toBe(true);
-    expect(looksLikeSqlShapedProse('show me the panels for hp')).toBe(true);
+    expect(looksLikeSqlShapedProse('show me the panels for acme')).toBe(true);
     expect(looksLikeSqlShapedProse('update the partners that are inactive')).toBe(true);
   });
 
@@ -125,7 +125,7 @@ describe('stripTrailingSemicolons', () => {
 
 describe('looksLikeQuestion with a trailing semicolon', () => {
   it('still reads as a question', () => {
-    expect(looksLikeQuestion('give me all the panel widgets for client hp;')).toBe(true);
+    expect(looksLikeQuestion('give me all the panel widgets for client acme;')).toBe(true);
     expect(
       looksLikeQuestion('select allt he panels that are for partners in north america;'),
     ).toBe(true);

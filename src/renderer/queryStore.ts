@@ -8,7 +8,10 @@ import { sortRows } from '@shared/sortRows';
 import { previewUpdate } from '@shared/rowEdit';
 import { bindFor, paramSlots, previewBound, resolveParams, unfilledParams } from '@shared/params';
 import { useStore } from './store';
+import { useBuilds } from './buildsStore';
 import { useFanout } from './fanoutStore';
+import { useSeed } from './seedStore';
+import { useBaseline } from './baselineStore';
 
 export type TabStatus = 'pending' | 'running' | 'done' | 'error' | 'cancelled';
 
@@ -112,11 +115,16 @@ export const HEALTH_TAB = -5;
 /// the result of your own Run by way of clicking a tab.
 export const HISTORY_TAB = -6;
 
-/// The standing tabs — log, slow queries, health and the diagram — which a
+/// The database map: what the code says about each table, and the repos it
+/// was read from. Standing, like the diagram — a property of the database,
+/// not of the statement you ran.
+export const MAP_TAB = -7;
+
+/// The standing tabs — log, slow queries, health, the diagram and the map — which a
 /// run must not pull focus away from. Returns null for anything else,
 /// meaning "this is a result tab, move it".
 function standing(active: number): number | null {
-  return active === LOG_TAB || active === SLOW_TAB || active === ERD_TAB || active === HEALTH_TAB
+  return active === LOG_TAB || active === SLOW_TAB || active === ERD_TAB || active === HEALTH_TAB || active === MAP_TAB
     ? active
     : null;
 }
@@ -675,6 +683,8 @@ export const useQuery = create<QueryState>((set, get) => ({
     // will ever collect — one stale entry per member per run, for as long
     // as the window is open.
     if (useFanout.getState().runs.some((r) => r.runId === event.runId)) return;
+    // The seed flow's statements, likewise — it reads its own results back.
+    if (useSeed.getState().owns(event.runId)) return;
     const { connectionId, tabs } = get();
     const idx = tabs.findIndex((t) => t.runId === event.runId);
     if (idx < 0) {
@@ -760,9 +770,29 @@ export const useQuery = create<QueryState>((set, get) => ({
   },
 
   reset() {
-    set({ tabs: [], active: 0, running: false });
+    set({ tabs: [], active: pendingPane ?? 0, running: false });
+    pendingPane = null;
   },
 }));
+
+/// A pane asked for while its connection was being selected. Selecting a
+/// connection resets the query pane, so the request waits for that reset
+/// rather than racing it.
+let pendingPane: number | null = null;
+
+/// Open a standing pane on a connection from outside the query pane — the
+/// Map pane from a sheet's "Open map". Closes the sheet on the way.
+export function openPane(connectionId: string, pane: number): void {
+  const st = useStore.getState();
+  st.setSheet(null);
+  const sel = st.selection;
+  if (sel?.kind === 'connection' && sel.id === connectionId) {
+    useQuery.getState().setActive(pane);
+    return;
+  }
+  pendingPane = pane;
+  st.select({ kind: 'connection', id: connectionId });
+}
 
 /// Installed once from App. Returns the unsubscribe.
 /// The application menu's items, carried out in the window. See
@@ -820,6 +850,27 @@ export function subscribeToMainEvents(): () => void {
       useStore.getState().setTxnState(event.connectionId, {
         open: event.open, statements: event.statements, expiresAt: event.expiresAt,
       });
+      // The idle timeout rolls a transaction back without asking; a seed
+      // waiting on Commit has to hear about it.
+      const seed = useSeed.getState();
+      if (!event.open && seed.connectionId === event.connectionId) seed.txnClosed();
+      return;
+    }
+    if (event.kind === 'baseline:codeStep') {
+      useBaseline.getState().codeStep(event.jobId, event.step);
+      return;
+    }
+    if (event.kind === 'baseline:progress') {
+      useBaseline.getState().progress(event.jobId, event.progress);
+      useBuilds.getState().progress(event.jobId, event.progress);
+      return;
+    }
+    if (event.kind === 'baseline:installProgress') {
+      useBaseline.setState((st) => (st.install?.jobId === event.jobId ? { install: { ...st.install, line: event.line } } : {}));
+      return;
+    }
+    if (event.kind === 'seed:step') {
+      useSeed.setState((st) => (st.jobId === event.jobId ? { steps: [...st.steps, event.step].slice(-200) } : {}));
       return;
     }
     // Both stores see every run event and each ignores the runIds it does
@@ -828,5 +879,6 @@ export function subscribeToMainEvents(): () => void {
     // a single connection.
     useQuery.getState().ingest(event);
     useFanout.getState().ingest(event);
+    useSeed.getState().ingest(event);
   });
 }

@@ -104,9 +104,9 @@ FROM partner p
 WHERE c.client_name = ?`;
 
   it('rewrites the ORM statement for MySQL and carries the value beside it', () => {
-    const bound = bindParams(sql, 'mysql', { clientname: 'hp' });
+    const bound = bindParams(sql, 'mysql', { clientname: 'acme' });
     expect(bound.sql).toContain('c.client_name = ?');
-    expect(bound.params).toEqual(['hp']);
+    expect(bound.params).toEqual(['acme']);
   });
 
   it('renumbers into $n for Postgres', () => {
@@ -115,21 +115,21 @@ WHERE c.client_name = ?`;
   });
 
   it('points a repeated named hole at one $n on Postgres', () => {
-    const bound = bindParams('WHERE a = :name OR b = :name', 'postgres', { name: 'hp' });
+    const bound = bindParams('WHERE a = :name OR b = :name', 'postgres', { name: 'acme' });
     expect(bound.sql).toBe('WHERE a = $1 OR b = $1');
-    expect(bound.params).toEqual(['hp']);
+    expect(bound.params).toEqual(['acme']);
   });
 
   it('repeats the value where the driver has no way to name it', () => {
-    const bound = bindParams('WHERE a = :name OR b = :name', 'mysql', { name: 'hp' });
+    const bound = bindParams('WHERE a = :name OR b = :name', 'mysql', { name: 'acme' });
     expect(bound.sql).toBe('WHERE a = ? OR b = ?');
-    expect(bound.params).toEqual(['hp', 'hp']);
+    expect(bound.params).toEqual(['acme', 'acme']);
   });
 
   it('never substitutes the value into the SQL text', () => {
-    const bound = bindParams('WHERE name = ?', 'mysql', { name: "hp'; DROP TABLE client; --" });
+    const bound = bindParams('WHERE name = ?', 'mysql', { name: "acme'; DROP TABLE client; --" });
     expect(bound.sql).toBe('WHERE name = ?');
-    expect(bound.params).toEqual(["hp'; DROP TABLE client; --"]);
+    expect(bound.params).toEqual(["acme'; DROP TABLE client; --"]);
   });
 
   it('expands one hole into a list for IN', () => {
@@ -155,7 +155,7 @@ describe('coerceParam', () => {
     expect(coerceParam('-1.5', 'auto')).toBe(-1.5);
     expect(coerceParam('true', 'auto')).toBe(true);
     expect(coerceParam('NULL', 'auto')).toBe(null);
-    expect(coerceParam('hp', 'auto')).toBe('hp');
+    expect(coerceParam('acme', 'auto')).toBe('acme');
   });
 
   it('keeps a leading zero as text', () => {
@@ -166,12 +166,12 @@ describe('coerceParam', () => {
     expect(coerceParam('42', 'text')).toBe('42');
     expect(coerceParam('anything', 'null')).toBe(null);
     expect(coerceParam('yes', 'boolean')).toBe(true);
-    expect(() => coerceParam('hp', 'number')).toThrow(/not a number/);
+    expect(() => coerceParam('acme', 'number')).toThrow(/not a number/);
   });
 
   it('splits a list, honouring quotes', () => {
-    expect(coerceParam('hp, ibm, 3', 'list')).toEqual(['hp', 'ibm', 3]);
-    expect(coerceParam("'hp, inc', ibm", 'list')).toEqual(['hp, inc', 'ibm']);
+    expect(coerceParam('acme, globex, 3', 'list')).toEqual(['acme', 'globex', 3]);
+    expect(coerceParam("'acme, inc', globex", 'list')).toEqual(['acme, inc', 'globex']);
   });
 });
 
@@ -180,43 +180,43 @@ describe('layered values', () => {
     key: 'clientname',
     label: 'client_name',
     type: 'auto',
-    value: 'hp',
-    byEnv: { prod: 'HP Inc' },
-    byConnection: { 'conn-9': 'hp-local' },
+    value: 'acme',
+    byEnv: { prod: 'Acme Inc' },
+    byConnection: { 'conn-9': 'acme-local' },
   };
 
   it('prefers the connection, then the environment, then the default', () => {
     expect(resolveBinding(binding, { connectionId: 'conn-9', env: 'prod' })).toEqual({
-      text: 'hp-local', scope: 'connection',
+      text: 'acme-local', scope: 'connection',
     });
     expect(resolveBinding(binding, { connectionId: 'conn-1', env: 'prod' })).toEqual({
-      text: 'HP Inc', scope: 'env',
+      text: 'Acme Inc', scope: 'env',
     });
     expect(resolveBinding(binding, { connectionId: 'conn-1', env: 'dev' })).toEqual({
-      text: 'hp', scope: 'default',
+      text: 'acme', scope: 'default',
     });
   });
 
   it('binds the same statement differently per environment', () => {
     const sql = 'SELECT * FROM client WHERE client_name = ?';
-    expect(bindFor(sql, 'mysql', [binding], { env: 'dev' }).params).toEqual(['hp']);
-    expect(bindFor(sql, 'mysql', [binding], { env: 'prod' }).params).toEqual(['HP Inc']);
+    expect(bindFor(sql, 'mysql', [binding], { env: 'dev' }).params).toEqual(['acme']);
+    expect(bindFor(sql, 'mysql', [binding], { env: 'prod' }).params).toEqual(['Acme Inc']);
     expect(bindFor(sql, 'mysql', [binding], { env: 'prod', connectionId: 'conn-9' }).params).toEqual(
-      ['hp-local'],
+      ['acme-local'],
     );
   });
 
   it('writes into the layer it was told to and leaves the rest alone', () => {
-    const next = withValue(binding, 'HP GmbH', 'env', { env: 'staging', connectionId: 'conn-9' });
-    expect(next.byEnv).toEqual({ prod: 'HP Inc', staging: 'HP GmbH' });
-    expect(next.value).toBe('hp');
-    expect(next.byConnection).toEqual({ 'conn-9': 'hp-local' });
+    const next = withValue(binding, 'Acme GmbH', 'env', { env: 'staging', connectionId: 'conn-9' });
+    expect(next.byEnv).toEqual({ prod: 'Acme Inc', staging: 'Acme GmbH' });
+    expect(next.value).toBe('acme');
+    expect(next.byConnection).toEqual({ 'conn-9': 'acme-local' });
   });
 
   it('falls back to the layer beneath when an override is cleared', () => {
     const next = clearValue(binding, 'connection', { connectionId: 'conn-9', env: 'prod' });
     expect(resolveBinding(next, { connectionId: 'conn-9', env: 'prod' })).toEqual({
-      text: 'HP Inc', scope: 'env',
+      text: 'Acme Inc', scope: 'env',
     });
   });
 
@@ -240,14 +240,14 @@ describe('layered values', () => {
 
 describe('previewBound', () => {
   it('writes the values back in for the log, quoting text', () => {
-    expect(previewBound('WHERE name = ? AND n = ?', ['hp', 3], 'mysql')).toBe(
-      "WHERE name = 'hp' AND n = 3",
+    expect(previewBound('WHERE name = ? AND n = ?', ['acme', 3], 'mysql')).toBe(
+      "WHERE name = 'acme' AND n = 3",
     );
   });
 
   it('shows one Postgres value at both of its holes', () => {
-    expect(previewBound('WHERE a = $1 OR b = $1', ['hp'], 'postgres')).toBe(
-      "WHERE a = 'hp' OR b = 'hp'",
+    expect(previewBound('WHERE a = $1 OR b = $1', ['acme'], 'postgres')).toBe(
+      "WHERE a = 'acme' OR b = 'acme'",
     );
   });
 
@@ -301,8 +301,8 @@ describe('bufferPlaceholders', () => {
 describe('forgetConnection', () => {
   const list: ParamBinding[] = [
     {
-      key: 'clientname', label: 'client_name', type: 'auto', value: 'hp',
-      byEnv: { prod: 'HP Inc' }, byConnection: { 'conn-9': 'hp-local', 'conn-1': 'x' },
+      key: 'clientname', label: 'client_name', type: 'auto', value: 'acme',
+      byEnv: { prod: 'Acme Inc' }, byConnection: { 'conn-9': 'acme-local', 'conn-1': 'x' },
     },
     { key: 'status', label: 'status', type: 'auto', value: 'active' },
   ];
@@ -310,8 +310,8 @@ describe('forgetConnection', () => {
   it('drops that connection and leaves every other layer alone', () => {
     const [first] = forgetConnection(list, 'conn-9');
     expect(first.byConnection).toEqual({ 'conn-1': 'x' });
-    expect(first.byEnv).toEqual({ prod: 'HP Inc' });
-    expect(first.value).toBe('hp');
+    expect(first.byEnv).toEqual({ prod: 'Acme Inc' });
+    expect(first.value).toBe('acme');
   });
 
   it('returns the same objects when there is nothing to drop', () => {
@@ -354,11 +354,11 @@ describe('IN (?)', () => {
     const bound = bindFor(
       'SELECT * FROM client WHERE id IN (?)',
       'mysql',
-      [{ ...blankBinding(slot), value: 'hp, ibm, dell' }],
+      [{ ...blankBinding(slot), value: 'acme, globex, initech' }],
       {},
     );
     expect(bound.sql).toBe('SELECT * FROM client WHERE id IN (?, ?, ?)');
-    expect(bound.params).toEqual(['hp', 'ibm', 'dell']);
+    expect(bound.params).toEqual(['acme', 'globex', 'initech']);
   });
 
   it('numbers an expanded list correctly on Postgres', () => {

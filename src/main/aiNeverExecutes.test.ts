@@ -34,7 +34,7 @@ describe('the AI layer and execution', () => {
   });
 
   it('ai.ts and aiPrompts.ts cannot reach the database or register IPC', () => {
-    for (const file of ['ai.ts', 'aiPrompts.ts', 'schemaContext.ts']) {
+    for (const file of ['ai.ts', 'aiPrompts.ts', 'schemaContext.ts', 'seedPrompts.ts']) {
       const src = read('src', 'main', file);
       expect(src, `${file} registers an IPC handler`).not.toContain('ipcMain.handle');
       expect(src, `${file} imports the supervisor`).not.toMatch(/from '\.\/dbSupervisor'/);

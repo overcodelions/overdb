@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { SchemaSnapshot } from '@shared/types';
+import type { MapLink } from '@shared/dbMap';
 import {
   buildGraph,
   edgePath,
@@ -19,9 +20,11 @@ import { useStore } from './store';
 /// nothing, so the default is one table and what touches it, and widening
 /// is a deliberate act.
 ///
-/// Every edge here comes from a constraint the server holds. A column named
-/// `user_id` with no foreign key behind it is not drawn, because a guess
-/// rendered in the same ink as a fact is indistinguishable from one.
+/// Every solid edge here comes from a constraint the server holds. A column
+/// named `user_id` with no foreign key behind it is not drawn, because a
+/// guess rendered in the same ink as a fact is indistinguishable from one.
+/// The one other kind is a link the database map read from the code, cited
+/// to a line: dashed, in the AI colour, and switchable off.
 
 const NODE_MIN_W = 190;
 const NODE_MAX_W = 320;
@@ -34,10 +37,13 @@ type Detail = 'none' | 'keys' | 'all';
 
 export function ErdView({
   snapshot,
+  connectionId,
   connectionName,
   onPickTable,
 }: {
   snapshot: SchemaSnapshot | undefined;
+  /// Whose database map to draw the code's links from.
+  connectionId?: string;
   connectionName: string;
   /// Jump the editor at a table. The diagram is for reading; acting on what
   /// you found belongs back in the query pane.
@@ -49,11 +55,26 @@ export function ErdView({
   const [depth, setDepth] = useState(1);
   const [detail, setDetail] = useState<Detail>('keys');
   const [schemaFilter, setSchemaFilter] = useState<string>('');
+  const [codeLinks, setCodeLinks] = useState<MapLink[]>([]);
+  const [showCode, setShowCode] = useState(true);
+
+  useEffect(() => {
+    if (!connectionId) return;
+    let live = true;
+    void window.overdb
+      .invoke('map:read', connectionId)
+      .catch(() => null)
+      .then((m) => live && setCodeLinks(m?.links ?? []));
+    return () => {
+      live = false;
+    };
+  }, [connectionId]);
 
   const full = useMemo(
-    () => (snapshot ? buildGraph(snapshot, schemaFilter ? [schemaFilter] : undefined) : null),
-    [snapshot, schemaFilter],
+    () => (snapshot ? buildGraph(snapshot, schemaFilter ? [schemaFilter] : undefined, showCode ? codeLinks : []) : null),
+    [snapshot, schemaFilter, showCode, codeLinks],
   );
+  const codeEdges = full?.edges.filter((e) => e.source === 'code').length ?? 0;
 
   const graph = useMemo(() => {
     if (!full) return null;
@@ -148,6 +169,16 @@ export function ErdView({
         )}
 
         <div className="flex-1" />
+
+        {codeLinks.length > 0 && (
+          <label
+            className="flex items-center gap-1.5 text-[11px] text-ai"
+            title="Links the database map read from the code, cited to a line. Dashed, so they are never mistaken for a foreign key."
+          >
+            <input type="checkbox" checked={showCode} onChange={(e) => setShowCode(e.target.checked)} className="accent-[rgb(var(--c-ai))]" />
+            Links from the code{showCode && codeEdges ? ` · ${codeEdges}` : ''}
+          </label>
+        )}
 
         <div className="flex items-center gap-px">
           {(['none', 'keys', 'all'] as Detail[]).map((d) => (
@@ -391,25 +422,21 @@ function Canvas({
             const b = boxes[e.to];
             if (!a || !b) return null;
             const on = lit === null ? false : lit.has(e.id);
+            const code = e.source === 'code';
+            const stroke = code
+              ? on ? 'rgb(var(--c-ai))' : 'rgb(var(--c-ai) / 0.6)'
+              : on ? 'rgb(var(--c-accent))' : 'rgb(var(--c-ink-faint) / 0.75)';
             return (
               <g key={e.id} opacity={lit === null || on ? 1 : 0.22}>
-                {e.selfReference ? (
-                  <path
-                    d={selfLoop(a)}
-                    fill="none"
-                    stroke={on ? 'rgb(var(--c-accent))' : 'rgb(var(--c-ink-faint) / 0.75)'}
-                    strokeWidth={on ? 2 : 1.2}
-                    markerEnd="url(#erd-arrow)"
-                  />
-                ) : (
-                  <path
-                    d={edgePath(a, b)}
-                    fill="none"
-                    stroke={on ? 'rgb(var(--c-accent))' : 'rgb(var(--c-ink-faint) / 0.75)'}
-                    strokeWidth={on ? 2 : 1.2}
-                    markerEnd="url(#erd-arrow)"
-                  />
-                )}
+                {code && <title>{`From the code: ${e.why ?? ''}${e.ref ? ` (${e.ref})` : ''}`}</title>}
+                <path
+                  d={e.selfReference ? selfLoop(a) : edgePath(a, b)}
+                  fill="none"
+                  stroke={stroke}
+                  strokeWidth={on ? 2 : 1.2}
+                  strokeDasharray={code ? '5 4' : undefined}
+                  markerEnd="url(#erd-arrow)"
+                />
                 {/* The cardinality, written rather than drawn as feet: a
                     crow's foot at this scale is three pixels of noise, and
                     "many → 1" is unambiguous at any zoom. */}
@@ -421,7 +448,7 @@ function Canvas({
                     className="fill-ink-muted text-[10px]"
                   >
                     {e.columns.join(', ')} → {e.refColumns.join(', ')}
-                    {e.toCardinality === 'zero-or-one' ? ' (optional)' : ''}
+                    {e.source === 'code' ? ' (from the code)' : e.toCardinality === 'zero-or-one' ? ' (optional)' : ''}
                   </text>
                 )}
               </g>

@@ -17,11 +17,14 @@
 import { MysqlAdapter } from '../db/adapters/mysql';
 import { DynamoAdapter } from '../db/adapters/dynamodb';
 import { PostgresAdapter } from '../db/adapters/postgres';
-import type { Engine } from '../shared/engines';
+import type { Engine, Variant } from '../shared/engines';
+import { isRedshift } from '../shared/engines';
 import { SqliteAdapter } from '../db/adapters/sqlite';
 import type { DbAdapter } from '../db/adapter';
 import { cleanError } from './cleanError';
-import type { HostRequest, HostResponse } from './protocol';
+import type { BaselineFindValue, BaselineStatsValue, HostRequest, HostResponse, SeedStatsValue } from './protocol';
+import { findSql } from '../shared/baseline';
+import { quoteIdent } from '../shared/orderBy';
 
 /// Electron's utilityProcess exposes `parentPort`; child_process.fork uses
 /// `process.send`. Supporting both is what makes the CLI path free later.
@@ -67,6 +70,204 @@ function makeAdapter(engine: Engine): DbAdapter {
 
 const wire = transport();
 let adapter: DbAdapter | null = null;
+let engine: Engine | null = null;
+/// What the server said it was on connecting: Redshift answers as Postgres
+/// but keeps its sizes elsewhere.
+let variant: Variant | null = null;
+
+/// Table statistics for the seed flow — see SeedStatsValue. One catalog
+/// query per engine, because a local copy of production is 900 tables and
+/// counting them is minutes of disk for numbers the server already keeps.
+async function seedStats(a: DbAdapter, schema: string, countUnknown: boolean, cap: number): Promise<SeedStatsValue> {
+  const q = (name: string) => quoteIdent(name, engine ?? 'postgres');
+  const num = (v: unknown): number | null => {
+    if (v === null || v === undefined || v === '') return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  };
+  const out: SeedStatsValue = { tables: [], maxId: null };
+  const bump = (n: number | null) => {
+    if (n !== null) out.maxId = Math.max(out.maxId ?? 0, n);
+  };
+
+  if (engine === 'mysql') {
+    // MySQL 8 serves these from a cache up to a day old by default; a stale
+    // AUTO_INCREMENT would put the seed's ids on top of real ones. MariaDB
+    // has no such setting and reads them live.
+    await a.query('SET SESSION information_schema_stats_expiry = 0').catch(() => undefined);
+    const r = await a.query(
+      `SELECT TABLE_NAME, TABLE_ROWS, AUTO_INCREMENT FROM information_schema.TABLES
+        WHERE TABLE_SCHEMA = ? AND TABLE_TYPE = 'BASE TABLE'`,
+      [schema],
+    );
+    for (const [name, rows, auto] of r.rows) {
+      out.tables.push({ table: String(name), rows: num(rows), approx: true, capped: false });
+      const next = num(auto);
+      bump(next === null ? null : next - 1);
+    }
+  } else if (engine === 'postgres') {
+    const r = await a.query(
+      `SELECT c.relname, c.reltuples FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = $1 AND c.relkind IN ('r', 'p')`,
+      [schema],
+    );
+    // -1 is "never analyzed", which is not the same as empty.
+    for (const [name, rows] of r.rows) {
+      const n = num(rows);
+      out.tables.push({ table: String(name), rows: n !== null && n >= 0 ? Math.round(n) : null, approx: true, capped: false });
+    }
+    const seq = await a
+      .query('SELECT max(last_value) FROM pg_sequences WHERE schemaname = $1', [schema])
+      .catch(() => null);
+    bump(num(seq?.rows[0]?.[0]));
+  } else if (engine === 'sqlite') {
+    // No statistics to read, but a SQLite file is on this machine and a
+    // bounded count of a local file is cheap.
+    const r = await a.query(`SELECT name FROM ${q(schema)}.sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`);
+    for (const [name] of r.rows) {
+      const target = `${q(schema)}.${q(String(name))}`;
+      const c = await a.query(`SELECT COUNT(*) FROM (SELECT 1 FROM ${target} LIMIT ${cap + 1}) AS bounded`);
+      const n = num(c.rows[0]?.[0]) ?? 0;
+      out.tables.push({ table: String(name), rows: Math.min(n, cap), approx: false, capped: n > cap });
+      // rowid is the integer primary key where there is one; a WITHOUT
+      // ROWID table has neither and is skipped.
+      const m = await a.query(`SELECT MAX(rowid) FROM ${target}`).catch(() => null);
+      bump(num(m?.rows[0]?.[0]));
+    }
+    return out;
+  }
+
+  // Where the server had no estimate and size decides the gate, a bounded
+  // count — stopping at the first table that reaches the cap, because the
+  // answer is already no.
+  if (countUnknown) {
+    for (const t of out.tables) {
+      if (t.rows !== null) continue;
+      const c = await a.query(`SELECT COUNT(*) FROM (SELECT 1 FROM ${q(schema)}.${q(t.table)} LIMIT ${cap + 1}) AS bounded`);
+      const n = num(c.rows[0]?.[0]) ?? 0;
+      t.rows = Math.min(n, cap);
+      t.approx = false;
+      t.capped = n > cap;
+      if (t.capped) break;
+    }
+  }
+  return out;
+}
+
+/// Sizes for baseline discovery — see the 'baselineStats' request.
+async function baselineStats(a: DbAdapter, schemas: string[]): Promise<BaselineStatsValue> {
+  if (schemas.length === 0) return [];
+  const q = (name: string) => quoteIdent(name, engine ?? 'postgres');
+  const num = (v: unknown): number | null => {
+    if (v === null || v === undefined || v === '') return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  };
+  const out: BaselineStatsValue = [];
+  /// Tables this user may not read, so nothing is asked of them that would
+  /// be refused.
+  let noReading = new Set<string>();
+  if (engine === 'mysql') {
+    await a.query('SET SESSION information_schema_stats_expiry = 0').catch(() => undefined);
+    const r = await a.query(
+      `SELECT TABLE_SCHEMA, TABLE_NAME, TABLE_ROWS, DATA_LENGTH + INDEX_LENGTH FROM information_schema.TABLES
+        WHERE TABLE_TYPE = 'BASE TABLE' AND TABLE_SCHEMA IN (${schemas.map(() => '?').join(', ')})`,
+      schemas,
+    );
+    for (const [s, t, rows, bytes] of r.rows) out.push({ schema: String(s), table: String(t), rows: num(rows), bytes: num(bytes) });
+  } else if (engine === 'postgres' && isRedshift(variant ?? undefined)) {
+    // Redshift has no pg_total_relation_size, and its pg_class counts are not
+    // kept: svv_table_info has both, in rows and 1 MB blocks.
+    // svv_table_info needs more than a plain user's rights on most clusters;
+    // pg_class anyone can read, with row estimates and no sizes.
+    // Literals, since Redshift takes no array parameter. A backslash may be
+    // an escape there, so a schema name with one is never put in a query.
+    const lit = (x: string) => `'${x.replace(/'/g, "''")}'`;
+    const list = schemas.filter((x) => !x.includes('\\')).map(lit).join(', ') || "''";
+    // Asked first, never tried: a refused statement aborts the read-only
+    // transaction it runs in, and anything else on this connection at that
+    // moment fails with it ("current transaction is aborted").
+    const allowed = await a.query(`SELECT has_table_privilege('svv_table_info', 'select')`).catch(() => null);
+    const info =
+      allowed && String(allowed.rows[0]?.[0]) === 'true'
+        ? await a.query(`SELECT "schema", "table", tbl_rows, size FROM svv_table_info WHERE "schema" IN (${list})`).catch(() => null)
+        : null;
+    if (info) {
+      for (const [s, t, rows, mb] of info.rows) {
+        const n = num(mb);
+        out.push({ schema: String(s), table: String(t), rows: num(rows), bytes: n === null ? null : n * 1024 * 1024 });
+      }
+    } else {
+      // A table is asked about by name, and naming it needs its schema: in
+      // a schema this user may not use, the question itself is refused
+      // ("permission denied for schema zendesk"). So the schemas are asked
+      // first, and only the usable ones' tables are asked about.
+      const usage = await a.query(`SELECT nspname, has_schema_privilege(nspname, 'usage') FROM pg_namespace WHERE nspname IN (${list})`).catch(() => null);
+      const usable = usage ? usage.rows.filter(([, ok]) => String(ok) === 'true').map(([s]) => String(s)) : schemas;
+      const usableList = usable.filter((x) => !x.includes('\\')).map(lit).join(', ') || "''";
+      const r = await a.query(
+        `SELECT n.nspname, c.relname, c.reltuples,
+                has_table_privilege(quote_ident(n.nspname) || '.' || quote_ident(c.relname), 'select')
+           FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+          WHERE c.relkind = 'r' AND n.nspname IN (${usableList})
+          UNION ALL
+         SELECT n.nspname, c.relname, c.reltuples, false
+           FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+          WHERE c.relkind = 'r' AND n.nspname IN (${list}) AND n.nspname NOT IN (${usableList})`,
+      );
+      const readable = new Set<string>();
+      for (const [s, t, rows, can] of r.rows) {
+        const n = num(rows);
+        out.push({ schema: String(s), table: String(t), rows: n !== null && n > 0 ? Math.round(n) : null, bytes: null });
+        if (String(can) === 'true') readable.add(`${s}.${t}`);
+      }
+      noReading = new Set(out.filter((t) => !readable.has(`${t.schema}.${t.table}`)).map((t) => `${t.schema}.${t.table}`));
+      // A table of unknown size would be copied whole as if it were small,
+      // and on Redshift that can be a billion-row fact table. Counting is
+      // quick there — it reads block metadata — so count what has no
+      // estimate rather than guess.
+      // Within a time limit: this connection's other requests wait behind
+      // these, and past it a table of unknown size is left for a person.
+      const until = Date.now() + 30_000;
+      for (const t of out) {
+        if (Date.now() > until) break;
+        if (t.rows !== null || noReading.has(`${t.schema}.${t.table}`)) continue;
+        const c = await a.query(`SELECT COUNT(*) FROM ${q(t.schema)}.${q(t.table)}`).catch(() => null);
+        t.rows = c ? num(c.rows[0]?.[0]) : null;
+      }
+    }
+  } else if (engine === 'postgres') {
+    const r = await a.query(
+      `SELECT n.nspname, c.relname, c.reltuples, pg_total_relation_size(c.oid) FROM pg_class c
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE c.relkind IN ('r', 'p') AND n.nspname = ANY($1)`,
+      [schemas],
+    );
+    // -1 is "never analyzed", which is not the same as empty.
+    for (const [s, t, rows, bytes] of r.rows) {
+      const n = num(rows);
+      out.push({ schema: String(s), table: String(t), rows: n !== null && n >= 0 ? Math.round(n) : null, bytes: num(bytes) });
+    }
+  } else if (engine === 'sqlite') {
+    for (const s of schemas) {
+      const r = await a.query(`SELECT name FROM ${q(s)}.sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`);
+      for (const [name] of r.rows) {
+        const c = await a.query(`SELECT COUNT(*) FROM ${q(s)}.${q(String(name))}`);
+        out.push({ schema: s, table: String(name), rows: num(c.rows[0]?.[0]), bytes: null });
+      }
+    }
+    return out;
+  }
+  const probeUntil = Date.now() + 30_000;
+  for (const t of out) {
+    if (Date.now() > probeUntil) break;
+    if (t.rows !== 0 && t.rows !== null) continue;
+    if (noReading.has(`${t.schema}.${t.table}`)) continue;
+    const r = await a.query(`SELECT 1 FROM ${q(t.schema)}.${q(t.table)} LIMIT 1`).catch(() => null);
+    if (r) t.rows = r.rows.length === 0 ? 0 : null;
+  }
+  return out;
+}
 
 /// Last resort. The adapters listen for their own driver's connection
 /// errors, but a driver that throws from a timer or a socket callback we
@@ -187,14 +388,32 @@ async function runQuery(req: Extract<HostRequest, { op: 'run' }>): Promise<void>
   }
 }
 
+/// Postgres requests run one at a time. Each statement runs in its own
+/// read-only transaction, and a connection has one: two requests at once —
+/// discovery and the schema tree, say — interleave their BEGINs and COMMITs,
+/// and one refused statement aborts the other's work ("current transaction
+/// is aborted"). The driver already queues statements on its connection, so
+/// nothing waits longer than it did; what changes is that a request's
+/// transaction is its own. Never queued: an ack (a run in flight waits on
+/// it), cancel (it must reach a running statement — it uses a second
+/// connection), close and connect. MySQL is left as it was.
+const UNQUEUED: ReadonlySet<string> = new Set(['ack', 'cancel', 'close', 'connect']);
+let queue: Promise<unknown> = Promise.resolve();
+function serially(work: () => Promise<void>): void {
+  const next = queue.then(work, work);
+  queue = next.catch(() => undefined);
+}
+
 wire.onMessage((req) => {
-  void (async () => {
+  const work = async () => {
     try {
       switch (req.op) {
         case 'connect': {
           adapter = makeAdapter(req.spec.engine);
+          engine = req.spec.engine;
           await adapter.connect(req.spec);
           const ping = await adapter.ping();
+          variant = ping.ok ? ping.variant : null;
           wire.send({ kind: 'reply', id: req.id, ok: true, value: ping });
           return;
         }
@@ -273,6 +492,44 @@ wire.onMessage((req) => {
             value: await require_().killSession(req.sessionId, { terminate: req.terminate }),
           });
           return;
+        case 'seedStats':
+          wire.send({
+            kind: 'reply', id: req.id, ok: true,
+            value: await seedStats(require_(), req.schema, req.countUnknown, req.cap),
+          });
+          return;
+        case 'baselineStats':
+          wire.send({ kind: 'reply', id: req.id, ok: true, value: await baselineStats(require_(), req.schemas) });
+          return;
+        case 'baselineDistinct': {
+          const qi = (n: string) => quoteIdent(n, engine ?? 'postgres');
+          const target = engine === 'sqlite' ? qi(req.table) : `${qi(req.schema)}.${qi(req.table)}`;
+          const cols = req.columns.map(qi).join(', ');
+          const sample = Math.max(1, Math.min(200_000, Math.floor(req.sample)));
+          const limit = Math.max(1, Math.min(5_000, Math.floor(req.limit)));
+          const r = await require_().query(
+            `SELECT DISTINCT ${cols} FROM (SELECT ${cols} FROM ${target} LIMIT ${sample}) sampled LIMIT ${limit}`,
+            [],
+            limit,
+          );
+          wire.send({ kind: 'reply', id: req.id, ok: true, value: r.rows });
+          return;
+        }
+        case 'baselineCount': {
+          const qi = (n: string) => quoteIdent(n, engine ?? 'postgres');
+          const target = engine === 'sqlite' ? qi(req.table) : `${qi(req.schema)}.${qi(req.table)}`;
+          const values = req.values.slice(0, 1000);
+          const holders = values.map((_, i) => (engine === 'postgres' ? `$${i + 1}` : '?')).join(', ');
+          const r = await require_().query(`SELECT COUNT(*) FROM ${target} WHERE ${qi(req.column)} IN (${holders || 'NULL'})`, values, 1);
+          wire.send({ kind: 'reply', id: req.id, ok: true, value: Number(r.rows[0]?.[0] ?? 0) });
+          return;
+        }
+        case 'baselineFind': {
+          const { sql, params } = findSql(engine ?? 'postgres', req.req);
+          const r = await require_().query(sql, params, req.req.limit);
+          wire.send({ kind: 'reply', id: req.id, ok: true, value: { rows: r.rows } satisfies BaselineFindValue });
+          return;
+        }
         case 'run':
           wire.send({ kind: 'reply', id: req.id, ok: true, value: { started: true } });
           await runQuery(req);
@@ -298,5 +555,7 @@ wire.onMessage((req) => {
     } catch (err) {
       wire.send({ kind: 'reply', id: req.id, ok: false, error: cleanError(err) });
     }
-  })();
+  };
+  if (engine === 'postgres' && !UNQUEUED.has(req.op)) serially(work);
+  else void work();
 });

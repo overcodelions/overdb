@@ -6,6 +6,11 @@ import { useStore } from './store';
 import { EnvSetSuggestion } from './Welcome';
 import { TAG_DOT, TAG_TEXT } from './engineTags';
 import { middleTruncate, nameBudget } from '@shared/truncate';
+import { useTickets } from './ticketsStore';
+import { Branches } from './TicketSection';
+import { devInstanceRefusal, isProxyConnectionId } from '@shared/instances';
+import { Dropdown, MenuDivider, MenuItem } from './Menu';
+import { MAP_TAB, openPane } from './queryStore';
 
 /// Which sections the user has folded away. Per-viewer convenience, so it
 /// lives in the browser rather than the app store — and every access is
@@ -30,8 +35,46 @@ function haystack(c: Connection): string {
     .toLowerCase();
 }
 
+const ENV_KEY = 'overdb.sidebar.env';
+
+function loadEnv(): EnvKind | 'all' {
+  try {
+    return (localStorage.getItem(ENV_KEY) as EnvKind | 'all' | null) ?? 'all';
+  } catch {
+    return 'all';
+  }
+}
+
+// Environment order is deliberate and fixed: it reads the way work flows,
+// and it puts prod last, where it is hardest to click by accident.
+const ENV_ORDER: EnvKind[] = ['local', 'dev', 'sandbox', 'staging', 'prod', 'other'];
+const ENV_NAME: Record<EnvKind, string> = { local: 'Local', dev: 'Dev', sandbox: 'Sandbox', staging: 'Staging', prod: 'Prod', other: 'Other' };
+const ENV_ON: Record<EnvKind, string> = {
+  local: 'bg-good/15 text-good',
+  dev: 'bg-good/15 text-good',
+  sandbox: 'bg-accent/15 text-accent-strong',
+  staging: 'bg-warn/15 text-warn-strong',
+  prod: 'bg-bad/15 text-bad-strong',
+  other: 'bg-wash-strong text-ink',
+};
+
+/// The sidebar is two questions: which environment you are in, then which
+/// database. The switch at the top answers the first — you work in one at a
+/// time, and a team with five connections per environment cannot see them
+/// all at once anyway. Every connection is listed under its environment,
+/// whether or not a set holds it; environment sets (one database, in each
+/// place) are how you compare, so they sit in a dock below the list.
+/// Branches nest under the connection they came from.
 export function Sidebar(): JSX.Element {
-  const connections = useStore((s) => s.connections);
+  const allConnections = useStore((s) => s.connections);
+  const ticketState = useTickets();
+  // Branches and the proxy's own connection show under their source, not as
+  // connections of their own.
+  const ticketConnIds = useMemo(() => new Set(ticketState.tickets.map((t) => t.connectionId)), [ticketState.tickets]);
+  const connections = useMemo(
+    () => allConnections.filter((c) => !ticketConnIds.has(c.id) && !isProxyConnectionId(c.id)),
+    [allConnections, ticketConnIds],
+  );
   const groups = useStore((s) => s.groups);
   const envSets = useStore((s) => s.envSets);
   const selection = useStore((s) => s.selection);
@@ -39,6 +82,8 @@ export function Sidebar(): JSX.Element {
   const setSheet = useStore((s) => s.setSheet);
 
   const [query, setQuery] = useState('');
+  const [starred, setStarred] = useState(false);
+  const [env, setEnv] = useState<EnvKind | 'all'>(loadEnv);
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>(loadCollapsed);
   const searchRef = useRef<HTMLInputElement>(null);
 
@@ -49,6 +94,13 @@ export function Sidebar(): JSX.Element {
       // Losing fold state costs nothing; failing to render the nav does not.
     }
   }, [collapsed]);
+  useEffect(() => {
+    try {
+      localStorage.setItem(ENV_KEY, env);
+    } catch {
+      // As above.
+    }
+  }, [env]);
 
   // ⌘F puts the cursor in the filter from anywhere. Finding one connection
   // among twenty by scrolling is the thing this replaces.
@@ -63,52 +115,72 @@ export function Sidebar(): JSX.Element {
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
+  const envs = ENV_ORDER.filter((e) => connections.some((c) => c.env === e));
+  const showTabs = envs.length > 1;
+  const current: EnvKind | 'all' = showTabs && env !== 'all' && envs.includes(env) ? env : 'all';
+
+  // Opening a connection from elsewhere (the palette, a shortcut, a branch)
+  // that this tab hides moves to its environment, so the row you are on is
+  // always one you can see.
+  useEffect(() => {
+    if (selection?.kind !== 'connection' || current === 'all') return;
+    const c = connections.find((x) => x.id === selection.id);
+    if (c && c.env !== current) setEnv(c.env);
+    const t = ticketState.tickets.find((x) => x.connectionId === selection.id);
+    const src = t && connections.find((x) => x.id === t.sourceConnectionId);
+    if (src && src.env !== current) setEnv(src.env);
+  }, [selection]);
+
   const q = query.trim().toLowerCase();
-  const matches = useMemo(
-    () => (q ? connections.filter((c) => haystack(c).includes(q)) : connections),
-    [connections, q],
-  );
-  const matchIds = useMemo(() => new Set(matches.map((c) => c.id)), [matches]);
-
-  const ungrouped = matches.filter((c) => !groups.some((g) => g.connectionIds.includes(c.id)));
   const active = envSets.filter((e) => !e.archived);
+  const starredSet = (c: Connection) => c.pinned || active.some((e) => e.pinned && e.memberIds.includes(c.id));
+  // A search looks everywhere: the tab is where you are, not a wall.
+  const inScope = (c: Connection) => (!!q || current === 'all' || c.env === current) && (!starred || starredSet(c));
+  const matches = useMemo(
+    () => connections.filter((c) => inScope(c) && (!q || haystack(c).includes(q))),
+    [connections, q, current, starred, active],
+  );
+  const matchIds = new Set(matches.map((c) => c.id));
+  const byPin = (a: { pinned?: boolean }, b: { pinned?: boolean }) => Number(!!b.pinned) - Number(!!a.pinned);
 
-  // What you are working with, in a fixed place. Pinned rather than
-  // most-recent on purpose: a list that reorders itself defeats the muscle
-  // memory that makes it fast.
-  const pinnedSets = active.filter((e) => e.pinned);
-  const pinnedConns = matches.filter((c) => c.pinned);
-  const pinnedCount = pinnedSets.length + pinnedConns.length;
-  // While filtering, a set earns its place by containing a match — otherwise
-  // the filter would say "3 of 20" and still show every set.
-  const visibleSets = q
-    ? active.filter(
-        (e) =>
-          e.name.toLowerCase().includes(q) || e.memberIds.some((id) => matchIds.has(id)),
-      )
-    : active;
-
-  // Environment order is deliberate and fixed: it reads the way work flows,
-  // and it puts prod at the bottom where it is hardest to click by accident.
-  const ENV_ORDER: EnvKind[] = ['local', 'dev', 'sandbox', 'staging', 'prod', 'other'];
-  const byEnv = ENV_ORDER.map((env) => ({
-    env,
-    items: ungrouped.filter((c) => c.env === env),
-  })).filter((bucket) => bucket.items.length > 0);
-  // One environment is not a grouping, it is a list — don't add a heading
-  // that tells the user something they can already see.
-  const showEnvHeadings = byEnv.length > 1;
+  // Sets are how you compare, not where a connection lives: every
+  // connection is listed under its environment, and the sets sit in a dock
+  // below, one row each. A search keeps a set whose name or members match.
+  const sets = active
+    .filter((e) => {
+      if (starred && !e.pinned) return false;
+      if (!q) return true;
+      return e.name.toLowerCase().includes(q) || e.memberIds.some((id) => matchIds.has(id));
+    })
+    .sort(byPin);
+  const inGroup = new Set(groups.flatMap((g) => g.connectionIds));
+  const loose = matches.filter((c) => !inGroup.has(c.id)).sort(byPin);
+  const looseByEnv = ENV_ORDER.map((e) => ({ env: e, items: loose.filter((c) => c.env === e) })).filter((b) => b.items.length > 0);
+  // Branches whose connection was deleted still need a home.
+  const orphans = ticketState.tickets.some((t) => !connections.some((c) => c.id === t.sourceConnectionId));
 
   const toggle = (key: string) => setCollapsed((prev) => ({ ...prev, [key]: !prev[key] }));
   // A filter that hides its results inside a folded section is broken, so
   // searching overrides the fold rather than fighting it.
   const isFolded = (key: string) => !q && Boolean(collapsed[key]);
+  const withBranches = (c: Connection, opts: { showEnv: boolean }) => (
+    <div key={c.id}>
+      <ConnectionRow connection={c} showEnv={opts.showEnv} />
+      <Branches
+        sourceConnectionId={c.id}
+        query={q}
+        folded={isFolded(`branches:${c.id}`)}
+        onToggle={() => toggle(`branches:${c.id}`)}
+      />
+    </div>
+  );
 
-  const nothingMatched = q.length > 0 && matches.length === 0 && visibleSets.length === 0;
+  const nothingMatched = (q.length > 0 || starred) && matches.length === 0 && sets.length === 0;
+  const nothingHere = !q && !starred && connections.length > 0 && matches.length === 0;
 
   return (
     <div className="h-full flex flex-col bg-surface-muted border-r border-card">
-      <div className="px-3 pt-2.5 pb-2 shrink-0">
+      <div className="px-3 pt-2.5 pb-2 shrink-0 flex gap-1.5">
         <input
           ref={searchRef}
           value={query}
@@ -126,11 +198,54 @@ export function Sidebar(): JSX.Element {
               select({ kind: 'connection', id: matches[0].id });
             }
           }}
-          placeholder="Find a connection"
-          aria-label="Find a connection"
-          className="field w-full px-2 py-1 text-[11px]"
+          placeholder="Find a connection or set"
+          aria-label="Find a connection or set"
+          className="field flex-1 min-w-0 px-2 py-1 text-[11px]"
         />
+        <button
+          onClick={() => setStarred(!starred)}
+          aria-pressed={starred}
+          title={starred ? 'Show everything' : 'Only starred'}
+          aria-label="Only starred"
+          className={`shrink-0 w-[26px] rounded-md border flex items-center justify-center ${starred ? 'border-accent/60 bg-accent/15 text-accent' : 'border-card text-ink-faint hover:text-ink'}`}
+        >
+          <svg width="11" height="11" viewBox="0 0 12 12" fill={starred ? 'currentColor' : 'none'} aria-hidden="true">
+            <path d="M6 1.2 7.4 4.3l3.4.4-2.5 2.3.7 3.3L6 8.7l-3 1.6.7-3.3L1.2 4.7l3.4-.4L6 1.2Z" stroke="currentColor" strokeWidth="1.1" strokeLinejoin="round" />
+          </svg>
+        </button>
       </div>
+
+      {showTabs && (
+        <div
+          role="tablist"
+          aria-label="Environment"
+          className={`mx-3 mb-2 shrink-0 flex gap-px p-[2px] rounded-md bg-surface border border-card ${q ? 'opacity-50' : ''}`}
+          title={q ? 'Searching every environment' : undefined}
+        >
+          {(['all', ...envs] as const).map((e) => {
+            const on = current === e;
+            return (
+              <button
+                key={e}
+                role="tab"
+                aria-selected={on}
+                onClick={() => setEnv(e)}
+                className={`flex-auto min-w-0 h-[22px] px-1.5 rounded-[4px] text-[10.5px] whitespace-nowrap ${
+                  on ? `font-semibold ${e === 'all' ? 'bg-wash-strong text-ink' : ENV_ON[e]}` : 'text-ink-muted hover:text-ink'
+                }`}
+              >
+                {e === 'all' ? 'All' : ENV_NAME[e]}
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      {current === 'prod' && !q && (
+        <div className="mx-3 mb-2 shrink-0 px-2 py-1 rounded-md border border-bad/25 bg-bad/10 text-[10.5px] text-bad-strong">
+          Production — take care what you run.
+        </div>
+      )}
 
       <div className="flex-1 min-h-0 overflow-y-auto">
         {/* Only while something is open: with nothing selected the main
@@ -140,61 +255,20 @@ export function Sidebar(): JSX.Element {
 
         {nothingMatched && (
           <Empty>
-            Nothing matches “{query}”. Search names, hosts, databases and engines.
+            {starred && !q ? 'Nothing starred here yet. Star a connection or set from its row.' : `Nothing matches “${query}”. Search names, hosts, databases and engines.`}
           </Empty>
         )}
+        {nothingHere && <Empty>No {current === 'all' ? '' : `${ENV_NAME[current]} `}connections yet.</Empty>}
 
-        {pinnedCount > 0 && (
-          <Section
-            label="Pinned"
-            count={pinnedCount}
-            collapsed={isFolded('pinned')}
-            onToggle={() => toggle('pinned')}
-          >
-            {pinnedSets.map((e) => (
-              <EnvSetRow
-                key={e.id}
-                envSet={e}
-                connections={connections}
-                selected={selection?.kind === 'envSet' && selection.id === e.id}
-              />
-            ))}
-            {pinnedConns.map((c) => (
-              <ConnectionRow key={c.id} connection={c} />
-            ))}
-          </Section>
+        {orphans && (current === 'all' || current === 'local') && (
+          <div className="py-1">
+            <Branches sourceConnectionId={null} query={q} folded={isFolded('branches:orphans')} onToggle={() => toggle('branches:orphans')} />
+          </div>
         )}
 
-        <Section
-          label="Environment sets"
-          count={visibleSets.length || undefined}
-          collapsed={isFolded('envsets')}
-          onToggle={() => toggle('envsets')}
-          action={{ title: 'New environment set', onClick: () => setSheet({ kind: 'newEnvSet' }) }}
-        >
-          {visibleSets.length === 0 ? (
-            q ? null : (
-              <Empty>
-                Group the same database across local, staging and prod to query them together.
-              </Empty>
-            )
-          ) : (
-            visibleSets.map((e) => (
-              <EnvSetRow
-                key={e.id}
-                envSet={e}
-                connections={connections}
-                selected={selection?.kind === 'envSet' && selection.id === e.id}
-              />
-            ))
-          )}
-        </Section>
-
         {groups.map((g) => {
-          const items = connections.filter(
-            (c) => g.connectionIds.includes(c.id) && matchIds.has(c.id),
-          );
-          if (q && items.length === 0) return null;
+          const items = connections.filter((c) => g.connectionIds.includes(c.id) && matchIds.has(c.id));
+          if (items.length === 0) return null;
           return (
             <Section
               key={g.id}
@@ -203,123 +277,211 @@ export function Sidebar(): JSX.Element {
               collapsed={isFolded(`group:${g.id}`)}
               onToggle={() => toggle(`group:${g.id}`)}
             >
-              {items.map((c) => (
-                <ConnectionRow key={c.id} connection={c} />
-              ))}
+              {items.map((c) => withBranches(c, { showEnv: true }))}
             </Section>
           );
         })}
 
-        {ungrouped.length === 0 && !q ? (
+        {connections.length === 0 ? (
           <Section label="Connections">
             <Empty>No connections yet. Add one below, or import from a tool you already use.</Empty>
           </Section>
-        ) : showEnvHeadings ? (
-          byEnv.map(({ env, items }) => (
+        ) : (
+          looseByEnv.map(({ env: e, items }) => (
             <Section
-              key={env}
-              label={env}
+              key={e}
+              label={ENV_NAME[e]}
+              lead={<span aria-hidden="true" className={`w-1.5 h-1.5 rounded-full ${ENV_DOT[e]}`} />}
               count={items.length}
-              collapsed={isFolded(`env:${env}`)}
-              onToggle={() => toggle(`env:${env}`)}
+              collapsed={isFolded(`env:${e}`)}
+              onToggle={() => toggle(`env:${e}`)}
             >
-              {items.map((c) => (
-                <ConnectionRow key={c.id} connection={c} showEnv={false} />
-              ))}
+              {items.map((c) => withBranches(c, { showEnv: false }))}
             </Section>
           ))
-        ) : ungrouped.length > 0 ? (
-          <Section
-            label="Connections"
-            count={ungrouped.length}
-            collapsed={isFolded('connections')}
-            onToggle={() => toggle('connections')}
-          >
-            {ungrouped.map((c) => (
-              <ConnectionRow key={c.id} connection={c} />
-            ))}
-          </Section>
-        ) : null}
+        )}
       </div>
 
+      {connections.length > 1 && (sets.length > 0 || (!q && !starred)) && (
+        <SetDock
+          sets={sets}
+          env={q ? 'all' : current}
+          folded={Boolean(collapsed['dock:sets'])}
+          onToggle={() => toggle('dock:sets')}
+        />
+      )}
     </div>
   );
 }
 
-/// A set is its members, so the row says which environments it spans
-/// rather than a count — "local · staging · prod" is the thing you needed
-/// to know, and "3 envs" is not.
-function EnvSetRow({
-  envSet,
-  connections,
-  selected,
+const ENV_DOT: Record<EnvKind, string> = {
+  local: 'bg-good',
+  dev: 'bg-good',
+  sandbox: 'bg-accent',
+  staging: 'bg-warn',
+  prod: 'bg-bad',
+  other: 'bg-ink-faint',
+};
+
+/// The sets, below the list and always in view: one row each, the
+/// environments it spans as dots, and Compare. Under an environment tab the
+/// sets that have nothing there step back rather than disappear — they are
+/// still one click away, and a set that vanishes reads as deleted.
+function SetDock({
+  sets,
+  env,
+  folded,
+  onToggle,
 }: {
-  envSet: EnvSet;
-  connections: Connection[];
-  selected: boolean;
+  sets: EnvSet[];
+  env: EnvKind | 'all';
+  folded: boolean;
+  onToggle(): void;
 }): JSX.Element {
+  const selection = useStore((s) => s.selection);
+  const setSheet = useStore((s) => s.setSheet);
+  return (
+    <div className="shrink-0 max-h-[40%] flex flex-col border-t border-card bg-surface/40">
+      <div className="flex items-center px-3 pt-2 pb-1">
+        <button
+          onClick={onToggle}
+          aria-expanded={!folded}
+          className="flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider text-ink-faint hover:text-ink-muted"
+        >
+          <svg width="8" height="8" viewBox="0 0 8 8" aria-hidden="true" className={`transition-transform ${folded ? '' : 'rotate-90'}`}>
+            <path d="M2 1l4 3-4 3z" fill="currentColor" />
+          </svg>
+          Sets · compare
+        </button>
+        {sets.length > 0 && <span className="ml-1.5 text-[10px] tabular-nums text-ink-faint/70">{sets.length}</span>}
+        <div className="flex-1" />
+        <button onClick={() => setSheet({ kind: 'newEnvSet' })} className="text-[10.5px] text-accent hover:underline">
+          New set
+        </button>
+      </div>
+      {!folded && (
+        <div className="min-h-0 overflow-y-auto pb-1.5">
+          {sets.length === 0 ? (
+            <Empty>Make a set to compare the same database across local, staging and prod.</Empty>
+          ) : (
+            sets.map((s) => (
+              <SetRow key={s.id} envSet={s} env={env} selected={selection?.kind === 'envSet' && selection.id === s.id} />
+            ))
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SetRow({ envSet, env, selected }: { envSet: EnvSet; env: EnvKind | 'all'; selected: boolean }): JSX.Element {
   const select = useStore((s) => s.select);
   const setSheet = useStore((s) => s.setSheet);
   const askConfirm = useStore((s) => s.askConfirm);
   const removeEnvSet = useStore((s) => s.removeEnvSet);
   const togglePin = useStore((s) => s.togglePin);
-  const width = useStore((s) => s.settings.sidebarWidth);
-
-  const members = envSet.memberIds
-    .map((id) => connections.find((c) => c.id === id))
-    .filter((c): c is Connection => Boolean(c));
-  const hasProd = members.some((c) => c.env === 'prod');
-  const spelled = width >= NAME_BADGE_MIN_WIDTH;
-
-  const glyph = (
-    <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-      <path d="M8 2L14 5.2 8 8.4 2 5.2 8 2Z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
-      <path d="M2 8.4l6 3.2 6-3.2" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
-      <path d="M2 11.4l6 3.2 6-3.2" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" opacity="0.45" />
-    </svg>
-  );
+  const connections = useStore((s) => s.connections);
+  const members = envSet.memberIds.map((id) => connections.find((c) => c.id === id)).filter((c): c is Connection => !!c);
+  const envs = ENV_ORDER.filter((e) => members.some((c) => c.env === e));
+  const away = env !== 'all' && !envs.includes(env);
+  const open = () => select({ kind: 'envSet', id: envSet.id });
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  const remove = () =>
+    askConfirm({
+      title: `Delete ${envSet.name}?`,
+      body: 'This removes the set only. The connections in it are untouched.',
+      confirmLabel: 'Delete set',
+      destructive: true,
+      onConfirm: () => void removeEnvSet(envSet.id),
+    });
 
   return (
-    <Row
-      label={envSet.name}
-      detail={
-        members.length
-          ? [...new Set(members.map((c) => c.env))].join(' · ')
-          : 'No connections yet — edit to add some'
-      }
-      badge={
-        spelled ? (
-          <span
-            className="shrink-0 flex items-center gap-1 text-accent"
-            style={{ width: BADGE_WIDTH }}
-            title="Environment set"
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={open}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        setMenu({ x: e.clientX, y: e.clientY });
+      }}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          open();
+        }
+      }}
+      title={members.length ? `${envSet.name}: ${members.map((c) => c.name).join(', ')}` : `${envSet.name} has no connections yet`}
+      className={`group sidebar-row h-[26px] px-3 flex items-center gap-2 cursor-default ${selected ? 'sidebar-row-selected' : 'hover:bg-card'} ${
+        away && !selected ? 'opacity-40 hover:opacity-100' : ''
+      }`}
+    >
+      <span className="shrink-0 max-w-[55%] text-[11.5px] font-semibold text-ink truncate">{envSet.name}</span>
+      <span className="shrink-0 flex gap-[3px]" aria-hidden="true">
+        {envs.map((e) => (
+          <span key={e} className={`w-1.5 h-1.5 rounded-full ${ENV_DOT[e]}`} />
+        ))}
+      </span>
+      <span className="flex-1 min-w-0 text-[10px] text-ink-faint truncate">
+        {envs.length ? envs.map((e) => ENV_NAME[e].toLowerCase()).join(' · ') : 'empty'}
+      </span>
+      {envSet.pinned && <span className="shrink-0 text-accent text-[10px] group-hover:hidden" aria-label="Starred">★</span>}
+      <span className="shrink-0 hidden group-hover:flex group-focus-within:flex items-center" onClick={(e) => e.stopPropagation()}>
+          <button
+            onClick={() => void togglePin('envSet', envSet.id)}
+            title={envSet.pinned ? `Unstar ${envSet.name}` : `Star ${envSet.name}`}
+            aria-label={envSet.pinned ? `Unstar ${envSet.name}` : `Star ${envSet.name}`}
+            className="w-5 h-5 flex items-center justify-center rounded text-ink-faint hover:text-ink hover:bg-card"
           >
-            {glyph}
-            <span className="text-[9.5px] font-semibold leading-none opacity-80">Set</span>
-          </span>
-        ) : (
-          <span className="shrink-0 w-1.5 h-1.5 rounded-full bg-accent" title="Environment set" />
-        )
-      }
-      badgeWidth={spelled ? BADGE_WIDTH : 6}
-      selected={selected}
-      onClick={() => select({ kind: 'envSet', id: envSet.id })}
-      onEdit={() => setSheet({ kind: 'editEnvSet', id: envSet.id })}
-      editTitle={`Edit ${envSet.name}`}
-      onDelete={() =>
-        askConfirm({
-          title: `Delete ${envSet.name}?`,
-          body: 'This removes the set only. The connections in it are untouched.',
-          confirmLabel: 'Delete set',
-          destructive: true,
-          onConfirm: () => void removeEnvSet(envSet.id),
-        })
-      }
-      deleteTitle={`Delete ${envSet.name}`}
-      pinned={envSet.pinned}
-      onPin={() => void togglePin('envSet', envSet.id)}
-      tone={hasProd ? 'warn' : 'normal'}
-    />
+            <svg width="11" height="11" viewBox="0 0 12 12" fill={envSet.pinned ? 'currentColor' : 'none'} aria-hidden="true">
+              <path d="M6 1.2 7.4 4.3l3.4.4-2.5 2.3.7 3.3L6 8.7l-3 1.6.7-3.3L1.2 4.7l3.4-.4L6 1.2Z" stroke="currentColor" strokeWidth="1.1" strokeLinejoin="round" />
+            </svg>
+          </button>
+          <button
+            onClick={() => setSheet({ kind: 'editEnvSet', id: envSet.id })}
+            title={`Edit ${envSet.name}`}
+            aria-label={`Edit ${envSet.name}`}
+            className="w-5 h-5 flex items-center justify-center rounded text-ink-faint hover:text-ink hover:bg-card"
+          >
+            <svg width="11" height="11" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+              <path d="M8.2 1.8a1.1 1.1 0 0 1 1.6 1.6L4.4 8.8l-2.2.6.6-2.2 5.4-5.4Z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
+            </svg>
+          </button>
+          <button
+            onClick={() =>
+              askConfirm({
+                title: `Delete ${envSet.name}?`,
+                body: 'This removes the set only. The connections in it are untouched.',
+                confirmLabel: 'Delete set',
+                destructive: true,
+                onConfirm: () => void removeEnvSet(envSet.id),
+              })
+            }
+            title={`Delete ${envSet.name}`}
+            aria-label={`Delete ${envSet.name}`}
+            className="w-5 h-5 flex items-center justify-center rounded text-ink-faint hover:text-bad hover:bg-card"
+          >
+            <svg width="11" height="11" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+              <path d="M3 3l6 6M9 3l-6 6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+            </svg>
+          </button>
+      </span>
+      <span
+        title={`Open ${envSet.name} across every environment: drift, and queries on all of them`}
+        className="shrink-0 text-[10.5px] text-accent"
+      >
+        Compare
+      </span>
+      <span onClick={(e) => e.stopPropagation()}>
+        <Dropdown open={!!menu} at={menu ?? undefined} onClose={() => setMenu(null)} label={envSet.name} width={230}>
+          <MenuItem label="Compare" detail="Drift, and queries on every member" onSelect={() => { setMenu(null); open(); }} />
+          <MenuDivider />
+          <MenuItem label={envSet.pinned ? 'Unstar' : 'Star'} onSelect={() => { setMenu(null); void togglePin('envSet', envSet.id); }} />
+          <MenuItem label="Edit…" onSelect={() => { setMenu(null); setSheet({ kind: 'editEnvSet', id: envSet.id }); }} />
+          <MenuDivider />
+          <MenuItem label="Delete…" onSelect={() => { setMenu(null); remove(); }} />
+        </Dropdown>
+      </span>
+    </div>
   );
 }
 
@@ -372,6 +534,7 @@ function ConnectionRow({
   const togglePin = useStore((s) => s.togglePin);
   const state = useStore((s) => s.connState[connection.id]);
   const width = useStore((s) => s.settings.sidebarWidth);
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
 
   const requestDelete = () =>
     askConfirm({
@@ -388,47 +551,123 @@ function ConnectionRow({
   const spelled = width >= NAME_BADGE_MIN_WIDTH;
 
   return (
-    <Row
-      label={connection.name}
-      detail={detailFor(connection)}
-      badge={
-        spelled ? (
-          <span
-            title={variantLabel(connection.variant, connection.engine)}
-            style={{ width: BADGE_WIDTH }}
-            className={`shrink-0 truncate text-[9.5px] font-semibold leading-none ${TAG_TEXT[variant]}`}
-          >
-            {variantTag(connection.variant, connection.engine)}
-          </span>
-        ) : (
-          <span
-            title={variantLabel(connection.variant, connection.engine)}
-            className={`shrink-0 w-1.5 h-1.5 rounded-full ${TAG_DOT[variant]}`}
-          />
-        )
-      }
-      badgeWidth={spelled ? BADGE_WIDTH : 6}
-      trailing={<StatusDot state={state} />}
-      onEdit={() => setSheet({ kind: 'editConnection', id: connection.id })}
-      editTitle={`Edit ${connection.name}`}
-      onDelete={requestDelete}
-      deleteTitle={`Delete ${connection.name}`}
-      pinned={connection.pinned}
-      onPin={() => void togglePin('connection', connection.id)}
-      // A prod connection is worth spotting at a glance, before you run
-      // anything — but only where the section heading is not already saying
-      // it. Six identical chips under a heading that reads PROD teaches you
-      // to stop seeing amber.
-      tone={connection.env === 'prod' ? 'warn' : 'normal'}
-      mark={connection.env === 'prod' && showEnv ? 'prod' : undefined}
-      selected={selection?.kind === 'connection' && selection.id === connection.id}
-      onClick={() => select({ kind: 'connection', id: connection.id })}
-    />
+    <>
+      <Row
+        label={connection.name}
+        detail={showEnv ? [ENV_NAME[connection.env], detailFor(connection)].filter(Boolean).join(' · ') : detailFor(connection)}
+        badge={
+          spelled ? (
+            <span
+              title={variantLabel(connection.variant, connection.engine)}
+              style={{ width: BADGE_WIDTH }}
+              className={`shrink-0 truncate text-[9.5px] font-semibold leading-none ${TAG_TEXT[variant]}`}
+            >
+              {variantTag(connection.variant, connection.engine)}
+            </span>
+          ) : (
+            <span
+              title={variantLabel(connection.variant, connection.engine)}
+              className={`shrink-0 w-1.5 h-1.5 rounded-full ${TAG_DOT[variant]}`}
+            />
+          )
+        }
+        badgeWidth={spelled ? BADGE_WIDTH : 6}
+        trailing={<StatusDot state={state} />}
+        onEdit={() => setSheet({ kind: 'editConnection', id: connection.id })}
+        editTitle={`Edit ${connection.name}`}
+        onDelete={requestDelete}
+        deleteTitle={`Delete ${connection.name}`}
+        pinned={connection.pinned}
+        onPin={() => void togglePin('connection', connection.id)}
+        // No PROD chip: the second line names the environment wherever the
+        // tab does not, and a chip on every row under the Prod tab teaches you
+        // to stop seeing it.
+        tone={connection.env === 'prod' ? 'warn' : 'normal'}
+        selected={selection?.kind === 'connection' && selection.id === connection.id}
+        onClick={() => select({ kind: 'connection', id: connection.id })}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          setMenu({ x: e.clientX, y: e.clientY });
+        }}
+      />
+      <ConnectionMenu connection={connection} at={menu} onClose={() => setMenu(null)} onDelete={requestDelete} />
+    </>
+  );
+}
+
+/// Everything you can do to a connection, on a right click: open it, the
+/// work that starts from it, and managing it. Each item is offered only
+/// where it applies, so the menu never lists something that would refuse.
+function ConnectionMenu({
+  connection: c,
+  at,
+  onClose,
+  onDelete,
+}: {
+  connection: Connection;
+  at: { x: number; y: number } | null;
+  onClose(): void;
+  onDelete(): void;
+}): JSX.Element {
+  const select = useStore((s) => s.select);
+  const setSheet = useStore((s) => s.setSheet);
+  const newBuffer = useStore((s) => s.newBuffer);
+  const togglePin = useStore((s) => s.togglePin);
+  const duplicateConnection = useStore((s) => s.duplicateConnection);
+  const baselines = useTickets((s) => s.baselines);
+  const hasBase = baselines.some((b) => b.sourceConnectionId === c.id);
+  const canBase = devInstanceRefusal(c) === null && c.engine !== 'dynamodb';
+  const canSeed = c.env === 'local' && c.engine !== 'dynamodb';
+  const go = (fn: () => void) => () => {
+    onClose();
+    fn();
+  };
+  return (
+    <Dropdown open={!!at} at={at ?? undefined} onClose={onClose} label={c.name} width={260}>
+      <MenuItem label="Open" onSelect={go(() => select({ kind: 'connection', id: c.id }))} />
+      <MenuItem
+        label="New tab"
+        kbd="⌘T"
+        onSelect={go(() => {
+          select({ kind: 'connection', id: c.id });
+          newBuffer(c.id);
+        })}
+      />
+      {(canSeed || canBase || hasBase) && <MenuDivider />}
+      {canSeed && <MenuItem tone="ai" label="Seed for a ticket…" onSelect={go(() => setSheet({ kind: 'seed', connectionId: c.id }))} />}
+      {canBase && (
+        <MenuItem
+          label={c.env === 'local' ? (hasBase ? 'Rebuild its base…' : 'Create a base…') : hasBase ? 'Copy to this machine again…' : 'Copy to this machine…'}
+          detail={c.env === 'local' ? 'A small copy to branch from' : 'A small copy you can write to and branch from'}
+          onSelect={go(() => setSheet({ kind: 'baseline', connectionId: c.id }))}
+        />
+      )}
+      {hasBase && <MenuItem label="Branches…" onSelect={go(() => setSheet({ kind: 'tickets' }))} />}
+      {c.engine !== 'dynamodb' && (
+        <MenuItem
+          label="Map"
+          detail="What the code says about each table"
+          onSelect={go(() => openPane(c.id, MAP_TAB))}
+        />
+      )}
+      <MenuDivider />
+      <MenuItem label={c.pinned ? 'Unstar' : 'Star'} onSelect={go(() => void togglePin('connection', c.id))} />
+      <MenuItem label="Edit…" onSelect={go(() => setSheet({ kind: 'editConnection', id: c.id }))} />
+      <MenuItem
+        label="Duplicate"
+        onSelect={go(() => {
+          void duplicateConnection(c.id).then((id) => id && setSheet({ kind: 'editConnection', id }));
+        })}
+      />
+      <MenuDivider />
+      <MenuItem label="Delete…" onSelect={go(onDelete)} />
+    </Dropdown>
   );
 }
 
 function Section({
   label,
+  lead,
   action,
   count,
   collapsed,
@@ -436,6 +675,8 @@ function Section({
   children,
 }: {
   label: string;
+  /// A mark before the label: an environment's colour.
+  lead?: React.ReactNode;
   action?: { title: string; onClick: () => void };
   /// Shown only when the section can be folded — a count on a section you
   /// can always see is telling you something you can count.
@@ -460,10 +701,12 @@ function Section({
             >
               <path d="M2 1l4 3-4 3z" fill="currentColor" />
             </svg>
+            {lead}
             {label}
           </button>
         ) : (
-          <span className="text-[10px] font-semibold uppercase tracking-wider text-ink-faint">
+          <span className="flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider text-ink-faint">
+            {lead}
             {label}
           </span>
         )}
@@ -504,6 +747,7 @@ function Row({
   pinned,
   onPin,
   mark,
+  onContextMenu,
 }: {
   label: string;
   /// Second line: host and database, the thing that actually tells five
@@ -524,6 +768,7 @@ function Row({
   editTitle?: string;
   onDelete?: () => void;
   deleteTitle?: string;
+  onContextMenu?: (e: React.MouseEvent) => void;
 }): JSX.Element {
   const width = useStore((s) => s.settings.sidebarWidth);
   // Cut out of the MIDDLE. `Redshift - @PROD [EU]` and
@@ -539,6 +784,7 @@ function Row({
       tabIndex={0}
       title={shown === label ? undefined : label}
       onClick={onClick}
+      onContextMenu={onContextMenu}
       onKeyDown={(e) => {
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault();

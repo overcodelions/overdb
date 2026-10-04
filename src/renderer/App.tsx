@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { isTarget, itemForDigit, routeAllToServers, routeTo, useTickets, useTicketsLive } from './ticketsStore';
 import { BottomRail } from './BottomRail';
 import { CommandPalette } from './CommandPalette';
 import { ConfirmHost } from './ConfirmHost';
@@ -8,6 +9,7 @@ import { Sidebar } from './Sidebar';
 import { SheetHost } from './Sheets';
 import { TitleBar } from './TitleBar';
 import { UpdateToast } from './UpdateToast';
+import { BuildPill } from './BuildPill';
 import { subscribeToMainEvents } from './queryStore';
 import { useStore } from './store';
 import { useThemeEffect } from './useThemeEffect';
@@ -46,6 +48,8 @@ export function App(): JSX.Element {
     };
   }, []);
 
+  useTicketsLive();
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const mod = e.metaKey || e.ctrlKey;
@@ -62,6 +66,22 @@ export function App(): JSX.Element {
       } else if (mod && e.key === '\\') {
         e.preventDefault();
         useStore.getState().toggleSidebar();
+      } else if (e.metaKey && e.altKey && /^Digit[0-9]$/.test(e.code)) {
+        // ⌥⌘0 every base's services to its own server, ⌥⌘1–9 a branch —
+        // oldest first, moving only the proxy of the base it came from. From
+        // anywhere. ⌘0 is the View menu's Actual Size, so ⌥ joins it.
+        const tk = useTickets.getState();
+        const digit = Number(e.code.slice(5));
+        if (digit === 0) {
+          if (!tk.proxies.some((p) => p.running && p.config.target.kind === 'ticket')) return;
+          e.preventDefault();
+          void routeAllToServers();
+          return;
+        }
+        const item = itemForDigit(tk, digit);
+        if (!item || !tk.proxies.some((p) => p.source === item.source && p.running)) return;
+        e.preventDefault();
+        if (!isTarget(tk, item.source, item.target)) void routeTo(item);
       } else if (mod && e.key.toLowerCase() === 't') {
         // A clean slate on the connection you are looking at. Only when one
         // is selected — there is nothing to open a tab on otherwise.
@@ -91,6 +111,7 @@ export function App(): JSX.Element {
       <ConfirmHost />
       <div className="fixed bottom-4 right-4 z-50 flex flex-col items-end gap-2">
         <UpdateToast />
+        <BuildPill />
         {toasts.map((t) => (
           <div
             key={t.id}

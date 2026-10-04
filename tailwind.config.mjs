@@ -36,6 +36,8 @@ export default {
           strong: 'rgb(var(--c-warn-strong) / <alpha-value>)',
         },
         hot: 'rgb(var(--c-hot) / <alpha-value>)',
+        // "A model is involved" — see --c-ai in styles.css.
+        ai: 'rgb(var(--c-ai) / <alpha-value>)',
         bad: {
           DEFAULT: 'rgb(var(--c-bad) / <alpha-value>)',
           strong: 'rgb(var(--c-bad-strong) / <alpha-value>)',

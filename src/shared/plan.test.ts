@@ -7,7 +7,7 @@ describe('MySQL / MariaDB plans', () => {
       select_id: 1,
       nested_loop: [
         { table: { table_name: 'c', access_type: 'ALL', rows: 1200, filtered: 3.2,
-                   attached_condition: "c.client_name like '%hp%'" } },
+                   attached_condition: "c.client_name like '%acme%'" } },
         { table: { table_name: 'pw', access_type: 'ref', key: 'idx_client', rows: 42, filtered: 100 } },
       ],
     },

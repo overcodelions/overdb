@@ -11,6 +11,7 @@
 // are taken out, the engines match, and the environments differ.
 
 import type { Connection, EnvKind, EnvSet } from '@shared/types';
+import { isOverdbConnection } from '@shared/instances';
 
 export interface EnvSetSuggestion {
   /// Stable for the same members, so "Not now" sticks to this suggestion and
@@ -51,6 +52,7 @@ export function suggestEnvSet(
 ): EnvSetSuggestion | null {
   const groups = new Map<string, Connection[]>();
   for (const c of connections) {
+    if (isOverdbConnection(c)) continue;
     const name = logicalName(c);
     if (!name) continue;
     const key = `${c.engine}:${name}`;

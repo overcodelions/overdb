@@ -7,7 +7,148 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-04
+
 ### Added
+- The Services switch in the title bar shows every base's proxy at once —
+  a branch by name, a base on its own server dimmed — and What services
+  see stays one connection under its base as you switch, its own server
+  included.
+- Reset a branch to its base: its changes thrown away and its data taken
+  again from the base, in seconds, keeping its name, port and connection so
+  nothing pointed at it changes. After a base is rebuilt, each older branch
+  says "base is newer" and its Reset takes the fresh data. In the branch's
+  ⋯ menu in the sidebar, and in Branches.
+- What a branch is, where the question comes up: an ⓘ beside Branches in
+  the sidebar, the same words when there are none yet, and a Branches per
+  ticket section in How overdb works with the picture — server, base,
+  branches, and the proxy your services keep.
+- Seed for a ticket. Describe the data a ticket needs — or paste the ticket —
+  and overdb investigates, proposes a plan in plain words, writes the SQL,
+  and runs it in a transaction you commit or roll back after reading back
+  what landed. With a linked repo and `claude`, the investigation reads the
+  code to learn what the schema can't say (allowed status values, JSON
+  shapes, app rules), using Read, Grep and Glob only: no shell, no MCP
+  servers, and `.env` files denied. Local databases only — tagged local,
+  writes on, and on this machine: no tunnel, and the port held by a
+  database server or Docker rather than ssh, kubectl or a cloud SQL proxy
+  (when the owner can't be seen, a table over a million rows refuses it
+  instead). No override. The script is checked before you see it: INSERTs only, every
+  table and column real, parents before children, and a teardown that
+  deletes exactly what the seed made. Commit saves both as saved queries.
+  From the Seed button on a local connection, or ⌘K.
+- Create a base: the first half of giving each ticket its own database
+  (docs/design/baselines.md). On a local connection, overdb reads every
+  schema's catalog and table sizes, finds the tenant — the table most
+  others point at, by foreign key or by a column named for its key — and
+  asks which tenant and which logins you work with, in your words. It
+  searches every table that keeps logins, not just `users`, and says what
+  it finds: a login in a second users table, an admin on another account,
+  an inactive lookalike. Then it sorts every table — only rows for your
+  starting points, copy whole, start empty (logs, queues), leave out
+  (backups, scratch copies), schema only — with a reason and a size
+  estimate, and lists the links it guessed from column names so you can
+  turn any off. They choose rows only and are never drawn as foreign keys.
+  Choose which schemas the base holds. Tenancy has levels — overdb
+  finds them the way it finds the tenant (`partner` within `client`) — and
+  any level can be narrowed to some of its rows, by name or to the ones your
+  logins belong to: what carries a `partner_id` then keeps only those
+  partners', plus the client's own rows that belong to no partner. A login
+  table keeps your logins and every row the client would keep anyway. The
+  size estimate counts the chosen tenant's real share of one large table
+  rather than assuming an average one.
+  The recipe saves to `.overdb/baseline.json` in the linked repo. With a
+  linked repo and `claude`, Check with the code reads it (Read, Grep and
+  Glob only) for what the schema can't say — how a second users table
+  reaches an account, which of two tables a column means, which emptied
+  table logging in needs — and each suggestion is applied by hand. From the
+  more menu on a local connection, or ⌘K.
+- Build a base (MySQL). overdb starts its own `mysqld` from the one on
+  this machine (`--no-defaults`, its own directory, port and socket — your
+  server and its my.cnf are never touched), and a builder process copies
+  the recipe into it: every schema and table, the starting points' rows and
+  everything tied to them, small tables whole, missing parents fetched so
+  no real foreign key points at nothing, then views, routines, triggers and
+  the accounts your services connect as. Then it stops the instance; its
+  data directory is the base. On a real 11 GB database: 773 tables and
+  754k rows in under 20 seconds.
+- Branches. A branch is a clone of the base (copy-on-write
+  on APFS, so instant and nearly free), running on its own port, with its
+  own connection in the sidebar — seed it with Seed for a ticket, break it,
+  delete it. The proxy listens where your services already connect (a TCP
+  port and, for MySQL, the Unix socket) and forwards byte for byte to your
+  own server or any branch; switching closes the connections it
+  carries so each service's pool reconnects to the new one. Loopback only.
+  Two ways to point services at it: a spare port (3310 by default) that
+  each service is pointed at once, leaving your own server where it is —
+  the recommended path — or taking over 3306 and `/tmp/mysql.sock`, which
+  needs your own server moved once (overdb shows the lines to add and never
+  edits another program's config). A port that is taken says who holds it.
+  Keep running when overdb is closed moves the proxy and the branches into a
+  small background helper — a LaunchAgent running overdb's own binary as
+  node, started at login, removable from the same panel — and taking over
+  3306 requires it, so quitting overdb can never leave services with no
+  database. Without it, quitting asks first when services may be using the
+  proxy or a branch. In the sidebar, branches nest under the connection
+  they were made from — each with its status, a SERVICES badge on the one
+  your services reach, Seed and a menu on hover — with the base and
+  Rebuild below them. The Services switch in the title bar ("Services → PROJ-123") picks
+  where services go in one click, or ⌥⌘0 (your server) and ⌥⌘1–9 (branches);
+  it moves your services only, never what a tab queries. While the
+  proxy runs, What services see under the branches is a read-only
+  connection to query exactly that — renamed and reconnected when you
+  switch, gone when it is off. Every branch has a How to
+  connect guide built from its own address: use it in overdb, point one
+  service at it (`.env`, JDBC/Spring, the mysql client — the password is
+  never shown), point every service at it through the proxy, and go back.
+- Repos know their schemas. An env set (or a connection in no set) links
+  any number of repos, and each says which schemas its code uses — overdb
+  suggests them by scanning the repo for datasource config and
+  `schema.table` names (names and counts only; `.env`, keys and dependency
+  folders are never opened), and you confirm. Reading the code for a seed or
+  a base reads the repos for the schemas in play, each told which schemas
+  it owns, rather than whichever repo was linked first; extra repos are
+  added with their secrets denied the same way. Branches and What services
+  see use the repos of the connection they came from. A base recipe saves
+  in the repo you mark for it. Linking a repo from Seed or the base adds
+  to the list instead of replacing it; the set's edit sheet shows them all.
+- Database maps. Map this database (on the Seed screen, or in an env set's
+  edit sheet) reads each linked repo once — read-only, the same limits as
+  every code reading — and writes down what only the code knows about each
+  table: what a row is, which repo and module own it, the values its status
+  and type columns take, the shape of its JSON, the rules the app enforces,
+  and the links the code makes that no foreign key does, across schemas,
+  each with a path:line. Every name is checked against the real catalog and
+  invented ones are left out. Big catalogs are mapped in parts of 50 tables,
+  three passes at a time, saved as each finishes. A seed then plans from the
+  slice of the map its ticket touches, in one call, without reading the
+  code; the map also suggests which schemas a ticket is about. Reading the
+  code is still there (Also read the code now), and what it finds is added
+  to the map for the next seed. The map records each repo's commit and a
+  fingerprint of each schema, says when it is behind ("3 commits ahead",
+  "orders changed"), and Refresh re-reads only the files git says changed.
+  Kept in overdb's own folder by default; Settings › Database maps can keep
+  it in the recipe repo's `.overdb/map/` to share it through git.
+- A seed can cover more than one schema. It starts from the schema the tab
+  is on, suggests others from the ticket's own words (a ticket about
+  learners suggests the learning schema), and any can be added; their
+  tables join the plan schema-qualified, after the tab's own. Reading the
+  code for a seed reads every linked repo, the ones for its schemas first.
+- Seed on What services see seeds what it points at — the branch your
+  services use, or your own server — instead of refusing a read-only
+  connection. A stopped branch offers to start instead of reporting a
+  refused connection.
+- The sidebar asks where, then what: an environment switch at the top (All,
+  Local, Sandbox, Staging, Prod — whichever you have, remembered), and
+  environment sets as the groups below it, each with the connections it has
+  in that environment and Compare to open the set across all of them.
+  Connections in no set are listed after. Search looks across every
+  environment. Starring floats a row to the top of its group, and the star
+  by the search box shows only starred ones — there is no Pinned section
+  repeating them. Opening a connection the tab hides moves to its
+  environment.
+- SQLite reports how many rows a write changed, so an INSERT says
+  "3 rows inserted" instead of nothing.
 - Fix it in overcli: a plan, or a statement in the slow-query pane, can be
   handed to overcli to find and fix the code behind it. The button glows
   when overcli is installed; without it, the same spot links to overcli.app
@@ -46,8 +187,193 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   failed, and the results say plainly when what came back is one server's
   answer and not a comparison. overdb checks again every twenty seconds
   while a member is down, and when the network or the window comes back.
+- Copy a shared server to this machine. A base can now be made from a
+  shared dev, sandbox or staging MySQL server, not only your own: "Copy
+  to this machine…" on its ⋯ menu, ⌘K, a set's Compare page, the Branches
+  sheet, and the Writes panel when writes go on for one. overdb reads it —
+  through its SSH tunnel and over its TLS, and only ever reads — and builds
+  a small copy here on a server of the same kind (MySQL for MySQL, MariaDB
+  for MariaDB). When this machine has none, the sheet says so from the
+  first step and installs it with Homebrew at a click; nothing is run as a
+  service. Branches clone it as they do any base. Never from production,
+  and never from an untagged server: there is no override.
+- Copy Postgres and Redshift to this machine. A Postgres server is
+  copied into a local Postgres; Redshift, which has no local edition, into
+  Postgres too — its distribution and sort keys and encodings left behind,
+  IDENTITY made an identity column, SUPER made jsonb, its clock functions
+  made now(). The same plan as a MySQL base: starting points, rows
+  following their parents, missing parents fetched, then keys, indexes,
+  foreign keys (NOT VALID) and views, with any the copy refuses listed.
+  Redshift's table sizes are read from svv_table_info. Postgres installs
+  from the copy sheet like MySQL does.
+- "Copy another server here" lists every connection that could be copied,
+  and the ones that cannot yet say why, rather than leaving them out.
+- A proxy per base. Each base has its own address for its services, so a
+  service that uses two databases is switched in two places — with no
+  branch chosen, a shared server's proxy forwards to that server itself.
+  The title bar's switch lists each base with its branches; ⌥⌘1–9 pick a
+  branch and move only its base's proxy, ⌥⌘0 sends every one back. The
+  proxy set up before moves onto the first base, as it was. A proxy for a
+  production connection is refused, and two cannot share a port.
+
+- A base build or a copy can keep going in the background. The sheet's
+  "Keep going in the background" closes it without stopping anything, and
+  a small panel at the bottom of the window follows the build — its step,
+  how long it has run, Stop — then offers to make a branch when it lands,
+  or the log when it fails. Starting the same one twice is refused.
+- Right-click a connection in the sidebar for what you can do with it:
+  open it or a new tab, seed it, create a base or copy it to this machine,
+  its branches and map, star, edit, duplicate or delete. Sets in the dock
+  have their own: compare, star, edit, delete. The menu opens at the
+  pointer and stays inside the window.
 
 ### Changed
+- The sidebar lists every connection under its environment, whether or
+  not a set holds it, so a local database is under Local rather than only
+  inside the sets it belongs to. Sets moved to a dock below the list: one
+  row each, dots for the environments it spans, and Compare. Under an
+  environment tab, sets with nothing there fade rather than disappear.
+- Mapping a database is much faster. A quick scan, with no AI, first finds
+  which files name each table (as written, or as the class an ORM maps to
+  it). Tables no file names are left out, and each pass is handed the files
+  for its tables instead of searching the whole repo; tables that live in
+  the same part of the code share a pass. The schema the connection uses is
+  mapped first, and the card says when seeds can use the map while the rest
+  carries on. "Map them too" asks about the left-out tables later.
+- The database map has its own pane, Map, in the bottom rail beside
+  Diagram: the repos it reads (linked and changed there), whether it is up
+  to date, and every mapped table — its purpose, where its code lives, the
+  values its columns take, JSON shapes, rules and links, each cited to a
+  line. Seed, Create a base and a set's form show one line for the map and
+  the repos, with the way to the pane.
+- Mapping uses the standard model, `sonnet`, rather than the everyday one.
+  Settings has a Map model field to change it. Five passes run at once,
+  up from three, and the Map pane says up front that a first map takes
+  from a few minutes to about 20 for a large database. Each map keeps a
+  record of its last run — what each repo's scan found and how long each
+  pass took.
+- A base settles its links from the map before asking anyone. A guess the
+  code agrees with is confirmed, one the code points elsewhere is
+  corrected, and links the column names never suggested are added — each
+  citing where in the code. The tenant and its levels are found with those
+  links too, and the links to check shrink to what the map could not say.
+- The diagram draws the map's links from the code alongside foreign keys:
+  dashed, in the AI colour, with what the code does and where on hover. A
+  switch turns them off.
+- Linking repos takes several at once: the folder picker allows more than
+  one (hold ⌘), and each repo's schemas are suggested together.
+
+### Security
+- A base's server has a password. Its root (or `postgres`) account gets a
+  random one, kept in the system keychain, as the build's last step — or
+  yours, when you connect as that account — and a Postgres copy takes
+  password logins only. Until now any program on this machine could log in
+  to a running base or branch as its superuser and read the account hashes
+  it keeps for your services. Rebuild a base built before this to get it,
+  then reset its branches.
+- A base or branch server reads and writes no files from SQL
+  (`--secure-file-priv` on an empty directory), and a copied view whose
+  definition holds a second statement, or a column type that is not a type
+  name, is never run on the copy.
+- The proxy only takes a socket path in the temporary directory, removes
+  only a socket to take it, and checks the port and server it is given,
+  whether from the window or the background helper's socket — which is now
+  private from the moment it is created.
+- What services see keeps a server's "Verify full" certificate check
+  through the proxy, against the server's own name.
+- Password hashes printed as hex are kept out of build logs, as are any in
+  a skipped statement's error.
+- Stopping a leftover server only ever stops a MySQL, MariaDB or Postgres
+  server whose data directory is exactly the one being replaced.
+
+### Fixed
+- A branch or base server left running by an earlier overdb is stopped
+  before its data is replaced or it is started again. A reset no longer
+  swaps files under a live server and goes on answering from the old data.
+- A base keeps the parent rows its kept rows name in columns the schema
+  never declared — a login's company, a deal's partner — not only those
+  behind real foreign keys.
+- A column holding another system's id (`remote_client_id`,
+  `crm_account_id`, `external_user_id`) is no longer read as a link to a
+  table here, so it no longer scopes a table by the wrong key.
+- A table you start from is no longer set aside for being empty: in a data
+  mart the tenant table can be empty while every table pointing at it holds
+  the tenant's rows.
+- Postgres and Redshift requests on one connection run one at a time.
+  Each runs in its own read-only transaction and a connection has one, so
+  two at once — discovery and the schema tree — interleaved, and one
+  refused statement failed the other with "current transaction is
+  aborted". Cancel, acks and close still go straight through. Discovery
+  also asks whether it may read a table before reading it.
+- The client search says where it looked, and "Look in another table"
+  searches any table or view you choose.
+- Links are found in a database that declares no keys — every Redshift
+  table, most data marts. A table's own `<table>_id` column, or a bare
+  `id`, is read as its key, so `client_id` and `partner_id` columns link to
+  `client` and `partner` and the tenant is found from them.
+- Finding the client you work in looks past the tenant's own table: when
+  it has no match, every other table keyed the same way is searched — a
+  data mart mirrors one client into several, like `acme_db_client` — and
+  each hit says which table it came from. A table is also keyed by the end
+  of its name (`acme_db_client.client_id`). Two levels of the same name
+  show their schema, and a server that gives no sizes shows "—", not 0 B.
+  Views are searched too, closest name first; results appear as each
+  table answers, grouped under the table they came from, tables with an
+  exact match on top, with a line saying which table is being read. And a table that follows a starting point follows the keys
+  you picked even when that row is not in the starting table itself, so a
+  client found in a mirror still scopes everything that carries its id.
+- A Postgres or Redshift database keeps its own recipe in the repo
+  (`.overdb/baseline-redshift-<database>.json`) instead of picking up the
+  MySQL one beside it, and a recipe whose engine or tenant does not match
+  the database is set aside with a note rather than applied.
+- A Postgres or Redshift statement that failed while overdb read the
+  catalog no longer leaves the connection broken. The read-only
+  transaction it ran in was left open and aborted, and everything after it
+  failed with "current transaction is aborted" until reconnecting.
+- Discovering a Redshift base works for a user without rights to
+  svv_table_info: sizes fall back to pg_class, and a table with no estimate
+  is counted. A table whose size is still unknown is no longer copied
+  whole as if it were small — it is left for you to decide.
+- A copy of an RDS or Aurora server creates every table the server has.
+  Those run with InnoDB's strict mode off, so a COMPACT table whose widest
+  row would pass 8 KB exists there but is refused by a local server's
+  default ("Row size too large"). The build now matches the server's strict
+  mode and default row format, as it already matched its sql_mode, and
+  says so in the log.
+- A base and its branches keep the server's settings across restarts.
+  overdb starts its servers with `--no-defaults`, which also skips what
+  `SET PERSIST` saved, so sql_mode was lost on every start; the settings
+  are now kept with the base and passed each time it or a branch starts.
+- A base built from MariaDB copies JSON columns. MariaDB keeps JSON as
+  text flagged as JSON, which the driver parsed into objects and wrote back
+  as `'[object Object]'` lists ("Operand should contain 1 column(s)"); the
+  builder now reads JSON as text, as it does for MySQL's own JSON type. A
+  table whose rows cannot be copied is named in the report and the build
+  carries on.
+- A base build that cannot fetch the parent rows for one foreign key
+  names it under what could not be recreated and carries on, instead of
+  stopping the whole build. Every build writes a log (in overdb's
+  `instances/logs`, the last 20 kept) with each step, the plan's size and,
+  when it fails, the error, the statement the server refused (passwords
+  masked) and the server's own last log lines; a failed build has a Show
+  the log button.
+- The links a base settled from the database map are saved in its recipe,
+  so the build follows the same links that were reviewed.
+- Building a base from a MariaDB server works. MariaDB's mysqld has no
+  `--initialize`, so its data directory is made with `mariadb-install-db`
+  (root with an empty password, like MySQL's), and it is started without
+  the MySQL-only X Plugin and binlog switches it refuses.
+- The editor header is sorted by what each control is. Where you are and
+  what state it's in sit on the left: the connection, the schema, one chip
+  for writes and the transaction mode (click it to change either, or which
+  tables the AI always sees), and the table count, which opens the table
+  browser. An open transaction takes the chip's place with its countdown,
+  Commit and Roll back. On the right: a ⋯ menu for the rarely needed, Ask
+  and Seed together in the AI colour, and a split Run button whose menu
+  runs all statements, runs on an environment set, or plans only. Plan,
+  Explain and Format left the header — they act on one statement, so they
+  live on the statement's own strip, where Explain now carries the AI mark
+  and Run on set its own icon.
 - Schema drift reads table by table. Findings are grouped by what they do —
   breaks, integrity, behaviour, performance, only on one side — each with a
   line on what that means, naming the servers. Every table that differs is
@@ -281,7 +607,8 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - DynamoDB has no server-side read-only session. Use read-only IAM credentials
   for a durable production boundary.
 
-[Unreleased]: https://github.com/overcodelions/overdb/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/overcodelions/overdb/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/overcodelions/overdb/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/overcodelions/overdb/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/overcodelions/overdb/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/overcodelions/overdb/releases/tag/v0.1.0

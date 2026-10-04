@@ -12,8 +12,8 @@ import { useStore } from './store';
 
 /// The panel behind a value chip.
 ///
-/// It exists because a value is not one string. `client_name` is `hp` on
-/// every scratch database you own and `HP Inc` on prod, and the old
+/// It exists because a value is not one string. `client_name` is `acme` on
+/// every scratch database you own and `Acme Inc` on prod, and the old
 /// dropdown could write to one of those layers while showing you none of
 /// the others — so "why did prod return nothing" was a question you could
 /// only answer by switching connections and looking again.
@@ -130,7 +130,7 @@ export function ParamPopover({
           <input
             ref={first}
             value={resolved.text}
-            placeholder={resolved.type === 'list' ? 'hp, ibm, dell' : 'no value yet'}
+            placeholder={resolved.type === 'list' ? 'acme, globex, initech' : 'no value yet'}
             disabled={resolved.type === 'null'}
             onChange={(e) => write(resolved.missing ? 'default' : resolved.scope, e.target.value)}
             onKeyDown={(e) => {

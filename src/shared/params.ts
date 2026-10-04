@@ -11,11 +11,11 @@
 // Both spellings are the same question, so both are handled here, and the
 // answer travels as a BOUND PARAMETER rather than as string substitution.
 // That is the whole reason this file exists rather than a find-and-replace:
-// pasting `hp'; DROP TABLE ...` into a value box must be a value, not SQL.
+// pasting `acme'; DROP TABLE ...` into a value box must be a value, not SQL.
 //
 // The second half of the file is the part that makes this worth having.
 // A placeholder's value is usually the SAME question asked of different
-// databases — "the HP client" is `hp` locally, `HP Inc` in staging, and a
+// databases — "the Acme client" is `acme` locally, `Acme Inc` in staging, and a
 // different row entirely in prod — so a binding is not one value but a
 // small layered lookup: a default, an override per ENVIRONMENT, and an
 // override per CONNECTION. Running the same statement across an env set
@@ -579,7 +579,7 @@ function splitList(text: string): Cell[] {
   let cur = '';
   /// Whether the item currently being read was quoted. A quoted item keeps
   /// its spacing and stays text; an unquoted one is trimmed and typed, so
-  /// `hp, ibm, 3` is two names and a number rather than three strings with
+  /// `acme, globex, 3` is two names and a number rather than three strings with
   /// stray spaces.
   let quoted = false;
   let quote: string | null = null;
@@ -742,7 +742,7 @@ export function defaultType(slot: ParamSlot): ParamType {
 /// A fresh binding for a slot that has never been filled in.
 ///
 /// A hole sitting alone inside an `IN (...)` starts as a LIST, because that
-/// is what the SQL says it is. Left on 'auto' it would take `hp, ibm` as
+/// is what the SQL says it is. Left on 'auto' it would take `acme, globex` as
 /// one string containing a comma, match nothing, and return an empty grid
 /// that looks like an answer — the worst failure this feature has.
 export function blankBinding(slot: ParamSlot): ParamBinding {

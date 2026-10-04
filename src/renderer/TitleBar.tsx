@@ -1,4 +1,5 @@
 import { useStore } from './store';
+import { ServicesChip } from './ServicesChip';
 
 /// Custom title bar. macOS uses `titleBarStyle: 'hiddenInset'`, so the
 /// traffic lights overlay our content — we pad the leading edge enough
@@ -29,6 +30,8 @@ export function TitleBar(): JSX.Element {
       <span className="text-xs font-medium text-ink-muted no-drag">overdb</span>
 
       <div className="flex-1" />
+
+      <ServicesChip />
 
       <button
         onClick={() => setSheet({ kind: 'basics' })}
