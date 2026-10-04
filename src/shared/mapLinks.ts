@@ -8,7 +8,7 @@
 // are left alone. See src/shared/dbMap.ts and src/shared/baseline.ts.
 
 import type { DbMap } from './dbMap';
-import { isAudit, tableKey, type Link, type TableRef } from './baseline';
+import { isAudit, keyOf, tableKey, type Link, type TableRef } from './baseline';
 import type { SchemaSnapshot } from './types';
 
 export interface MapLinkResult {
@@ -21,7 +21,8 @@ export interface MapLinkResult {
 interface Col {
   ref: TableRef;
   column: string;
-  /// The table's own single-column primary key.
+  /// The table's own single-column key: declared, or read off its name
+  /// where none is declared, as in every Redshift table.
   isKey: boolean;
 }
 
@@ -30,7 +31,7 @@ export function linksFromMap(map: DbMap, snapshot: SchemaSnapshot, links: readon
   const cols = new Map<string, Col>();
   for (const sc of snapshot.schemas)
     for (const t of sc.tables) {
-      const pk = t.primaryKey.length === 1 ? t.primaryKey[0].toLowerCase() : null;
+      const pk = keyOf(t)?.toLowerCase() ?? null;
       for (const c of t.columns)
         cols.set(`${sc.name}.${t.name}.${c.name}`.toLowerCase(), { ref: { schema: sc.name, table: t.name }, column: c.name, isKey: c.name.toLowerCase() === pk });
     }
@@ -46,10 +47,17 @@ export function linksFromMap(map: DbMap, snapshot: SchemaSnapshot, links: readon
     const a = cols.get(m.from.toLowerCase());
     const b = cols.get(m.to.toLowerCase());
     if (!a || !b || tableKey(a.ref) === tableKey(b.ref)) continue;
-    // Which end holds the reference: the one pointing at the other's key,
-    // else the one a link already starts from. The map does not promise an
-    // order, so neither is assumed.
-    const [from, to] = b.isKey && !a.isKey ? [a, b] : a.isKey && !b.isKey ? [b, a] : holding(a) ? [a, b] : holding(b) ? [b, a] : [null, null];
+    // Which end holds the reference: the one pointing at the other's key.
+    // Both keys is a one-to-one extension, and the end a link already starts
+    // from holds it. Neither is not a reference at all — one column of a
+    // join on two, `deal.client_id = partner.client_id` beside the partner
+    // ids — and following it would copy every partner of the client for
+    // each deal. The map does not promise an order, so neither is assumed.
+    const [from, to] =
+      b.isKey && !a.isKey ? [a, b]
+        : a.isKey && !b.isKey ? [b, a]
+          : a.isKey && b.isKey ? (holding(a) ? [a, b] : holding(b) ? [b, a] : [null, null])
+            : [null, null];
     if (!from || !to) continue;
     const cited = { why: m.why, ...(m.ref ? { ref: m.ref } : {}) };
     const existing = holding(from);

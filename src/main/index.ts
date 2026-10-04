@@ -38,7 +38,7 @@ import type {
   StoreSnapshot,
   TableInfo,
 } from '../shared/types';
-import type { Variant } from '../shared/engines';
+import { isRedshift, type Variant } from '../shared/engines';
 import { referencedSchemas } from '../shared/qualifiedRefs';
 import { filterTableNames } from '../shared/tableFilter';
 import { classify } from '../shared/sqlGuard';
@@ -95,7 +95,8 @@ import { findLinks, parseRecipe, plansFromRecipe, type BaselineRecipe, type Find
 import { buildPlan, type BuildProgress } from '../shared/baselineBuild';
 import type { Cell } from '../shared/types';
 import { baselineCodePrompt, type BaselineCodeInput } from './baselinePrompts';
-import type { ProxyConfig, ProxyTarget } from '../shared/instances';
+import { devInstanceRefusal, type ProxyConfig, type ProxyTarget } from '../shared/instances';
+import * as instances from './instances';
 import * as baselines from './baselines';
 import { resolve as resolveCredentials } from './credentials';
 import { buildSchemaContext } from './schemaContext';
@@ -1068,6 +1069,34 @@ function registerIpc(): void {
     return where ? loadMap(where.file) : null;
   });
 
+  ipcMain.handle('map:clear', async (_e, connectionId: string) => {
+    try {
+      const where = await mapFileFor(connectionId);
+      if (where) await fs.rm(where.file, { force: true });
+      // A saved recipe keeps the links it settled from the map, so they
+      // outlive the file. Links it read from the data (polymorphic ones)
+      // are not the map's, and stay.
+      let links = 0;
+      // Not every connection can have a base; one that cannot has no recipe.
+      let file: string | null = null;
+      try {
+        file = await recipePath(baselineSource(connectionId).id);
+      } catch {
+        file = null;
+      }
+      const raw = file ? await fs.readFile(file, 'utf-8').catch(() => null) : null;
+      if (file && raw !== null) {
+        const recipe = JSON.parse(raw) as { extraLinks?: Array<{ source: string }> };
+        const kept = (recipe.extraLinks ?? []).filter((l) => l.source === 'poly');
+        links = (recipe.extraLinks?.length ?? 0) - kept.length;
+        if (links > 0) await fs.writeFile(file, `${JSON.stringify({ ...recipe, extraLinks: kept }, null, 2)}\n`);
+      }
+      return { ok: true as const, links };
+    } catch (err) {
+      return { ok: false as const, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
   ipcMain.handle('map:cancel', (_e, jobId: string) => {
     mapJobs.get(jobId)?.cancel();
   });
@@ -1280,8 +1309,10 @@ function registerIpc(): void {
   function baselineSource(connectionId: string): Connection {
     const conn = Store.load().connections.find((c) => c.id === connectionId);
     if (!conn) throw new Error('That connection no longer exists.');
-    if (conn.env !== 'local') throw new Error('A base is built from a connection tagged local.');
-    if (conn.engine === 'dynamodb') throw new Error('Bases are for SQL databases.');
+    // Local, or a shared dev, sandbox or staging server: a base of one is
+    // that server's copy on this machine. Only ever read.
+    const why = devInstanceRefusal(conn);
+    if (why) throw new Error(why);
     return conn;
   }
 
@@ -1289,7 +1320,18 @@ function registerIpc(): void {
   /// builds the same baseline; otherwise in overdb's own data.
   async function recipePath(connectionId: string): Promise<string> {
     const repo = recipeHome(await linkedRepoLinks(connectionId));
-    if (repo) return path.join(repo, '.overdb', 'baseline.json');
+    if (repo) {
+      // MySQL keeps the one recipe a repo always had: a local server and a
+      // shared sandbox of the same app database share it, which is the
+      // point. A Postgres or Redshift database in the same repo — a data
+      // mart, say — is a different database and gets a file of its own.
+      const conn = Store.load().connections.find((c) => c.id === connectionId);
+      if (conn?.engine === 'postgres') {
+        const slug = (x: string) => x.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'default';
+        return path.join(repo, '.overdb', `baseline-${isRedshift(conn.variant) ? 'redshift' : 'postgres'}-${slug(conn.database || 'default')}.json`);
+      }
+      return path.join(repo, '.overdb', 'baseline.json');
+    }
     return path.join(app.getPath('userData'), 'baselines', `${connectionId.replace(/[^A-Za-z0-9_-]/g, '_')}.json`);
   }
 
@@ -1314,7 +1356,16 @@ function registerIpc(): void {
       if (raw !== null) {
         const parsed = parseRecipe(raw);
         if ('error' in parsed) recipeError = parsed.error;
-        else recipe = parsed;
+        else {
+          // A recipe is only applied to the database it describes: the same
+          // engine, its tenant's table present. One that is not is set aside
+          // — said, not silently used — and this database starts fresh.
+          const has = (ref: { schema: string; table: string }) =>
+            snapshot.schemas.some((sc) => sc.name === ref.schema && sc.tables.some((t) => t.name === ref.table));
+          if (parsed.engine !== snapshot.engine || (parsed.tenant && !has(parsed.tenant))) {
+            recipeError = `The recipe at ${file} is for another database${parsed.tenant ? ` (its tenant is ${parsed.tenant.schema}.${parsed.tenant.table})` : ''}; this one starts fresh, and saving replaces it.`;
+          } else recipe = parsed;
+        }
       }
       return { ok: true as const, snapshot, stats, repo: await linkedRepo(conn.id), recipe, recipePath: file, recipeError };
     } catch (err) {
@@ -1374,6 +1425,7 @@ function registerIpc(): void {
 
   const builds = new Map<string, { cancelled: boolean; kill?: () => void }>();
 
+  const buildTunnels = new Map<string, string>();
   ipcMain.handle('baseline:build', async (_e, args: { jobId: string; connectionId: string }) => {
     const signal: { cancelled: boolean; kill?: () => void } = { cancelled: false };
     builds.set(args.jobId, signal);
@@ -1392,13 +1444,38 @@ function registerIpc(): void {
       for (const w of plan.warnings) progress({ stage: 'start', text: w });
       // The source's address and credential, resolved here and handed to
       // the builder process only — never to the window.
-      const spec = await resolveCredentials(conn, { readOnly: true });
+      // A shared server is reached the way its connection says — through its
+      // SSH tunnel, over its TLS — on a tunnel of the build's own.
+      const tunnelKey = `baseline-build:${args.jobId}`;
+      const spec = await resolveWithTunnel(conn, tunnelKey, { readOnly: true });
+      buildTunnels.set(args.jobId, tunnelKey);
       const tenantStart = recipe.tenant ? recipe.starts.find((s) => s.ref.table === recipe.tenant!.table && s.ref.schema === recipe.tenant!.schema) : undefined;
       const baseline = await baselines.buildBaseline({
         source: conn,
-        endpoint: { host: spec.host ?? '127.0.0.1', port: spec.port ?? 3306, user: spec.user, password: spec.password ?? '' },
+        endpoint: {
+          host: spec.host ?? '127.0.0.1',
+          port: spec.port ?? (conn.engine === 'postgres' ? 5432 : 3306),
+          user: spec.user,
+          password: spec.password ?? '',
+          ...(conn.engine === 'postgres' ? { database: spec.database } : {}),
+          ...(spec.ssl && spec.ssl !== 'disable'
+            ? { tls: { engine: spec.engine, ssl: spec.ssl, sslRootCert: spec.sslRootCert, sslCert: spec.sslCert, sslKey: spec.sslKey, tlsServerName: spec.tlsServerName, host: spec.host } }
+            : {}),
+        },
         plan,
         serverVersion: snapshot.serverVersion,
+        // A Postgres copy is created from the catalog discovery read, the
+        // planned tables only.
+        ...(conn.engine === 'postgres'
+          ? {
+              redshift: isRedshift(conn.variant) || /redshift/i.test(snapshot.serverVersion),
+              catalog: snapshot.schemas.flatMap((sc) =>
+                sc.tables
+                  .filter((t) => t.kind === 'table' && plan.tables.some((p) => p.ref.schema === sc.name && p.ref.table === t.name))
+                  .map((t) => ({ schema: sc.name, table: t.name, columns: t.columns, primaryKey: t.primaryKey, indexes: t.indexes, foreignKeys: t.foreignKeys })),
+              ),
+            }
+          : {}),
         recipeSavedAt: recipe.savedAt,
         label: tenantStart?.label || recipe.starts[0]?.label || conn.name,
         onProgress: progress,
@@ -1411,6 +1488,9 @@ function registerIpc(): void {
       return { ok: false as const, error: err instanceof Error ? err.message : String(err), ...(log ? { log } : {}) };
     } finally {
       builds.delete(args.jobId);
+      const key = buildTunnels.get(args.jobId);
+      if (key) closeTunnel(key);
+      buildTunnels.delete(args.jobId);
     }
   });
 
@@ -1459,10 +1539,23 @@ function registerIpc(): void {
     b.kill?.();
   });
 
+  ipcMain.handle('baseline:serverFor', (_e, args: { engine: string; serverVersion: string }) => baselines.serverFor(args.engine, args.serverVersion));
+  /// `brew install` one MySQL or MariaDB formula, only when a person presses
+  /// the button for it. The formula is checked in instances.ts.
+  ipcMain.handle('baseline:installServer', async (_e, args: { jobId: string; formula: string }) => {
+    let last = 0;
+    return instances.installServer(args.formula, (line) => {
+      // Brew is chatty; a line every quarter second is plenty to show it moving.
+      if (Date.now() - last < 250 && !/^==>|Error|Warning/.test(line)) return;
+      last = Date.now();
+      mainWindow?.webContents.send('main:event', { kind: 'baseline:installProgress', jobId: args.jobId, line });
+    });
+  });
+
   ipcMain.handle('baseline:instances', async () => ({
     baselines: await baselines.baselines(),
     tickets: await baselines.tickets(),
-    proxy: await baselines.proxyState(),
+    proxies: await baselines.proxyStates(),
   }));
 
   ipcMain.handle('ticket:create', async (_e, args: { baselineId: string; name: string; note: string }) => {
@@ -1498,36 +1591,66 @@ function registerIpc(): void {
     return source ? baselines.branchConnection(id, source) : null;
   });
 
+  ipcMain.handle('ticket:reset', async (_e, id: string) => {
+    const t = (await baselines.tickets()).find((x) => x.id === id);
+    // Its connection's session points at files that are about to go.
+    if (t) await db.closeConnection(t.connectionId).catch(() => undefined);
+    await baselines.resetTicket(id);
+    // Made again from the base as it is now: a rebuilt base may log in
+    // with a password the branch's connection does not have yet.
+    const source = t && Store.load().connections.find((c) => c.id === t.sourceConnectionId);
+    return source ? baselines.branchConnection(id, source) : null;
+  });
+
   ipcMain.handle('ticket:delete', async (_e, id: string) => {
     const t = await baselines.deleteTicket(id);
     if (t) await db.closeConnection(t.connectionId).catch(() => undefined);
     return { connectionId: t?.connectionId ?? null };
   });
 
-  ipcMain.handle('proxy:configure', (_e, next: Partial<ProxyConfig> & { enabled?: boolean }) => baselines.configureProxy(next));
-  ipcMain.handle('proxy:route', async (_e, target: ProxyTarget) => {
+  /// A proxy carries services' traffic to its base's own server when no
+  /// branch is chosen. Never to production: a base cannot be built from
+  /// one, and a proxy for one is refused here too, whatever the window asks.
+  const proxySource = (source: string) => {
+    const conn = Store.load().connections.find((c) => c.id === source);
+    if (!conn) throw new Error('That base’s connection no longer exists.');
+    const why = devInstanceRefusal(conn);
+    if (why) throw new Error(why);
+    return conn;
+  };
+
+  ipcMain.handle('proxy:configure', async (_e, args: { source: string; next: Partial<ProxyConfig> & { enabled?: boolean } }) => {
+    if (args.next.enabled) proxySource(args.source);
+    return baselines.configureProxy(args.source, args.next);
+  });
+  ipcMain.handle('proxy:route', async (_e, args: { source: string; target: ProxyTarget }) => {
     try {
-      return { ok: true as const, state: await baselines.routeProxy(target) };
+      proxySource(args.source);
+      return { ok: true as const, state: await baselines.routeProxy(args.source, args.target) };
     } catch (err) {
       return { ok: false as const, error: err instanceof Error ? err.message : String(err) };
     }
   });
-  /// The sidebar connection for the proxy, built here so a stored password
-  /// is copied without crossing to the window. Null when it is off.
-  ipcMain.handle('proxy:connection', async () => {
-    const state = await baselines.proxyState();
-    if (!state.running) return null;
-    const all = await baselines.baselines();
-    const conns = Store.load().connections;
-    const source = conns.find((c) => all.some((b) => b.sourceConnectionId === c.id));
+  /// The sidebar connection for one proxy, built here so a stored password
+  /// is copied without crossing to the window. Null when it is off — and
+  /// when a remote base's proxy points at its own server: services then
+  /// reach that server itself, and its own connection already shows it.
+  ipcMain.handle('proxy:connection', async (_e, sourceId: string) => {
+    const state = (await baselines.proxyStates()).find((p) => p.source === sourceId);
+    if (!state?.running) return null;
+    const source = Store.load().connections.find((c) => c.id === sourceId);
     if (!source) return null;
     const target = state.config.target;
+    if (target.kind === 'server' && source.env !== 'local') return baselines.proxyServerConnection(source, state.config.port);
     const tickets = target.kind === 'ticket' ? await baselines.tickets() : [];
     const name = target.kind === 'ticket' ? tickets.find((x) => x.id === target.id)?.name ?? 'a branch' : 'your server';
-    return baselines.proxyConnection(source, state.config.port, name);
+    // On a branch, an account with no password to copy uses the branch's
+    // superuser, whose password its base keeps.
+    const adminRef = target.kind === 'ticket' ? await baselines.adminRefFor(target.id) : undefined;
+    return baselines.proxyConnection(source, state.config.port, name, adminRef);
   });
 
-  ipcMain.handle('proxy:clients', () => baselines.proxyClients().catch(() => []));
+  ipcMain.handle('proxy:clients', (_e, source: string) => baselines.proxyClients(source).catch(() => []));
 
   // The background helper: keeps the proxy and ticket copies running while
   // overdb is closed. Installed only from here, at a person's request.

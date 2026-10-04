@@ -181,6 +181,12 @@ export function buildPlan(recipe: BaselineRecipe, plans: TablePlan[], snapshot: 
     }
     tables.push({ ref: p.ref, action: p.action, rows, layer });
   }
+  // A starting point that copies nothing leaves every table following it
+  // empty — the base builds, and holds none of what you chose.
+  for (const k of keys.keys()) {
+    const t = tables.find((x) => tableKey(x.ref) === k);
+    if (t && t.rows.kind !== 'keys') warnings.push(`${k} is a starting point, but the plan sets it to ${t.action}; nothing that follows it will be copied.`);
+  }
   tables.sort((a, b) => a.layer - b.layer || (tableKey(a.ref) < tableKey(b.ref) ? -1 : 1));
 
   const byKey = new Map(tables.map((t) => [tableKey(t.ref), t]));
@@ -198,6 +204,24 @@ export function buildPlan(recipe: BaselineRecipe, plans: TablePlan[], snapshot: 
         fills.push({ child: child.ref, column: fk.columns[0], parent: parentRef, refColumn: fk.refColumns[0] });
       }
     }
+  }
+
+  // Links read from names and from the code complete the same way: a kept
+  // login names the company it belongs to in a column the schema never
+  // declared, and without its row the app cannot place it.
+  const filled = new Set(fills.map((f) => `${tableKey(f.child)}.${f.column}`));
+  for (const l of usable) {
+    if (l.when || (l.source !== 'name' && l.source !== 'code')) continue;
+    const child = byKey.get(tableKey(l.from));
+    const parent = byKey.get(tableKey(l.to));
+    if (!child || child.rows.kind === 'none' || !parent || !FILLABLE.has(parent.action)) continue;
+    if (tableKey(l.from) === tableKey(l.to) || filled.has(`${tableKey(l.from)}.${l.columns[0]}`)) continue;
+    // Only into a parent's declared key, which names one row: a key read
+    // from a name may not be unique, and one value could fetch thousands.
+    const pk = snapshot.schemas.find((x) => x.name === l.to.schema)?.tables.find((x) => x.name === l.to.table)?.primaryKey;
+    if (!pk || pk.length !== 1 || pk[0] !== l.refColumns[0]) continue;
+    filled.add(`${tableKey(l.from)}.${l.columns[0]}`);
+    fills.push({ child: child.ref, column: l.columns[0], parent: l.to, refColumn: l.refColumns[0] });
   }
 
   // Polymorphic links complete the same way, type by type: a kept comment
@@ -226,6 +250,10 @@ export interface BuildProgress {
 export interface BuildReport {
   tables: number;
   rows: number;
+  /// The source's server settings the copy runs with — sql_mode, InnoDB's
+  /// strictness and default row format — passed to its server, and every
+  /// branch's, each time it starts. Absent on bases built before.
+  settings?: Record<string, string>;
   /// Rows copied per table, by tableKey, for the ones that took any.
   copied: Record<string, number>;
   /// Parent rows fetched to complete foreign keys.

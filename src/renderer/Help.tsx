@@ -11,7 +11,7 @@
 // All three share one frame (see SheetHost), so moving between them does not
 // resize the window under the pointer.
 
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import type { AiTool } from '@shared/types';
 import { useStore } from './store';
 
@@ -239,6 +239,11 @@ export function NounCards(): JSX.Element {
 }
 
 export function BasicsSheet(): JSX.Element {
+  const section = useStore((s) => (s.sheet?.kind === 'basics' ? s.sheet.section : undefined));
+  const branches = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (section === 'branches') branches.current?.scrollIntoView({ block: 'start' });
+  }, [section]);
   return (
     <div className="flex max-h-[80vh] flex-col">
       <HelpHeader
@@ -311,11 +316,79 @@ export function BasicsSheet(): JSX.Element {
           </div>
         </HelpSection>
 
+        <div ref={branches} className="scroll-mt-4">
+          <BranchesSection />
+        </div>
+
         <AiSection />
       </div>
 
       <HelpFooter current="basics" />
     </div>
+  );
+}
+
+/// Branches, bases and the proxy: three new words, one picture.
+function BranchesSection(): JSX.Element {
+  const box = (title: string, detail: string, tone = 'border-card bg-wash') => (
+    <div className={`rounded-md border px-2.5 py-1.5 ${tone}`}>
+      <div className="text-[11.5px] font-medium text-ink">{title}</div>
+      <div className="text-[10.5px] text-ink-muted">{detail}</div>
+    </div>
+  );
+  const arrow = (label?: string) => (
+    <div className="flex flex-col items-center px-1 text-ink-faint" aria-hidden>
+      <span className="text-[9.5px] leading-none">{label ?? '\u00a0'}</span>
+      <span className="text-[13px] leading-none">→</span>
+    </div>
+  );
+  return (
+    <HelpSection
+      title="Branches"
+      lead="Your own writable copy of a database for each ticket, experiment or idea, made in seconds and thrown away when you are done. Nothing you do in one touches the server it came from."
+    >
+      <div className="rounded-lg border border-card bg-wash/50 p-3 flex flex-col gap-2.5">
+        <div className="flex items-center flex-wrap gap-y-2">
+          {box('The server', 'sandbox, staging — read only')}
+          {arrow('copy')}
+          {box('Base', 'a small copy, on this machine', 'border-accent/30 bg-accent/[0.06]')}
+          {arrow('branch')}
+          <div className="flex flex-col gap-1">
+            {box('PROJ-123', 'writable · its own port', 'border-good/30 bg-good/[0.06]')}
+            {box('PROJ-456', 'writable · its own port', 'border-good/30 bg-good/[0.06]')}
+          </div>
+        </div>
+        <div className="flex items-center flex-wrap gap-y-2">
+          {box('Your services', 'pointed here once')}
+          {arrow()}
+          {box('Proxy', '127.0.0.1:3310 — one per base', 'border-accent/30 bg-accent/[0.06]')}
+          {arrow('you pick')}
+          {box('The server, or any branch', 'switch from Services, top right')}
+        </div>
+      </div>
+      <div className="mt-2.5 grid grid-cols-2 gap-2.5">
+        <HelpRow
+          title="Base"
+          kicker="Copy to this machine…"
+          body="A small copy of a server with only the clients you pick — enough to log in and use the app. Built once, rebuilt when you want fresher data. Every branch starts as it."
+        />
+        <HelpRow
+          title="Branch"
+          kicker="+ New, under a connection"
+          body="A clone of the base for a ticket, or anything you want to try: writes on, its own port, ready in seconds whatever its size. Seed it, break it, delete it — the base and the server never change."
+        />
+        <HelpRow
+          title="Proxy"
+          kicker="one address per base"
+          body="Point your services at it once. Which database they reach — the server itself or a branch — is then a click in the Services menu, with no config change or restart."
+        />
+        <HelpRow
+          title="What services see"
+          kicker="under each base"
+          body="A read-only window through the proxy: query exactly what your running services are looking at right now."
+        />
+      </div>
+    </HelpSection>
   );
 }
 

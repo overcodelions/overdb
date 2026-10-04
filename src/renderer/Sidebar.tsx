@@ -7,7 +7,10 @@ import { EnvSetSuggestion } from './Welcome';
 import { TAG_DOT, TAG_TEXT } from './engineTags';
 import { middleTruncate, nameBudget } from '@shared/truncate';
 import { useTickets } from './ticketsStore';
-import { Branches, PROXY_CONNECTION_ID } from './TicketSection';
+import { Branches } from './TicketSection';
+import { devInstanceRefusal, isProxyConnectionId } from '@shared/instances';
+import { Dropdown, MenuDivider, MenuItem } from './Menu';
+import { MAP_TAB, openPane } from './queryStore';
 
 /// Which sections the user has folded away. Per-viewer convenience, so it
 /// lives in the browser rather than the app store — and every access is
@@ -67,11 +70,11 @@ export function Sidebar(): JSX.Element {
   const ticketState = useTickets();
   // Branches and the proxy's own connection show under their source, not as
   // connections of their own.
-  const ticketConnIds = useMemo(
-    () => new Set([...ticketState.tickets.map((t) => t.connectionId), PROXY_CONNECTION_ID]),
-    [ticketState.tickets],
+  const ticketConnIds = useMemo(() => new Set(ticketState.tickets.map((t) => t.connectionId)), [ticketState.tickets]);
+  const connections = useMemo(
+    () => allConnections.filter((c) => !ticketConnIds.has(c.id) && !isProxyConnectionId(c.id)),
+    [allConnections, ticketConnIds],
   );
-  const connections = useMemo(() => allConnections.filter((c) => !ticketConnIds.has(c.id)), [allConnections, ticketConnIds]);
   const groups = useStore((s) => s.groups);
   const envSets = useStore((s) => s.envSets);
   const selection = useStore((s) => s.selection);
@@ -382,12 +385,25 @@ function SetRow({ envSet, env, selected }: { envSet: EnvSet; env: EnvKind | 'all
   const envs = ENV_ORDER.filter((e) => members.some((c) => c.env === e));
   const away = env !== 'all' && !envs.includes(env);
   const open = () => select({ kind: 'envSet', id: envSet.id });
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  const remove = () =>
+    askConfirm({
+      title: `Delete ${envSet.name}?`,
+      body: 'This removes the set only. The connections in it are untouched.',
+      confirmLabel: 'Delete set',
+      destructive: true,
+      onConfirm: () => void removeEnvSet(envSet.id),
+    });
 
   return (
     <div
       role="button"
       tabIndex={0}
       onClick={open}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        setMenu({ x: e.clientX, y: e.clientY });
+      }}
       onKeyDown={(e) => {
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault();
@@ -455,6 +471,16 @@ function SetRow({ envSet, env, selected }: { envSet: EnvSet; env: EnvKind | 'all
       >
         Compare
       </span>
+      <span onClick={(e) => e.stopPropagation()}>
+        <Dropdown open={!!menu} at={menu ?? undefined} onClose={() => setMenu(null)} label={envSet.name} width={230}>
+          <MenuItem label="Compare" detail="Drift, and queries on every member" onSelect={() => { setMenu(null); open(); }} />
+          <MenuDivider />
+          <MenuItem label={envSet.pinned ? 'Unstar' : 'Star'} onSelect={() => { setMenu(null); void togglePin('envSet', envSet.id); }} />
+          <MenuItem label="Edit…" onSelect={() => { setMenu(null); setSheet({ kind: 'editEnvSet', id: envSet.id }); }} />
+          <MenuDivider />
+          <MenuItem label="Delete…" onSelect={() => { setMenu(null); remove(); }} />
+        </Dropdown>
+      </span>
     </div>
   );
 }
@@ -508,6 +534,7 @@ function ConnectionRow({
   const togglePin = useStore((s) => s.togglePin);
   const state = useStore((s) => s.connState[connection.id]);
   const width = useStore((s) => s.settings.sidebarWidth);
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
 
   const requestDelete = () =>
     askConfirm({
@@ -524,40 +551,117 @@ function ConnectionRow({
   const spelled = width >= NAME_BADGE_MIN_WIDTH;
 
   return (
-    <Row
-      label={connection.name}
-      detail={showEnv ? [ENV_NAME[connection.env], detailFor(connection)].filter(Boolean).join(' · ') : detailFor(connection)}
-      badge={
-        spelled ? (
-          <span
-            title={variantLabel(connection.variant, connection.engine)}
-            style={{ width: BADGE_WIDTH }}
-            className={`shrink-0 truncate text-[9.5px] font-semibold leading-none ${TAG_TEXT[variant]}`}
-          >
-            {variantTag(connection.variant, connection.engine)}
-          </span>
-        ) : (
-          <span
-            title={variantLabel(connection.variant, connection.engine)}
-            className={`shrink-0 w-1.5 h-1.5 rounded-full ${TAG_DOT[variant]}`}
-          />
-        )
-      }
-      badgeWidth={spelled ? BADGE_WIDTH : 6}
-      trailing={<StatusDot state={state} />}
-      onEdit={() => setSheet({ kind: 'editConnection', id: connection.id })}
-      editTitle={`Edit ${connection.name}`}
-      onDelete={requestDelete}
-      deleteTitle={`Delete ${connection.name}`}
-      pinned={connection.pinned}
-      onPin={() => void togglePin('connection', connection.id)}
-      // No PROD chip: the second line names the environment wherever the
-      // tab does not, and a chip on every row under the Prod tab teaches you
-      // to stop seeing it.
-      tone={connection.env === 'prod' ? 'warn' : 'normal'}
-      selected={selection?.kind === 'connection' && selection.id === connection.id}
-      onClick={() => select({ kind: 'connection', id: connection.id })}
-    />
+    <>
+      <Row
+        label={connection.name}
+        detail={showEnv ? [ENV_NAME[connection.env], detailFor(connection)].filter(Boolean).join(' · ') : detailFor(connection)}
+        badge={
+          spelled ? (
+            <span
+              title={variantLabel(connection.variant, connection.engine)}
+              style={{ width: BADGE_WIDTH }}
+              className={`shrink-0 truncate text-[9.5px] font-semibold leading-none ${TAG_TEXT[variant]}`}
+            >
+              {variantTag(connection.variant, connection.engine)}
+            </span>
+          ) : (
+            <span
+              title={variantLabel(connection.variant, connection.engine)}
+              className={`shrink-0 w-1.5 h-1.5 rounded-full ${TAG_DOT[variant]}`}
+            />
+          )
+        }
+        badgeWidth={spelled ? BADGE_WIDTH : 6}
+        trailing={<StatusDot state={state} />}
+        onEdit={() => setSheet({ kind: 'editConnection', id: connection.id })}
+        editTitle={`Edit ${connection.name}`}
+        onDelete={requestDelete}
+        deleteTitle={`Delete ${connection.name}`}
+        pinned={connection.pinned}
+        onPin={() => void togglePin('connection', connection.id)}
+        // No PROD chip: the second line names the environment wherever the
+        // tab does not, and a chip on every row under the Prod tab teaches you
+        // to stop seeing it.
+        tone={connection.env === 'prod' ? 'warn' : 'normal'}
+        selected={selection?.kind === 'connection' && selection.id === connection.id}
+        onClick={() => select({ kind: 'connection', id: connection.id })}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          setMenu({ x: e.clientX, y: e.clientY });
+        }}
+      />
+      <ConnectionMenu connection={connection} at={menu} onClose={() => setMenu(null)} onDelete={requestDelete} />
+    </>
+  );
+}
+
+/// Everything you can do to a connection, on a right click: open it, the
+/// work that starts from it, and managing it. Each item is offered only
+/// where it applies, so the menu never lists something that would refuse.
+function ConnectionMenu({
+  connection: c,
+  at,
+  onClose,
+  onDelete,
+}: {
+  connection: Connection;
+  at: { x: number; y: number } | null;
+  onClose(): void;
+  onDelete(): void;
+}): JSX.Element {
+  const select = useStore((s) => s.select);
+  const setSheet = useStore((s) => s.setSheet);
+  const newBuffer = useStore((s) => s.newBuffer);
+  const togglePin = useStore((s) => s.togglePin);
+  const duplicateConnection = useStore((s) => s.duplicateConnection);
+  const baselines = useTickets((s) => s.baselines);
+  const hasBase = baselines.some((b) => b.sourceConnectionId === c.id);
+  const canBase = devInstanceRefusal(c) === null && c.engine !== 'dynamodb';
+  const canSeed = c.env === 'local' && c.engine !== 'dynamodb';
+  const go = (fn: () => void) => () => {
+    onClose();
+    fn();
+  };
+  return (
+    <Dropdown open={!!at} at={at ?? undefined} onClose={onClose} label={c.name} width={260}>
+      <MenuItem label="Open" onSelect={go(() => select({ kind: 'connection', id: c.id }))} />
+      <MenuItem
+        label="New tab"
+        kbd="⌘T"
+        onSelect={go(() => {
+          select({ kind: 'connection', id: c.id });
+          newBuffer(c.id);
+        })}
+      />
+      {(canSeed || canBase || hasBase) && <MenuDivider />}
+      {canSeed && <MenuItem tone="ai" label="Seed for a ticket…" onSelect={go(() => setSheet({ kind: 'seed', connectionId: c.id }))} />}
+      {canBase && (
+        <MenuItem
+          label={c.env === 'local' ? (hasBase ? 'Rebuild its base…' : 'Create a base…') : hasBase ? 'Copy to this machine again…' : 'Copy to this machine…'}
+          detail={c.env === 'local' ? 'A small copy to branch from' : 'A small copy you can write to and branch from'}
+          onSelect={go(() => setSheet({ kind: 'baseline', connectionId: c.id }))}
+        />
+      )}
+      {hasBase && <MenuItem label="Branches…" onSelect={go(() => setSheet({ kind: 'tickets' }))} />}
+      {c.engine !== 'dynamodb' && (
+        <MenuItem
+          label="Map"
+          detail="What the code says about each table"
+          onSelect={go(() => openPane(c.id, MAP_TAB))}
+        />
+      )}
+      <MenuDivider />
+      <MenuItem label={c.pinned ? 'Unstar' : 'Star'} onSelect={go(() => void togglePin('connection', c.id))} />
+      <MenuItem label="Edit…" onSelect={go(() => setSheet({ kind: 'editConnection', id: c.id }))} />
+      <MenuItem
+        label="Duplicate"
+        onSelect={go(() => {
+          void duplicateConnection(c.id).then((id) => id && setSheet({ kind: 'editConnection', id }));
+        })}
+      />
+      <MenuDivider />
+      <MenuItem label="Delete…" onSelect={go(onDelete)} />
+    </Dropdown>
   );
 }
 
@@ -643,6 +747,7 @@ function Row({
   pinned,
   onPin,
   mark,
+  onContextMenu,
 }: {
   label: string;
   /// Second line: host and database, the thing that actually tells five
@@ -663,6 +768,7 @@ function Row({
   editTitle?: string;
   onDelete?: () => void;
   deleteTitle?: string;
+  onContextMenu?: (e: React.MouseEvent) => void;
 }): JSX.Element {
   const width = useStore((s) => s.settings.sidebarWidth);
   // Cut out of the MIDDLE. `Redshift - @PROD [EU]` and
@@ -678,6 +784,7 @@ function Row({
       tabIndex={0}
       title={shown === label ? undefined : label}
       onClick={onClick}
+      onContextMenu={onContextMenu}
       onKeyDown={(e) => {
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault();

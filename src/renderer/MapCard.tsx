@@ -37,6 +37,7 @@ interface MapState {
   load(connectionId: string): Promise<Status | null>;
   build(connectionId: string, refresh: boolean, rest?: boolean): Promise<void>;
   stop(connectionId: string): void;
+  clear(connectionId: string): Promise<void>;
 }
 
 let listening = false;
@@ -100,6 +101,16 @@ export const useMaps = create<MapState>((set, get) => {
     stop(connectionId) {
       const job = get().jobs[connectionId];
       if (job) void window.overdb.invoke('map:cancel', job.jobId);
+    },
+
+    async clear(connectionId) {
+      const res = await window.overdb.invoke('map:clear', connectionId);
+      if (res.ok) {
+        set({ done: { ...get().done, [connectionId]: `Map cleared${res.links ? `, and the ${res.links} links the base recipe took from it` : ''}. Bases plan from column names until you map again.` } });
+      } else {
+        set({ error: { ...get().error, [connectionId]: res.error } });
+      }
+      await get().load(connectionId);
     },
   };
 });
@@ -260,6 +271,23 @@ export function MapCard({ connectionId, onChange, compact = false }: { connectio
             )}
             <button className="h-[26px] px-2.5 rounded-md border border-card hover:bg-wash-strong text-[11px]" onClick={() => void m.build(connectionId, false)}>
               Map again from scratch
+            </button>
+            <button
+              className="h-[26px] px-2.5 rounded-md text-[11px] text-ink-muted hover:text-bad hover:bg-wash-strong ml-auto"
+              onClick={() =>
+                useStore.getState().askConfirm({
+                  title: 'Clear this map?',
+                  body: 'Deletes what overdb learned from the code about this database, and the links a saved base recipe took from it. Your tenant, starting points and table choices stay. Bases plan from column names alone until you map again.',
+                  confirmLabel: 'Clear map',
+                  destructive: true,
+                  onConfirm: async () => {
+                    await m.clear(connectionId);
+                    onChange?.();
+                  },
+                })
+              }
+            >
+              Clear map
             </button>
           </div>
         </>

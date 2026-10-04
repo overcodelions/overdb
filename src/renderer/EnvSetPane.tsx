@@ -3,6 +3,8 @@ import type { Connection, EnvSet } from '@shared/types';
 import { variantLabel } from '@shared/engines';
 import { useStore } from './store';
 import { useReach, whyDown } from './reachStore';
+import { useTickets } from './ticketsStore';
+import { devInstanceRefusal } from '@shared/instances';
 
 /// Are the members of this set actually reachable?
 ///
@@ -20,6 +22,12 @@ export function MemberHealth({ envSet }: { envSet: EnvSet }): JSX.Element {
     .map((id) => connections.find((c) => c.id === id))
     .filter((c): c is Connection => Boolean(c));
   const missing = envSet.memberIds.length - members.length;
+  const based = useTickets((s) => s.baselines);
+  // A shared member with no copy here yet: the set is where you notice your
+  // own copy and the sandbox have drifted, and where getting one is natural.
+  const copyable = members.filter(
+    (c) => c.env !== 'local' && devInstanceRefusal(c) === null && !based.some((b) => b.sourceConnectionId === c.id),
+  );
 
   if (members.length === 0) {
     return (
@@ -48,6 +56,17 @@ export function MemberHealth({ envSet }: { envSet: EnvSet }): JSX.Element {
           />
         ))}
       </div>
+
+      {copyable.length > 0 && (
+        <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-ink-muted">
+          <span>Work on a copy instead of the shared server:</span>
+          {copyable.map((c) => (
+            <button key={c.id} className="text-accent hover:underline" onClick={() => setSheet({ kind: 'baseline', connectionId: c.id })}>
+              Copy {c.name} to this machine…
+            </button>
+          ))}
+        </div>
+      )}
 
       {missing > 0 && (
         <p className="mt-2 text-[11px] text-warn/90">

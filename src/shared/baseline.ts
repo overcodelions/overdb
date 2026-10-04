@@ -123,10 +123,15 @@ const KEY_PREFIX = new Set(['fk', 'id']);
 export function referenceBase(column: string): string[] | null {
   const tokens = nameTokens(column);
   if (tokens.length < 2) return null;
+  // An id kept for another system — `remote_client_id`, `crm_account_id`,
+  // `external_user_id` — names a row there, not here.
+  if (FOREIGN_SYSTEM.has(tokens[0])) return null;
   if (KEY_SUFFIX.has(tokens[tokens.length - 1])) return tokens.slice(0, -1);
   if (KEY_PREFIX.has(tokens[0])) return tokens.slice(1);
   return null;
 }
+
+const FOREIGN_SYSTEM = new Set(['remote', 'external', 'ext', 'crm', 'sfdc', 'salesforce', 'hubspot', 'marketo', 'stripe', 'legacy', 'upstream', 'thirdparty']);
 
 const AUDIT_TOKENS = new Set(['by', 'last', 'modifier', 'editor', 'updater', 'creator']);
 
@@ -140,13 +145,54 @@ interface Keyed {
 /// proposed for each `…_id` column that names a table with a single-column
 /// key of a compatible type. Same schema first; a name several schemas
 /// could mean picks the first and lists the rest.
+/// A table's single-column key: the declared one, or — where none is
+/// declared, as in every Redshift table and many data marts — the column
+/// named for the table itself (`client.client_id`, `partners.partner_id`),
+/// else a bare `id`. A composite key is not a single key.
+export function keyOf(t: TableInfo): string | null {
+  if (t.primaryKey.length === 1) return t.primaryKey[0];
+  if (t.primaryKey.length > 1) return null;
+  const tokens = nameTokens(t.name);
+  const names = new Map(t.columns.map((c) => [c.name.toLowerCase(), c.name]));
+  // The whole name first, then shorter endings of it: a mirrored table
+  // like `acme_db_client` is keyed `client_id`. A shorter ending only when
+  // it is the table's first column, where a key sits — in
+  // `deal_comment(deal_id, comment_id)` the comment is a link, not the key.
+  const first = t.columns[0]?.name.toLowerCase();
+  for (let i = 0; i < tokens.length; i++) {
+    const own = tokens.slice(i).join('_');
+    const singular = own.replace(/(ies)$/, 'y').replace(/(?<!s)s$/, '');
+    const hit = names.get(`${own}_id`) ?? names.get(`${singular}_id`);
+    if (hit && (i === 0 || hit.toLowerCase() === first)) return hit;
+  }
+  return names.get('id') ?? null;
+}
+
+/// Other tables keyed by the same column as the tenant — in a data mart the
+/// same client ids are mirrored into several (`client`, `acme_db_client`,
+/// `acme_dm.client`). Where the tenant's own table has no such row, its
+/// name may be found in one of these, and its key means the same thing.
+export function tenantNamesakes(snapshot: SchemaSnapshot, tenant: TableRef & { column: string }): Array<TableRef & { info: TableInfo }> {
+  const out: Array<TableRef & { info: TableInfo }> = [];
+  for (const sc of snapshot.schemas) {
+    for (const t of sc.tables) {
+      // Views too: a mart's client list is often a view over its tables.
+      if ((t.kind !== 'table' && t.kind !== 'view') || looksLikeBackup(t.name)) continue;
+      if (sc.name === tenant.schema && t.name === tenant.table) continue;
+      if (keyOf(t)?.toLowerCase() === tenant.column.toLowerCase()) out.push({ schema: sc.name, table: t.name, info: t });
+    }
+  }
+  return out;
+}
+
 export function findLinks(snapshot: SchemaSnapshot): Link[] {
   const keyed: Keyed[] = [];
   for (const s of snapshot.schemas) {
     for (const t of s.tables) {
       // A backup is never what a column means, even with the key it copied.
-      if (t.kind !== 'table' || t.primaryKey.length !== 1 || looksLikeBackup(t.name)) continue;
-      keyed.push({ ref: { schema: s.name, table: t.name }, table: t, pk: t.primaryKey[0] });
+      if (t.kind !== 'table' || looksLikeBackup(t.name)) continue;
+      const pk = keyOf(t);
+      if (pk) keyed.push({ ref: { schema: s.name, table: t.name }, table: t, pk });
     }
   }
   const byName = new Map<string, Keyed[]>();
@@ -201,7 +247,7 @@ export function findLinks(snapshot: SchemaSnapshot): Link[] {
         if (base.join('_') === own) continue;
         // Nor is a table's own single key named for the end of its name:
         // `content_form.form_id`, `deal_comment.comment_id`.
-        if (t.primaryKey.length === 1 && t.primaryKey[0] === col.name && own.endsWith(`_${base.join('_')}`)) continue;
+        if (keyOf(t) === col.name && own.endsWith(`_${base.join('_')}`)) continue;
         const target = guessTarget(col, nameTokens(col.name), base, from, byName, byPk);
         if (!target) continue;
         push({
@@ -320,7 +366,7 @@ export function tenantTables(snapshot: SchemaSnapshot, tenant: TableRef & { colu
   for (const s of snapshot.schemas) {
     if (s.name === tenant.schema) continue;
     const t = s.tables.find((x) => x.kind === 'table' && x.name.toLowerCase() === tenant.table.toLowerCase());
-    if (t && t.primaryKey.length === 1 && t.primaryKey[0].toLowerCase() === tenant.column.toLowerCase()) {
+    if (t && keyOf(t)?.toLowerCase() === tenant.column.toLowerCase()) {
       out.push({ schema: s.name, table: t.name });
     }
   }
@@ -530,7 +576,10 @@ export function sortTables(input: SortInput): TablePlan[] {
     const bytes = st?.bytes ?? null;
     let action: TableAction;
     let reason: string;
-    const pre = early.get(key);
+    // A table you start from is never set aside as empty: in a sandbox the
+    // tenant table can be empty while every table pointing at it holds the
+    // tenant's rows, and its starting key is what they follow.
+    const pre = early.get(key)?.action === 'schema' && roots.includes(key) ? undefined : early.get(key);
     if (overrides[key]) {
       action = overrides[key];
       reason = 'chosen by you';
@@ -544,9 +593,14 @@ export function sortTables(input: SortInput): TablePlan[] {
         : via.length === 1
           ? `has ${via[0].column}`
           : `through ${via.slice(0, -1).map((v) => v.table).join(' → ')}`;
+    } else if (rows === null && bytes === null) {
+      // Unknown is not small: copying it whole could mean copying the
+      // largest table there is. A person decides.
+      action = 'review';
+      reason = 'size unknown, not tied to what you start from';
     } else if ((rows ?? 0) <= WHOLE_MAX_ROWS || (bytes !== null && bytes <= WHOLE_MAX_BYTES)) {
       action = 'whole';
-      reason = rows === null && bytes === null ? 'size unknown, not tied to what you start from' : 'small, not tied to what you start from';
+      reason = 'small, not tied to what you start from';
     } else {
       action = 'review';
       reason = 'large, not tied to what you start from';
@@ -615,6 +669,15 @@ export function nameColumns(table: TableInfo): string[] {
   return table.columns.filter(textual).slice(0, 3).map((c) => c.name);
 }
 
+/// The columns a search for a tenant looks in: the ones it is shown by, and
+/// every other name-like or key-like text column besides. A wide mart table
+/// has a dozen `*_name`/`*_code` columns, and the one that holds the name a
+/// person types is not always among the few it is shown by.
+export function searchColumns(table: TableInfo): string[] {
+  const more = table.columns.filter((c) => textual(c) && (NAMEISH.test(c.name) || /(^|_)key$/i.test(c.name))).map((c) => c.name);
+  return [...new Set([...nameColumns(table), ...more])].slice(0, 12);
+}
+
 /// The tables a login could live in. Not just the one called `users` — a
 /// second users table is exactly what this exists to find — but not every
 /// table with an email in it either: a login table also keeps a password.
@@ -624,7 +687,7 @@ export function loginTables(snapshot: SchemaSnapshot): Array<TableRef & { column
   const withEmail: Array<{ ref: TableRef; t: TableInfo; columns: string[] }> = [];
   for (const s of snapshot.schemas) {
     for (const t of s.tables) {
-      if (t.kind !== 'table' || t.primaryKey.length === 0) continue;
+      if (t.kind !== 'table' || (t.primaryKey.length === 0 && !keyOf(t))) continue;
       if (looksLikeBackup(t.name) || looksLikeLog(t.name)) continue;
       const columns = t.columns.filter((c) => EMAILISH.test(c.name) && textual(c)).map((c) => c.name);
       if (columns.length > 0) withEmail.push({ ref: { schema: s.name, table: t.name }, t, columns });
@@ -636,7 +699,7 @@ export function loginTables(snapshot: SchemaSnapshot): Array<TableRef & { column
     : withEmail.filter(({ ref }) => nameTokens(ref.table).some((tok) => PEOPLE.has(tok)));
   return chosen.map(({ ref, t, columns }) => {
     const usernames = t.columns.filter((c) => USERNAMEISH.test(c.name) && textual(c)).map((c) => c.name);
-    return { ...ref, columns: [...columns, ...usernames], pk: t.primaryKey };
+    return { ...ref, columns: [...columns, ...usernames], pk: t.primaryKey.length ? t.primaryKey : [keyOf(t)!] };
   });
 }
 
@@ -696,9 +759,21 @@ export function findSql(engine: Engine, req: FindRequest): { sql: string; params
     });
     clause = `(${clause}) AND ${q(req.within.column)} IN (${holders.join(', ')})`;
   }
+  // A short term matches a lot ("hp" is in every `hp-dev-…`), and the
+  // limit keeps whichever rows come first: the row named exactly that, then
+  // the ones starting with it, come before the rest.
+  let order = '';
+  if (req.mode === 'contains') {
+    const like = (pattern: string) => req.match.map((c) => {
+      params.push(pattern);
+      return `LOWER(${engine === 'postgres' ? `${q(c)}::text` : q(c)}) LIKE LOWER(${holder()})`;
+    }).join(' OR ');
+    const escaped = req.term.replace(/[\\%_]/g, (m) => `\\${m}`);
+    order = ` ORDER BY CASE WHEN ${like(escaped)} THEN 0 WHEN ${like(`${escaped}%`)} THEN 1 ELSE 2 END`;
+  }
   const limit = Math.max(1, Math.min(50, Math.floor(req.limit)));
   return {
-    sql: `SELECT ${req.select.map(q).join(', ')} FROM ${target} WHERE ${clause} LIMIT ${limit}`,
+    sql: `SELECT ${req.select.map(q).join(', ')} FROM ${target} WHERE ${clause}${order} LIMIT ${limit}`,
     params,
   };
 }
@@ -909,9 +984,8 @@ export function polyTarget(
   const tables: Array<TableRef & { pk: string }> = [];
   for (const s of snapshot.schemas) {
     for (const t of s.tables) {
-      if (t.kind === 'table' && t.primaryKey.length === 1 && !looksLikeBackup(t.name)) {
-        tables.push({ schema: s.name, table: t.name, pk: t.primaryKey[0] });
-      }
+      const pk = t.kind === 'table' && !looksLikeBackup(t.name) ? keyOf(t) : null;
+      if (pk) tables.push({ schema: s.name, table: t.name, pk });
     }
   }
   const candidates: string[] = [];

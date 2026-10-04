@@ -30,7 +30,7 @@ export function helperSocket(root: string): string {
 }
 
 const OPS: ReadonlySet<string> = new Set([
-  'tickets', 'startTicket', 'stopTicket', 'deleteTicket', 'proxyState', 'configureProxy', 'routeProxy',
+  'tickets', 'startTicket', 'stopTicket', 'deleteTicket', 'resetTicket', 'proxyStates', 'configureProxy', 'routeProxy',
   'proxyClients', 'inUse', 'resume', 'shutdown',
 ]);
 
@@ -75,10 +75,12 @@ async function main(): Promise<void> {
     }
   }
 
+  // Private from the moment it exists, not only after the chmod below.
+  const umask = process.umask(0o077);
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject);
     server.listen(sock, () => resolve());
-  });
+  }).finally(() => process.umask(umask));
   // This user only: the socket can start databases and move the proxy.
   fs.chmodSync(sock, 0o600);
   await runtime.resume().catch((err) => console.error('resume failed', err));

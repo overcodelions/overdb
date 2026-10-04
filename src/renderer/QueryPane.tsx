@@ -71,6 +71,7 @@ import { ResultGrid } from './ResultGrid';
 import { ChartView } from './ChartView';
 import { RailSlot } from './BottomRail';
 import { ErdView } from './ErdView';
+import { devInstanceRefusal, isProxyConnectionId } from '@shared/instances';
 import { MapPane } from './MapPane';
 import { HealthPane } from './HealthPane';
 import { HistoryPane } from './HistoryPane';
@@ -1275,10 +1276,10 @@ export function QueryPane(): JSX.Element {
                 setSheet({ kind: 'pickTables', connectionId: conn.id });
               }}
             />
-            {conn.env === 'local' && conn.engine !== 'dynamodb' && (
+            {!conn.branchOf && !isProxyConnectionId(conn.id) && devInstanceRefusal(conn) === null && (
               <MenuItem
-                label="Create a base…"
-                detail="A small copy of this database, enough to log in — branches start from it"
+                label={conn.env === 'local' ? 'Create a base…' : 'Copy to this machine…'}
+                detail={conn.env === 'local' ? 'A small copy of this database, enough to log in — branches start from it' : `A small copy of ${conn.name} you can write to and branch from — only reads it`}
                 onSelect={() => {
                   setMoreMenu(false);
                   setSheet({ kind: 'baseline', connectionId: conn.id });
@@ -1287,7 +1288,7 @@ export function QueryPane(): JSX.Element {
             )}
             <MenuItem
               label="Branches…"
-              detail="A branch per ticket, and what your services see"
+              detail="Branches of the base, and what your services see"
               onSelect={() => {
                 setMoreMenu(false);
                 setSheet({ kind: 'tickets' });

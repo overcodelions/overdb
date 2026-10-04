@@ -39,7 +39,7 @@ function tildify(path: string): string {
 }
 
 function Spinner(): JSX.Element {
-  return <span className="w-3 h-3 shrink-0 rounded-full border-2 border-ink-muted/30 border-t-ink-muted animate-spin" aria-label="Working" />;
+  return <span className="inline-block w-3 h-3 shrink-0 rounded-full border-2 border-ink-muted/30 border-t-ink-muted animate-spin" aria-label="Working" />;
 }
 
 function DbIcon(): JSX.Element {
@@ -67,10 +67,21 @@ export function BaselineSheet({ connectionId }: { connectionId: string }): JSX.E
       <div className="shrink-0 flex items-center gap-3 px-5 pt-4 pb-3">
         <span className="text-accent-strong"><DbIcon /></span>
         <div className="flex-1 min-w-0">
-          <h2 className="text-sm font-semibold">Create a base{conn ? ` · ${conn.name}` : ''}</h2>
-          <p className="text-[11px] text-ink-muted mt-0.5 truncate">
-            A recipe for a small copy of this database that is still enough to log in and use the app. Only reads; nothing on the server changes.
-          </p>
+          {conn && conn.env !== 'local' ? (
+            <>
+              <h2 className="text-sm font-semibold">Copy {conn.name} to this machine</h2>
+              <p className="text-[11px] text-ink-muted mt-0.5 truncate">
+                A small copy you can write to, still enough to log in and use the app. It becomes a base: branch it for each ticket or anything you want to try. Only reads; nothing on {conn.name} changes.
+              </p>
+            </>
+          ) : (
+            <>
+              <h2 className="text-sm font-semibold">Create a base{conn ? ` · ${conn.name}` : ''}</h2>
+              <p className="text-[11px] text-ink-muted mt-0.5 truncate">
+                A recipe for a small copy of this database that is still enough to log in and use the app. Only reads; nothing on the server changes.
+              </p>
+            </>
+          )}
         </div>
         <button aria-label="Close" onClick={() => setSheet(null)} className="w-[26px] h-[26px] rounded-[5px] text-ink-muted hover:text-ink hover:bg-wash-strong flex items-center justify-center">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M6 6l12 12M18 6L6 18" /></svg>
@@ -78,6 +89,7 @@ export function BaselineSheet({ connectionId }: { connectionId: string }): JSX.E
       </div>
 
       <Stepper />
+      {!b.loading && !b.error && <ServerNeeded />}
 
       {b.loading ? (
         <div className="flex-1 flex items-center justify-center gap-2 text-ink-muted">
@@ -151,7 +163,9 @@ function StartFrom(): JSX.Element {
             </p>
           )}
           {b.previousError && (
-            <p className="text-[11px] text-warn-strong">The saved recipe could not be read: {b.previousError} Starting fresh.</p>
+            <p className="text-[11px] text-warn-strong">
+              {b.previousError.startsWith('The recipe at') ? b.previousError : `The saved recipe could not be read: ${b.previousError} Starting fresh.`}
+            </p>
           )}
           {b.tenant && <TenantSearch />}
           {b.tenant && b.levels.map((lv) => <LevelNarrow key={tableKey(lv.ref)} level={lv} />)}
@@ -200,6 +214,10 @@ function Overview(): JSX.Element {
     return [...m.entries()].map(([name, v]) => ({ name, ...v })).sort((x, y) => y.bytes - x.bytes);
   }, [b.snapshot, b.stats]);
   const total = bySchema.reduce((n, s) => n + s.bytes, 0);
+  // A server that would not say its sizes (Redshift, for most users) shows
+  // none rather than zero.
+  const sized = (b.stats ?? []).some((st) => st.bytes !== null);
+  const size = (n: number) => (sized ? formatBytes(n) : '—');
   const max = bySchema[0]?.bytes || 1;
   const fks = b.links.filter((l) => l.source === 'fk').length;
   const named = b.links.filter((l) => l.source === 'name').length;
@@ -214,7 +232,7 @@ function Overview(): JSX.Element {
       <div>
         <div className="font-semibold">Schemas in the base</div>
         <div className="text-[11px] text-ink-muted mt-0.5">
-          {kept.length} of {bySchema.length}, {formatBytes(kept.reduce((n, x) => n + x.bytes, 0))} of {formatBytes(total)} today. Untick a schema and it is not created at all.
+          {kept.length} of {bySchema.length}{sized ? `, ${size(kept.reduce((n, x) => n + x.bytes, 0))} of ${size(total)} today` : ' — sizes not available from this server'}. Untick a schema and it is not created at all.
         </div>
       </div>
       <div className="flex flex-col gap-0.5 text-[11px] max-h-[240px] overflow-y-auto -mx-1 px-1">
@@ -224,7 +242,7 @@ function Overview(): JSX.Element {
             <span className="font-mono truncate" title={x.name}>{x.name}</span>
             <span className="text-ink-muted">{x.tables} tables</span>
             <div className="h-1.5 rounded-full bg-accent/70" style={{ width: `${Math.max(2, (x.bytes / max) * 100)}%` }} />
-            <span className="text-right tabular-nums">{formatBytes(x.bytes)}</span>
+            <span className="text-right tabular-nums">{size(x.bytes)}</span>
           </label>
         ))}
       </div>
@@ -287,6 +305,8 @@ function TenantCard(): JSX.Element {
   const [picking, setPicking] = useState(false);
   const top = b.candidates[0];
   const current = b.tenant ? b.candidates.find((c) => tableKey(c.ref) === tableKey(b.tenant!)) : null;
+  const emptyHere = !!b.tenant && b.stats.find((x) => x.schema === b.tenant!.schema && x.table === b.tenant!.table)?.rows === 0;
+  const foundIn = [...new Set(b.tenants.map((t) => t.from).filter((x): x is string => !!x))];
 
   return (
     <div className="rounded-md border border-card bg-surface-elevated px-3.5 py-3 flex flex-col gap-2.5">
@@ -300,6 +320,14 @@ function TenantCard(): JSX.Element {
               ? <>{current.tables} tables point at <span className="font-mono">{tableKey(b.tenant)}</span>, more than any other table.</>
               : <>The tenant is <span className="font-mono">{tableKey(b.tenant)}</span>.</>}
           </div>
+          {emptyHere && (
+            // A mart can keep its clients in another table and leave this
+            // one empty; the key is what scopes, wherever the row lives.
+            <div className="text-ink-muted">
+              It is empty on this server{foundIn.length > 0 && <> — {b.tenants.length === 1 ? b.tenants[0].label : 'the clients you start from'} {foundIn.length === 1 ? 'was' : 'were'} found in <span className="font-mono">{foundIn.join(', ')}</span></>}.
+              That is fine: what scopes the copy is the {b.tenant.column}, and the {current?.tables ?? ''} tables pointing here keep the rows that carry yours.
+            </div>
+          )}
         </>
       ) : (
         <>
@@ -354,25 +382,44 @@ function TenantSearch(): JSX.Element {
           value={b.tenantTerm}
           onChange={(e) => b.setTenantTerm(e.target.value)}
         />
-        <button type="submit" className={BTN} disabled={!b.tenantTerm.trim() || b.tenantSearching}>
-          {b.tenantSearching ? <Spinner /> : 'Find'}
+        <button type="submit" className={`${BTN} inline-flex items-center gap-1.5`} disabled={!b.tenantTerm.trim() || b.tenantSearching}>
+          {b.tenantSearching ? <><Spinner /> Finding</> : 'Find'}
         </button>
       </form>
       {b.tenantError && <p role="alert" className="text-bad-strong">{b.tenantError}</p>}
-      {b.tenantHits?.length === 0 && <p className="text-ink-muted">Nothing matched “{b.tenantTerm.trim()}”.</p>}
+      {b.tenantSearchingIn && (
+        <p className="text-[11px] text-ink-muted flex items-center gap-1.5"><Spinner /> Looking in <span className="font-mono">{b.tenantSearchingIn}</span>…</p>
+      )}
+      {!b.tenantSearching && b.tenantHits?.length === 0 && <p className="text-ink-muted">Nothing matched “{b.tenantTerm.trim()}”.</p>}
+      {!b.tenantSearching && b.tenantHits !== null && <LookIn />}
       {(b.tenantHits?.length ?? 0) > 0 && (
-        <ul className="flex flex-col gap-1 max-w-[560px]">
-          {b.tenantHits!.map((h) => (
-            <li key={h.key}>
-              <label className={`flex items-center gap-2 px-2.5 py-1.5 rounded-md border ${chosen.has(h.key) ? 'border-good/30 bg-good/5' : 'border-card'}`}>
-                <input type="checkbox" checked={chosen.has(h.key)} onChange={() => b.toggleTenant(h)} className="accent-[rgb(var(--c-accent-strong))]" />
-                <span className="font-medium truncate">{h.label}</span>
-                <span className="font-mono text-[11px] text-ink-muted truncate">{h.key}</span>
-                {h.inactive && <span className="ml-auto shrink-0 text-[10px] font-semibold px-1.5 rounded-[3px] text-warn-strong bg-warn/10">inactive</span>}
-              </label>
-            </li>
-          ))}
-        </ul>
+        <div className="flex flex-col gap-3 max-w-[600px]">
+          {[...new Set(b.tenantHits!.map((h) => h.from ?? ''))].map((from) => {
+            const rows = b.tenantHits!.filter((h) => (h.from ?? '') === from);
+            return (
+              <div key={from || 'own'} className="flex flex-col gap-1">
+                {(from || b.tenantHits!.some((h) => h.from)) && (
+                  <div className="text-[10.5px] font-semibold uppercase tracking-wider text-ink-faint">
+                    In <span className="font-mono normal-case tracking-normal">{from || (b.tenant ? `${b.tenant.schema}.${b.tenant.table}` : 'the tenant')}</span>
+                    <span className="font-normal normal-case tracking-normal"> · {rows.length}</span>
+                  </div>
+                )}
+                <ul className="flex flex-col gap-1">
+                  {rows.map((h) => (
+                    <li key={h.key}>
+                      <label className={`flex items-center gap-2 px-2.5 py-1.5 rounded-md border ${chosen.has(h.key) ? 'border-good/30 bg-good/5' : 'border-card hover:bg-wash'}`}>
+                        <input type="checkbox" checked={chosen.has(h.key)} onChange={() => b.toggleTenant(h)} className="accent-[rgb(var(--c-accent-strong))]" />
+                        <span className="font-medium truncate">{h.label}</span>
+                        <span className="ml-auto font-mono text-[10.5px] text-ink-faint truncate max-w-[180px]" title={h.key}>{h.key}</span>
+                        {h.inactive && <span className="shrink-0 text-[10px] font-semibold px-1.5 rounded-[3px] text-warn-strong bg-warn/10">inactive</span>}
+                      </label>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            );
+          })}
+        </div>
       )}
       {b.tenants.filter((t) => !b.tenantHits?.some((h) => h.key === t.key)).map((t) => (
         <div key={t.key} className="text-[11px] text-ink-muted">
@@ -380,6 +427,74 @@ function TenantSearch(): JSX.Element {
           <button className="text-accent-strong hover:underline" onClick={() => b.toggleTenant(t)}>Remove</button>
         </div>
       ))}
+    </div>
+  );
+}
+
+/// Where the last search looked, and any other table to look in — so a
+/// client kept in a table the search did not think of can still be found.
+function LookIn(): JSX.Element | null {
+  const b = useBaseline();
+  const [pick, setPick] = useState('');
+  if (!b.snapshot || !b.tenant) return null;
+  const go = (key: string) => {
+    const [schema, ...rest] = key.split('.');
+    setPick('');
+    void b.searchTenantIn({ schema, table: rest.join('.') });
+  };
+  const col = b.tenant.column.toLowerCase();
+  // Tables and views carrying the tenant's key first, then the rest.
+  const all = b.snapshot.schemas
+    .flatMap((sc) => sc.tables.filter((t) => t.kind !== 'matview').map((t) => ({ key: `${sc.name}.${t.name}`, t, has: t.columns.some((c) => c.name.toLowerCase() === col) })))
+    .sort((x, y) => Number(y.has) - Number(x.has) || x.key.localeCompare(y.key));
+  // Every word typed must appear, in any order: "db client" finds acme_db_client.
+  const needle = pick.trim().toLowerCase();
+  const words = needle.split(/[\s._]+/).filter(Boolean);
+  const matches = needle ? all.filter((x) => words.every((w) => x.key.toLowerCase().includes(w))) : [];
+  const shown = matches.slice(0, 8);
+  return (
+    <div className="flex flex-col gap-1.5 text-[11px] text-ink-muted max-w-[600px]">
+      <p>
+        Looked in{' '}
+        {b.tenantLookedIn.map((x, i) => (
+          <span key={x}>
+            {i > 0 && ', '}
+            <span className="font-mono text-ink">{x}</span>
+          </span>
+        ))}
+        .
+      </p>
+      <div className="flex flex-col gap-1">
+        <input
+          className="field h-7 px-2 text-[11.5px] w-[320px]"
+          placeholder="Look in another table — type part of its name"
+          aria-label="Find a table to look in"
+          value={pick}
+          onChange={(e) => setPick(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && shown[0]) {
+              e.preventDefault();
+              go(shown[0].key);
+            }
+          }}
+        />
+        {needle && (
+          <ul className="flex flex-col w-[420px] rounded-md border border-card bg-surface-elevated overflow-hidden">
+            {shown.map((x) => (
+              <li key={x.key}>
+                <button className="w-full text-left px-2.5 py-1.5 flex items-center gap-2 hover:bg-accent/15 focus:bg-accent/15 focus:outline-none" onClick={() => go(x.key)}>
+                  <span className="font-mono text-[11px] text-ink truncate">{x.key}</span>
+                  {x.t.kind === 'view' && <span className="text-[10px] text-ink-faint">view</span>}
+                  {x.has && <span className="ml-auto shrink-0 text-[10px] text-good">has {b.tenant!.column}</span>}
+                </button>
+              </li>
+            ))}
+            {shown.length === 0 && <li className="px-2.5 py-1.5 text-ink-faint">No table or view named like “{pick.trim()}”.</li>}
+            {matches.length > shown.length && <li className="px-2.5 py-1 text-ink-faint">+ {matches.length - shown.length} more — keep typing</li>}
+          </ul>
+        )}
+      </div>
+      {all.length === 0 && <p>No tables were read from this server.</p>}
     </div>
   );
 }
@@ -394,6 +509,9 @@ function LevelNarrow({ level }: { level: TenancyLevel }): JSX.Element {
   const [open, setOpen] = useState(some);
   const [note, setNote] = useState<string | null>(null);
   const word = level.ref.table;
+  // Two levels of the same name — `public.partner` and `acme_dm.partner` —
+  // are told apart by their schema.
+  const twin = b.levels.some((l) => l !== level && l.ref.table === level.ref.table);
   const within = b.tenants.length > 0 ? whoFor(b) : `the ${b.tenant?.table ?? 'tenant'}`;
   const hits = b.levelHits[key];
   const chosenKeys = new Set(chosen.map((r) => r.key));
@@ -401,7 +519,10 @@ function LevelNarrow({ level }: { level: TenancyLevel }): JSX.Element {
 
   return (
     <div className="flex flex-col gap-2">
-      <div className="font-semibold">Narrow further: {word}</div>
+      <div className="font-semibold">
+        Narrow further: {word}
+        {twin && <span className="font-normal text-ink-muted"> · {level.ref.schema}</span>}
+      </div>
       <p className="text-ink-muted max-w-[560px]">
         {level.tables} tables carry a <span className="font-mono">{level.column}</span>, and each {word} belongs to a {b.tenant?.table}. Keep all of {within}’s {word}s, or only some — every table with a {level.column} then keeps only theirs, plus the rows that belong to no {word} at all ({within}’s own staff and settings).
       </p>
@@ -608,7 +729,7 @@ const BUCKET: Record<TableAction, Bucket> = {
 
 const NONE_PARTS: Array<{ action: TableAction; label: string }> = [
   { action: 'empty', label: 'logs, history and queues' },
-  { action: 'review', label: 'large tables tied to nothing you start from' },
+  { action: 'review', label: 'large or unsized tables tied to nothing you start from' },
   { action: 'schema', label: 'empty today' },
   { action: 'skip', label: 'backups and scratch copies, left out altogether' },
 ];
@@ -637,6 +758,7 @@ function count(n: number | null): string {
 
 function SortTables(): JSX.Element {
   const b = useBaseline();
+  const words = useSourceWords();
   const plans = useMemo(() => plansFor(b), [b.snapshot, b.stats, b.links, b.linksOff, b.tenant, b.tenants, b.logins, b.overrides, b.measured]);
   const sum = useMemo(() => summarize(plans), [plans]);
   const [open, setOpen] = useState<Bucket | null>(null);
@@ -652,7 +774,12 @@ function SortTables(): JSX.Element {
   const keep = inBucket('keep');
   const whole = inBucket('whole');
   const none = inBucket('none');
-  const bytes = (ps: TablePlan[], kept: boolean) => ps.reduce((n, p) => n + ((kept ? p.keepBytes : p.bytes) ?? 0), 0);
+  // Redshift gives a plain user row counts but no sizes: then the sums are
+  // in rows, not a row of "0 B".
+  const sized = plans.some((p) => p.bytes !== null);
+  const bytes = (ps: TablePlan[], kept: boolean) =>
+    ps.reduce((n, p) => n + ((sized ? (kept ? p.keepBytes : p.bytes) : (kept ? (p.action === 'whole' ? p.rows : p.keepRows) : p.rows)) ?? 0), 0);
+  const amount = (n: number) => (sized ? formatBytes(n) : `${count(n)} rows`);
 
   const needle = query.trim().toLowerCase();
   const matches = needle ? plans.filter((p) => tableKey(p.ref).toLowerCase().includes(needle)) : null;
@@ -671,12 +798,12 @@ function SortTables(): JSX.Element {
               in {keep.length} tables, copies {whole.length} small tables whole, and copies no rows from the other {none.length}.
             </p>
             <p className="text-ink-muted">
-              <span className="text-[20px] leading-7 font-semibold text-ink tracking-tight">{formatBytes(sum.bytes)} → about {formatBytes(sum.keepBytes)}</span>
+              <span className="text-[20px] leading-7 font-semibold text-ink tracking-tight">{sized ? `${formatBytes(sum.bytes)} → about ${formatBytes(sum.keepBytes)}` : `${amount(bytes(plans, false))} → about ${amount(bytes([...keep, ...whole], true))}`}</span>
               {'  '}
               {share !== null && b.measured
                 ? `estimated: ${measuredWho(b)} holds ${(share * 100).toFixed(share < 0.01 ? 2 : 1)}% of ${b.measured.table}, counted just now`
                 : b.tenants.length > 0
-                  ? `estimated as if ${whoFor(b)} were an average-sized ${tenantWord} — measuring…`
+                  ? `estimated as if ${whoFor(b)} were an average-sized ${tenantWord}${b.measuring ? ' — measuring…' : ''}`
                   : 'estimated from the server’s statistics'}
             </p>
           </div>
@@ -705,6 +832,7 @@ function SortTables(): JSX.Element {
                 tables={keep.length}
                 today={bytes(keep, false)}
                 kept={bytes(keep, true)}
+                amount={amount}
                 open={open === 'keep'}
                 onToggle={() => setOpen(open === 'keep' ? null : 'keep')}
               >
@@ -717,6 +845,7 @@ function SortTables(): JSX.Element {
                 tables={whole.length}
                 today={bytes(whole, false)}
                 kept={bytes(whole, true)}
+                amount={amount}
                 open={open === 'whole'}
                 onToggle={() => setOpen(open === 'whole' ? null : 'whole')}
               >
@@ -738,6 +867,7 @@ function SortTables(): JSX.Element {
                 tables={none.length}
                 today={bytes(none, false)}
                 kept={0}
+                amount={amount}
                 open={open === 'none'}
                 onToggle={() => setOpen(open === 'none' ? null : 'none')}
               >
@@ -763,8 +893,13 @@ function SortTables(): JSX.Element {
         <button className={BTN} disabled={b.saving || !!b.savedPath} onClick={() => void b.save()}>
           {b.savedPath ? 'Saved' : 'Save recipe'}
         </button>
-        <button className={PRIMARY} disabled={b.saving || b.snapshot?.engine !== 'mysql'} title={b.snapshot?.engine !== 'mysql' ? 'Building is MySQL-only for now' : undefined} onClick={() => void b.build()}>
-          {b.saving && <Spinner />} Build base
+        <button
+          className={PRIMARY}
+          disabled={b.saving || !buildable(b.snapshot?.engine) || (!!b.server && !b.server.found)}
+          title={!buildable(b.snapshot?.engine) ? 'Bases are for MySQL, MariaDB, Postgres and Redshift' : b.server && !b.server.found ? 'Install the server it runs on first, above' : undefined}
+          onClick={() => void b.build()}
+        >
+          {b.saving && <Spinner />} {words.remote ? 'Copy to this machine' : 'Build base'}
         </button>
       </Footer>
     </>
@@ -774,14 +909,14 @@ function SortTables(): JSX.Element {
 // ---- build ----------------------------------------------------------------
 
 const STAGES: Array<{ id: BuildProgress['stage']; name: string }> = [
-  { id: 'start', name: 'Start an empty instance' },
+  { id: 'start', name: 'Start an empty instance here' },
   { id: 'schemas', name: 'Create schemas' },
   { id: 'tables', name: 'Create tables' },
   { id: 'rows', name: 'Copy rows' },
   { id: 'parents', name: 'Complete foreign keys' },
   { id: 'objects', name: 'Views, routines, triggers' },
   { id: 'users', name: 'Accounts' },
-  { id: 'finish', name: 'Freeze it' },
+  { id: 'finish', name: 'Save it as the base' },
 ];
 
 function useElapsed(from: number | null, running: boolean): number {
@@ -794,8 +929,72 @@ function useElapsed(from: number | null, running: boolean): number {
   return from ? Math.max(0, Math.round((now - from) / 1000)) : 0;
 }
 
+/// A copy runs on a server of the same kind as the one it came from —
+/// MySQL 8's tables do not load into MariaDB — so when this machine has
+/// none, say so before any work is done, and offer to install it.
+function ServerNeeded(): JSX.Element | null {
+  const b = useBaseline();
+  const sv = b.server;
+  if (!sv || sv.found || !sv.flavor) return null;
+  const kind = KIND_NAME[sv.flavor] ?? 'MySQL';
+  const redshift = /redshift/i.test(b.snapshot?.serverVersion ?? '');
+  return (
+    <div className="mx-5 mb-2 rounded-md border border-warn/35 bg-warn/5 px-3.5 py-2.5 flex items-start gap-3">
+      <div className="flex-1 min-w-0 flex flex-col gap-1">
+        <p className="leading-snug">
+          <b>This copy needs {kind} {sv.version} on this machine.</b>{' '}
+          <span className="text-ink-muted">
+            {redshift
+              ? 'Redshift does not run on a Mac, so its copy runs on Postgres — Redshift’s storage settings are left behind, its types mapped to the nearest Postgres ones.'
+              : <>The server is {kind}, and its copy runs on the same kind{sv.flavor === 'mysql' ? ' — MariaDB cannot load MySQL 8’s tables' : ''}.</>}{' '}
+            overdb only needs the program; it starts and stops its own copies and never runs it as a service.
+          </span>
+        </p>
+        {b.install ? (
+          <p className="font-mono text-[11px] text-ink-muted truncate" title={b.install.line}><Spinner /> {b.install.line}</p>
+        ) : sv.formula ? (
+          <p className="text-[11px] text-ink-muted">
+            Installs with Homebrew: <span className="font-mono text-ink">brew install {sv.formula}</span> · a few minutes
+          </p>
+        ) : (
+          <p className="text-[11px] text-ink-muted">
+            {sv.brew ? 'Homebrew has no formula for it.' : 'Homebrew is not installed.'} Install {kind} {sv.version} another way, then check again.
+          </p>
+        )}
+        {b.installError && <p role="alert" className="text-[11px] text-bad-strong break-words">{b.installError}</p>}
+      </div>
+      {sv.formula ? (
+        <button className={`${PRIMARY} shrink-0`} disabled={!!b.install} onClick={() => void b.installServer()}>
+          {b.install ? 'Installing…' : `Install ${kind} ${sv.formula.split('@')[1] ?? ''}`.trim()}
+        </button>
+      ) : (
+        <button className={`${BTN} shrink-0`} onClick={() => void b.checkServer()}>Check again</button>
+      )}
+    </div>
+  );
+}
+
+const buildable = (engine: string | undefined) => engine === 'mysql' || engine === 'postgres';
+const KIND_NAME: Record<string, string> = { mysql: 'MySQL', mariadb: 'MariaDB', postgres: 'Postgres' };
+
+/// A base of a shared server is a copy of it, and is said that way: "your
+/// server" is wrong for a sandbox someone else runs.
+function useSourceWords(): { remote: boolean; name: string; server: string } {
+  const b = useBaseline();
+  const conn = useStore((s) => s.connections.find((c) => c.id === b.connectionId));
+  const found = b.server?.found;
+  const kind = found && b.server?.flavor ? KIND_NAME[b.server.flavor] : null;
+  const version = found ? (b.server?.flavor === 'postgres' ? found.version.split('.')[0] : found.version.split('.').slice(0, 2).join('.')) : '';
+  return {
+    remote: !!conn && conn.env !== 'local',
+    name: conn?.name ?? 'the server',
+    server: kind ? `${kind} ${version}` : 'a new',
+  };
+}
+
 function Build(): JSX.Element {
   const b = useBaseline();
+  const words = useSourceWords();
   const running = b.buildJob !== null;
   const elapsed = useElapsed(b.buildStartedAt, running);
   const last = b.buildLog[b.buildLog.length - 1];
@@ -812,10 +1011,12 @@ function Build(): JSX.Element {
             <div>
               <p className="text-[14px] leading-6">
                 {running
-                  ? <>Building a base for <b>{whoFor(b)}</b>. Your server is only read; everything is written to a new instance overdb runs.</>
+                  ? words.remote
+                    ? <>Copying <b>{words.name}</b> to this machine, for <b>{whoFor(b)}</b>. {words.name} is only read; the copy is written to {words.server === 'a new' ? 'a new instance' : `a ${words.server} instance`} overdb runs here.</>
+                    : <>Building a base for <b>{whoFor(b)}</b>. Your server is only read; everything is written to {words.server === 'a new' ? 'a new instance' : `a ${words.server} instance`} overdb runs.</>
                   : b.buildError
-                    ? 'The build stopped.'
-                    : 'Ready to build.'}
+                    ? words.remote ? 'The copy stopped.' : 'The build stopped.'
+                    : words.remote ? 'Ready to copy.' : 'Ready to build.'}
               </p>
               {running && <p className="text-ink-muted">{elapsed}s · {last?.text ?? 'Starting'}</p>}
             </div>
@@ -844,7 +1045,7 @@ function Build(): JSX.Element {
                     }`}>
                       {done ? '✓' : here ? <span className="w-2 h-2 rounded-full bg-white animate-pulse" /> : ''}
                     </span>
-                    <span className={here ? 'font-semibold' : done ? '' : 'text-ink-muted'}>{st.name}</span>
+                    <span className={here ? 'font-semibold' : done ? '' : 'text-ink-muted'}>{st.id === 'start' && words.server !== 'a new' ? `Start ${words.server} here` : st.name}</span>
                     {here && counted?.stage === st.id && counted.total ? (
                       <span className="flex items-center gap-2 text-ink-muted">
                         <span className="w-40 h-1.5 rounded-full bg-wash-strong overflow-hidden">
@@ -860,13 +1061,18 @@ function Build(): JSX.Element {
           </>
         )}
       </div>
-      <Footer note={running ? 'Closing this stops the build and throws away what it made.' : undefined}>
+      <Footer note={running ? 'It keeps going if you send it to the background; closing the sheet any other way stops it and throws away what it made.' : undefined}>
         {running ? (
-          <button className={BTN} onClick={() => b.stopBuild()}>Stop</button>
+          <>
+            <button className={BTN} onClick={() => b.stopBuild()}>Stop</button>
+            <button className={PRIMARY} onClick={() => b.background()}>Keep going in the background</button>
+          </>
         ) : (
           <>
             <button className={BTN} onClick={() => b.setStep('sort')}>Back to tables</button>
-            {!b.built && <button className={PRIMARY} onClick={() => void b.build()}>Build again</button>}
+            {b.built
+              ? <button className={PRIMARY} onClick={() => useStore.getState().setSheet(null)}>Done</button>
+              : <button className={PRIMARY} disabled={!!b.server && !b.server.found} onClick={() => void b.build()}>{words.remote ? 'Copy again' : 'Build again'}</button>}
           </>
         )}
       </Footer>
@@ -876,6 +1082,7 @@ function Build(): JSX.Element {
 
 function Built(): JSX.Element {
   const b = useBaseline();
+  const words = useSourceWords();
   const setSheet = useStore((s) => s.setSheet);
   const select = useStore((s) => s.select);
   const tickets = useTickets();
@@ -888,7 +1095,9 @@ function Built(): JSX.Element {
   return (
     <div className="flex flex-col gap-5 max-w-[720px]">
       <div className="rounded-md border border-good/30 bg-good/5 px-4 py-3 flex flex-col gap-1">
-        <div className="text-[14px] font-semibold">Base built for {b.built!.label}</div>
+        <div className="text-[14px] font-semibold">
+          {words.remote ? <>Copied {words.name} to this machine — a base for {b.built!.label}</> : <>Base built for {b.built!.label}</>}
+        </div>
         <div className="text-ink-muted">
           {r.tables} tables · {r.rows.toLocaleString()} rows · {formatBytes(b.built!.bytes)} on disk · {Math.round(r.durationMs / 1000)}s
           {r.filled > 0 && <> · {r.filled.toLocaleString()} parent rows fetched so no foreign key points at nothing</>}
@@ -925,7 +1134,7 @@ function Built(): JSX.Element {
           <div className="font-semibold">Make a branch for a ticket</div>
           <p className="text-ink-muted">A clone of this base with its own port. Seed it, break it, throw it away — the base stays as it is.</p>
           <div className="flex gap-2">
-            <input className={`${FIELD} w-[160px]`} placeholder="PROJ-123" aria-label="Ticket" value={name} onChange={(e) => setName(e.target.value)} />
+            <input className={`${FIELD} w-[160px]`} placeholder="PROJ-123, or any name" aria-label="Branch name" value={name} onChange={(e) => setName(e.target.value)} />
             <input className={`${FIELD} flex-1`} placeholder="What it is for (optional)" aria-label="Note" value={note} onChange={(e) => setNote(e.target.value)} />
             <button type="submit" className={PRIMARY} disabled={!name.trim() || !!tickets.busy.new}>
               {tickets.busy.new ? <><Spinner /> Cloning</> : 'Make branch'}
@@ -945,6 +1154,7 @@ function Section(props: {
   tables: number;
   today: number;
   kept: number;
+  amount(n: number): string;
   open: boolean;
   onToggle(): void;
   children: React.ReactNode;
@@ -963,8 +1173,8 @@ function Section(props: {
           <span className="block text-ink-muted mt-0.5">{props.explain}</span>
         </span>
         <span className="shrink-0 text-right tabular-nums">
-          <span className="block">{props.id === 'none' ? '0 B' : `~${formatBytes(props.kept)}`}</span>
-          <span className="block text-[11px] text-ink-muted">of {formatBytes(props.today)} today</span>
+          <span className="block">{props.id === 'none' ? props.amount(0) : `~${props.amount(props.kept)}`}</span>
+          <span className="block text-[11px] text-ink-muted">of {props.amount(props.today)} today</span>
         </span>
       </button>
       {props.open && <div id={`baseline-${props.id}`} className="border-t border-card">{props.children}</div>}

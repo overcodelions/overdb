@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { Connection } from '@shared/types';
+import { devInstanceRefusal } from '@shared/instances';
 import { useStore } from './store';
 import { Dropdown } from './Menu';
 import { Chevron, Clock, Lock, Sparkle } from './Icons';
@@ -208,6 +209,7 @@ export function ConnectionState({
             </button>
           </div>
           {gate.confirming && <ProdConfirm conn={conn} gate={gate} />}
+          {gate.writes && <CopyInstead conn={conn} onDone={() => setPanel(false)} />}
 
           {gate.writes && (
             <div className="flex flex-col gap-1.5">
@@ -311,6 +313,39 @@ function OpenTransaction({
       >
         Commit
       </button>
+    </div>
+  );
+}
+
+/// Writing to a shared dev, sandbox or staging server is the moment a copy
+/// of it on this machine is the better idea: your writes stay yours, and
+/// nobody else's test data moves under you. Said once per connection.
+function CopyInstead({ conn, onDone }: { conn: Connection; onDone(): void }): JSX.Element | null {
+  const dismissed = useStore((s) => s.settings.dismissedHints);
+  const dismissHint = useStore((s) => s.dismissHint);
+  const setSheet = useStore((s) => s.setSheet);
+  const key = `copy-local:${conn.id}`;
+  if (conn.env === 'local' || conn.branchOf || devInstanceRefusal(conn) !== null || dismissed.includes(key)) return null;
+  return (
+    <div className="rounded-md border border-accent/35 bg-accent/[0.06] px-3 py-2.5 flex flex-col gap-2">
+      <p className="text-[11.5px] leading-relaxed">
+        <b>Writing to a shared {conn.env} server?</b>{' '}
+        <span className="text-ink-muted">Copy it to this machine instead — a small copy you can write to and branch, without changing {conn.name} for anyone else.</span>
+      </p>
+      <div className="flex items-center gap-3">
+        <button
+          className="h-6 px-2.5 rounded-[5px] bg-accent text-white text-[11px] font-semibold hover:bg-accent-strong"
+          onClick={() => {
+            onDone();
+            setSheet({ kind: 'baseline', connectionId: conn.id });
+          }}
+        >
+          Copy to this machine…
+        </button>
+        <button className="text-[11px] text-ink-muted hover:text-ink" onClick={() => dismissHint(key)}>
+          Not now
+        </button>
+      </div>
     </div>
   );
 }

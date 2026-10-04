@@ -2,7 +2,7 @@ import { useState } from 'react';
 import type { TicketState } from '@shared/instances';
 import { addressLine, connectSnippets } from '@shared/ticketConnect';
 import { useStore } from './store';
-import { useTickets } from './ticketsStore';
+import { proxyFor, useTickets } from './ticketsStore';
 
 // How to use a ticket copy: in overdb, from one service, from all of them
 // through the proxy, and how to go back. Every address and string is this
@@ -29,7 +29,8 @@ export function TicketGuide({ ticket, inTicketsSheet = false }: { ticket: Ticket
   const setSheet = useStore((s) => s.setSheet);
   const t = useTickets();
   const live = t.tickets.find((x) => x.id === ticket.id) ?? ticket;
-  const proxy = t.proxy;
+  const proxy = proxyFor(t, ticket.sourceConnectionId);
+  const busyProxy = !!t.busy[`proxy:${ticket.sourceConnectionId}`];
   const [tab, setTab] = useState('env');
   const [copied, setCopied] = useState<string | null>(null);
 
@@ -68,7 +69,8 @@ export function TicketGuide({ ticket, inTicketsSheet = false }: { ticket: Ticket
 
         <Step n={2} title="Point one service at it">
           <p className="text-ink-muted">
-            It listens at <span className="font-mono text-ink">{addressLine(address)}</span>. The password is the same as your local server’s. Change the service’s database settings, then restart it so its pool reconnects.
+            It listens at <span className="font-mono text-ink">{addressLine(address)}</span>.{' '}
+            {conn?.secretRef ? <>The password is the same as on {source?.name ?? 'the server it came from'}.</> : <>No password.</>} Change the service’s database settings, then restart it so its pool reconnects.
           </p>
           <div className="rounded-md border border-card overflow-hidden">
             <div className="flex items-center gap-1 px-1.5 pt-1.5 border-b border-card bg-surface-muted/60" role="tablist">
@@ -112,7 +114,7 @@ export function TicketGuide({ ticket, inTicketsSheet = false }: { ticket: Ticket
               {serving ? (
                 <p><b>They see {ticket.name} now.</b> <span className="text-ink-muted">Each one reaches it on its next query — no restarts.</span></p>
               ) : (
-                <button className={`${SMALL} self-start`} disabled={!!t.busy.proxy} onClick={() => void t.route({ kind: 'ticket', id: ticket.id })}>
+                <button className={`${SMALL} self-start`} disabled={busyProxy} onClick={() => void t.route(ticket.sourceConnectionId, { kind: 'ticket', id: ticket.id })}>
                   Services use {ticket.name}
                 </button>
               )}
@@ -124,11 +126,11 @@ export function TicketGuide({ ticket, inTicketsSheet = false }: { ticket: Ticket
           <p className="text-ink-muted">
             {serving
               ? <>Send your services back to your own server, then stop or delete the branch. </>
-              : <>Point any service you changed back at your own server (port {proxy?.running && proxy.config.socket ? proxy.config.server.port : source?.port ?? 3306}). </>}
+              : <>Point any service you changed back at {source?.env === 'local' ? 'your own server' : source?.name ?? 'its own server'} (port {proxy?.running && proxy.config.socket ? proxy.config.server.port : source?.port ?? 3306}). </>}
             <b className="text-ink">Stop</b> keeps its data for later; <b className="text-ink">Delete</b> throws it away. The base stays either way.
           </p>
           {serving && (
-            <button className={`${SMALL} self-start`} disabled={!!t.busy.proxy} onClick={() => void t.route({ kind: 'server' })}>Back to your own server</button>
+            <button className={`${SMALL} self-start`} disabled={busyProxy} onClick={() => void t.route(ticket.sourceConnectionId, { kind: 'server' })}>Back to {source?.name ?? 'its own server'}</button>
           )}
         </Step>
       </ol>

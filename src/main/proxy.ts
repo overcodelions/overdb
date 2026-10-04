@@ -23,38 +23,6 @@ interface Pair {
   upstream: net.Socket;
 }
 
-let tcp: net.Server | null = null;
-let unix: net.Server | null = null;
-let socketPath: string | null = null;
-let listenPort: number | null = null;
-let resolveUpstream: () => Promise<Upstream> = async () => {
-  throw new Error('The proxy has nowhere to send connections.');
-};
-const pairs = new Set<Pair>();
-
-function handle(client: net.Socket): void {
-  client.pause();
-  resolveUpstream()
-    .then((to) => {
-      const upstream = net.connect({ host: to.host, port: to.port });
-      const pair = { client, upstream };
-      pairs.add(pair);
-      const end = () => {
-        pairs.delete(pair);
-        client.destroy();
-        upstream.destroy();
-      };
-      client.on('error', end).on('close', end);
-      upstream.on('error', end).on('close', end);
-      upstream.once('connect', () => {
-        client.pipe(upstream);
-        upstream.pipe(client);
-        client.resume();
-      });
-    })
-    .catch(() => client.destroy());
-}
-
 function listen(server: net.Server, opts: net.ListenOptions): Promise<void> {
   return new Promise((resolve, reject) => {
     const fail = (err: Error) => reject(err);
@@ -79,73 +47,112 @@ function socketAnswers(file: string): Promise<boolean> {
   });
 }
 
-export async function startProxy(opts: {
-  port: number;
-  socket: string | null;
-  upstream: () => Promise<Upstream>;
-}): Promise<void> {
-  await stopProxy();
-  resolveUpstream = opts.upstream;
-  const server = net.createServer(handle);
-  try {
-    await listen(server, { host: '127.0.0.1', port: opts.port });
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code;
-    throw new Error(
-      code === 'EADDRINUSE'
-        ? `Port ${opts.port} is in use — most likely by your own server. Move it to another port once, and the proxy takes this one.`
-        : `The proxy could not listen on port ${opts.port}: ${(err as Error).message}`,
-    );
-  }
-  tcp = server;
-  listenPort = opts.port;
-  if (opts.socket) {
-    if (await socketAnswers(opts.socket)) {
-      await stopProxy();
-      throw new Error(`${opts.socket} belongs to a running server. Move its socket once, and the proxy takes this path.`);
+/// One proxy: a loopback port (and optionally a socket) forwarded to
+/// whatever its resolver names. There is one per base, so a service that
+/// uses two databases reaches each through its own.
+export class ByteProxy {
+  private tcp: net.Server | null = null;
+  private unix: net.Server | null = null;
+  private socketPath: string | null = null;
+  private listenPort: number | null = null;
+  private resolveUpstream: () => Promise<Upstream> = async () => {
+    throw new Error('The proxy has nowhere to send connections.');
+  };
+  private readonly pairs = new Set<Pair>();
+
+  private handle = (client: net.Socket): void => {
+    client.pause();
+    this.resolveUpstream()
+      .then((to) => {
+        const upstream = net.connect({ host: to.host, port: to.port });
+        const pair = { client, upstream };
+        this.pairs.add(pair);
+        const end = () => {
+          this.pairs.delete(pair);
+          client.destroy();
+          upstream.destroy();
+        };
+        client.on('error', end).on('close', end);
+        upstream.on('error', end).on('close', end);
+        upstream.once('connect', () => {
+          client.pipe(upstream);
+          upstream.pipe(client);
+          client.resume();
+        });
+      })
+      .catch(() => client.destroy());
+  };
+
+  async start(opts: { port: number; socket: string | null; upstream: () => Promise<Upstream> }): Promise<void> {
+    await this.stop();
+    this.resolveUpstream = opts.upstream;
+    const server = net.createServer(this.handle);
+    try {
+      await listen(server, { host: '127.0.0.1', port: opts.port });
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      throw new Error(
+        code === 'EADDRINUSE'
+          ? `Port ${opts.port} is in use — most likely by your own server. Move it to another port once, and the proxy takes this one.`
+          : `The proxy could not listen on port ${opts.port}: ${(err as Error).message}`,
+      );
     }
-    await fs.rm(opts.socket, { force: true });
-    const s = net.createServer(handle);
-    await listen(s, { path: opts.socket });
-    await fs.chmod(opts.socket, 0o777).catch(() => undefined);
-    unix = s;
-    socketPath = opts.socket;
+    this.tcp = server;
+    this.listenPort = opts.port;
+    if (opts.socket) {
+      if (await socketAnswers(opts.socket)) {
+        await this.stop();
+        throw new Error(`${opts.socket} belongs to a running server. Move its socket once, and the proxy takes this path.`);
+      }
+      // Only a socket is ever removed to take its path — never a file.
+      const st = await fs.lstat(opts.socket).catch(() => null);
+      if (st && !st.isSocket()) {
+        await this.stop();
+        throw new Error(`${opts.socket} is not a socket; the proxy will not replace it.`);
+      }
+      await fs.rm(opts.socket, { force: true });
+      const s = net.createServer(this.handle);
+      await listen(s, { path: opts.socket });
+      await fs.chmod(opts.socket, 0o777).catch(() => undefined);
+      this.unix = s;
+      this.socketPath = opts.socket;
+    }
   }
-}
 
-export async function stopProxy(): Promise<void> {
-  dropConnections();
-  const close = (s: net.Server | null) => new Promise<void>((r) => (s ? s.close(() => r()) : r()));
-  await Promise.all([close(tcp), close(unix)]);
-  tcp = null;
-  unix = null;
-  listenPort = null;
-  if (socketPath) await fs.rm(socketPath, { force: true }).catch(() => undefined);
-  socketPath = null;
-}
-
-/// Close every connection the proxy carries. New ones go wherever the
-/// upstream resolver now says.
-export function dropConnections(): number {
-  const n = pairs.size;
-  for (const p of [...pairs]) {
-    p.client.destroy();
-    p.upstream.destroy();
+  async stop(): Promise<void> {
+    this.drop();
+    const close = (s: net.Server | null) => new Promise<void>((r) => (s ? s.close(() => r()) : r()));
+    await Promise.all([close(this.tcp), close(this.unix)]);
+    this.tcp = null;
+    this.unix = null;
+    this.listenPort = null;
+    if (this.socketPath) await fs.rm(this.socketPath, { force: true }).catch(() => undefined);
+    this.socketPath = null;
   }
-  pairs.clear();
-  return n;
-}
 
-export function setUpstream(fn: () => Promise<Upstream>): void {
-  resolveUpstream = fn;
-}
+  /// Close every connection it carries. New ones go wherever the upstream
+  /// resolver now says.
+  drop(): number {
+    const n = this.pairs.size;
+    for (const p of [...this.pairs]) {
+      p.client.destroy();
+      p.upstream.destroy();
+    }
+    this.pairs.clear();
+    return n;
+  }
 
-export function proxyRunning(): boolean {
-  return tcp !== null;
-}
+  get running(): boolean {
+    return this.tcp !== null;
+  }
 
-export function proxyConnections(): number {
-  return pairs.size;
+  get connections(): number {
+    return this.pairs.size;
+  }
+
+  get port(): number | null {
+    return this.listenPort;
+  }
 }
 
 /// `lsof -F pcn` output for established TCP sockets on the proxy's port:
@@ -168,10 +175,9 @@ export function parseClients(out: string, port: number, self: number): ProxyClie
   return [...by.values()].sort((a, b) => b.connections - a.connections || a.process.localeCompare(b.process));
 }
 
-/// Who is connected through the proxy right now, by process. TCP only:
+/// Who is connected through a proxy right now, by process. TCP only:
 /// lsof cannot name the far end of a Unix socket portably.
-export function proxyClients(): Promise<ProxyClient[]> {
-  const port = listenPort;
+export function proxyClients(port: number | null): Promise<ProxyClient[]> {
   if (!port || process.platform === 'win32') return Promise.resolve([]);
   return new Promise((resolve) => {
     const child = spawn('/usr/sbin/lsof', ['+c', '0', '-nP', `-iTCP:${port}`, '-sTCP:ESTABLISHED', '-Fpcn'], { env: process.env });

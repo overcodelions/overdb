@@ -3,6 +3,7 @@ import { ensureTerminated, formatSql } from '@shared/formatSql';
 import { suggestionBlock } from '@shared/suggestion';
 import { useStore } from './store';
 import { ERD_TAB, HEALTH_TAB, HISTORY_TAB, SLOW_TAB, useQuery } from './queryStore';
+import { devInstanceRefusal, isProxyConnectionId } from '@shared/instances';
 
 interface Command {
   id: string;
@@ -134,15 +135,15 @@ export function CommandPalette(): JSX.Element | null {
             run: close(() => setSheet({ kind: 'seed', connectionId: selection.id })),
           }]
         : []),
-      // A baseline is copied from your own local server, so it is offered
-      // only there.
+      // A base is copied from your own server or a shared dev, sandbox or
+      // staging one — never production — so it is offered only there.
       ...(selection?.kind === 'connection' &&
-      connections.some((c) => c.id === selection.id && c.engine !== 'dynamodb' && c.env === 'local')
+      connections.some((c) => c.id === selection.id && !c.branchOf && !isProxyConnectionId(c.id) && devInstanceRefusal(c) === null)
         ? [{
             id: 'baseline',
-            label: 'Create a base…',
-            hint: 'local',
-            keywords: 'base baseline subset minimal copy ticket tenant recipe branch',
+            label: connections.find((c) => c.id === selection.id)?.env === 'local' ? 'Create a base…' : 'Copy to this machine…',
+            hint: connections.find((c) => c.id === selection.id)?.env === 'local' ? 'local' : 'base',
+            keywords: 'base baseline subset minimal copy local clone offline download machine ticket tenant recipe branch',
             run: close(() => setSheet({ kind: 'baseline', connectionId: selection.id })),
           }]
         : []),

@@ -17,7 +17,8 @@
 import { MysqlAdapter } from '../db/adapters/mysql';
 import { DynamoAdapter } from '../db/adapters/dynamodb';
 import { PostgresAdapter } from '../db/adapters/postgres';
-import type { Engine } from '../shared/engines';
+import type { Engine, Variant } from '../shared/engines';
+import { isRedshift } from '../shared/engines';
 import { SqliteAdapter } from '../db/adapters/sqlite';
 import type { DbAdapter } from '../db/adapter';
 import { cleanError } from './cleanError';
@@ -70,6 +71,9 @@ function makeAdapter(engine: Engine): DbAdapter {
 const wire = transport();
 let adapter: DbAdapter | null = null;
 let engine: Engine | null = null;
+/// What the server said it was on connecting: Redshift answers as Postgres
+/// but keeps its sizes elsewhere.
+let variant: Variant | null = null;
 
 /// Table statistics for the seed flow — see SeedStatsValue. One catalog
 /// query per engine, because a local copy of production is 900 tables and
@@ -160,6 +164,9 @@ async function baselineStats(a: DbAdapter, schemas: string[]): Promise<BaselineS
     return Number.isFinite(n) ? n : null;
   };
   const out: BaselineStatsValue = [];
+  /// Tables this user may not read, so nothing is asked of them that would
+  /// be refused.
+  let noReading = new Set<string>();
   if (engine === 'mysql') {
     await a.query('SET SESSION information_schema_stats_expiry = 0').catch(() => undefined);
     const r = await a.query(
@@ -168,6 +175,67 @@ async function baselineStats(a: DbAdapter, schemas: string[]): Promise<BaselineS
       schemas,
     );
     for (const [s, t, rows, bytes] of r.rows) out.push({ schema: String(s), table: String(t), rows: num(rows), bytes: num(bytes) });
+  } else if (engine === 'postgres' && isRedshift(variant ?? undefined)) {
+    // Redshift has no pg_total_relation_size, and its pg_class counts are not
+    // kept: svv_table_info has both, in rows and 1 MB blocks.
+    // svv_table_info needs more than a plain user's rights on most clusters;
+    // pg_class anyone can read, with row estimates and no sizes.
+    // Literals, since Redshift takes no array parameter. A backslash may be
+    // an escape there, so a schema name with one is never put in a query.
+    const lit = (x: string) => `'${x.replace(/'/g, "''")}'`;
+    const list = schemas.filter((x) => !x.includes('\\')).map(lit).join(', ') || "''";
+    // Asked first, never tried: a refused statement aborts the read-only
+    // transaction it runs in, and anything else on this connection at that
+    // moment fails with it ("current transaction is aborted").
+    const allowed = await a.query(`SELECT has_table_privilege('svv_table_info', 'select')`).catch(() => null);
+    const info =
+      allowed && String(allowed.rows[0]?.[0]) === 'true'
+        ? await a.query(`SELECT "schema", "table", tbl_rows, size FROM svv_table_info WHERE "schema" IN (${list})`).catch(() => null)
+        : null;
+    if (info) {
+      for (const [s, t, rows, mb] of info.rows) {
+        const n = num(mb);
+        out.push({ schema: String(s), table: String(t), rows: num(rows), bytes: n === null ? null : n * 1024 * 1024 });
+      }
+    } else {
+      // A table is asked about by name, and naming it needs its schema: in
+      // a schema this user may not use, the question itself is refused
+      // ("permission denied for schema zendesk"). So the schemas are asked
+      // first, and only the usable ones' tables are asked about.
+      const usage = await a.query(`SELECT nspname, has_schema_privilege(nspname, 'usage') FROM pg_namespace WHERE nspname IN (${list})`).catch(() => null);
+      const usable = usage ? usage.rows.filter(([, ok]) => String(ok) === 'true').map(([s]) => String(s)) : schemas;
+      const usableList = usable.filter((x) => !x.includes('\\')).map(lit).join(', ') || "''";
+      const r = await a.query(
+        `SELECT n.nspname, c.relname, c.reltuples,
+                has_table_privilege(quote_ident(n.nspname) || '.' || quote_ident(c.relname), 'select')
+           FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+          WHERE c.relkind = 'r' AND n.nspname IN (${usableList})
+          UNION ALL
+         SELECT n.nspname, c.relname, c.reltuples, false
+           FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+          WHERE c.relkind = 'r' AND n.nspname IN (${list}) AND n.nspname NOT IN (${usableList})`,
+      );
+      const readable = new Set<string>();
+      for (const [s, t, rows, can] of r.rows) {
+        const n = num(rows);
+        out.push({ schema: String(s), table: String(t), rows: n !== null && n > 0 ? Math.round(n) : null, bytes: null });
+        if (String(can) === 'true') readable.add(`${s}.${t}`);
+      }
+      noReading = new Set(out.filter((t) => !readable.has(`${t.schema}.${t.table}`)).map((t) => `${t.schema}.${t.table}`));
+      // A table of unknown size would be copied whole as if it were small,
+      // and on Redshift that can be a billion-row fact table. Counting is
+      // quick there — it reads block metadata — so count what has no
+      // estimate rather than guess.
+      // Within a time limit: this connection's other requests wait behind
+      // these, and past it a table of unknown size is left for a person.
+      const until = Date.now() + 30_000;
+      for (const t of out) {
+        if (Date.now() > until) break;
+        if (t.rows !== null || noReading.has(`${t.schema}.${t.table}`)) continue;
+        const c = await a.query(`SELECT COUNT(*) FROM ${q(t.schema)}.${q(t.table)}`).catch(() => null);
+        t.rows = c ? num(c.rows[0]?.[0]) : null;
+      }
+    }
   } else if (engine === 'postgres') {
     const r = await a.query(
       `SELECT n.nspname, c.relname, c.reltuples, pg_total_relation_size(c.oid) FROM pg_class c
@@ -190,8 +258,11 @@ async function baselineStats(a: DbAdapter, schemas: string[]): Promise<BaselineS
     }
     return out;
   }
+  const probeUntil = Date.now() + 30_000;
   for (const t of out) {
+    if (Date.now() > probeUntil) break;
     if (t.rows !== 0 && t.rows !== null) continue;
+    if (noReading.has(`${t.schema}.${t.table}`)) continue;
     const r = await a.query(`SELECT 1 FROM ${q(t.schema)}.${q(t.table)} LIMIT 1`).catch(() => null);
     if (r) t.rows = r.rows.length === 0 ? 0 : null;
   }
@@ -317,8 +388,24 @@ async function runQuery(req: Extract<HostRequest, { op: 'run' }>): Promise<void>
   }
 }
 
+/// Postgres requests run one at a time. Each statement runs in its own
+/// read-only transaction, and a connection has one: two requests at once —
+/// discovery and the schema tree, say — interleave their BEGINs and COMMITs,
+/// and one refused statement aborts the other's work ("current transaction
+/// is aborted"). The driver already queues statements on its connection, so
+/// nothing waits longer than it did; what changes is that a request's
+/// transaction is its own. Never queued: an ack (a run in flight waits on
+/// it), cancel (it must reach a running statement — it uses a second
+/// connection), close and connect. MySQL is left as it was.
+const UNQUEUED: ReadonlySet<string> = new Set(['ack', 'cancel', 'close', 'connect']);
+let queue: Promise<unknown> = Promise.resolve();
+function serially(work: () => Promise<void>): void {
+  const next = queue.then(work, work);
+  queue = next.catch(() => undefined);
+}
+
 wire.onMessage((req) => {
-  void (async () => {
+  const work = async () => {
     try {
       switch (req.op) {
         case 'connect': {
@@ -326,6 +413,7 @@ wire.onMessage((req) => {
           engine = req.spec.engine;
           await adapter.connect(req.spec);
           const ping = await adapter.ping();
+          variant = ping.ok ? ping.variant : null;
           wire.send({ kind: 'reply', id: req.id, ok: true, value: ping });
           return;
         }
@@ -467,5 +555,7 @@ wire.onMessage((req) => {
     } catch (err) {
       wire.send({ kind: 'reply', id: req.id, ok: false, error: cleanError(err) });
     }
-  })();
+  };
+  if (engine === 'postgres' && !UNQUEUED.has(req.op)) serially(work);
+  else void work();
 });

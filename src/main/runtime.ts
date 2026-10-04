@@ -11,9 +11,11 @@
 // overdb and the helper never write over each other with a stale copy.
 
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import {
   DEFAULT_PROXY,
+  baseOf,
   type BaselineRecord,
   type ProxyClient,
   type ProxyConfig,
@@ -26,10 +28,13 @@ import * as instances from './instances';
 import * as proxy from './proxy';
 import { portOwner } from './portOwner';
 
+export type ProxyEntry = ProxyConfig & { enabled: boolean; configured?: boolean };
+
 export interface Records {
   baselines: BaselineRecord[];
   tickets: TicketRecord[];
-  proxy: ProxyConfig & { enabled: boolean; configured?: boolean };
+  /// One proxy per base, by the base's source connection.
+  proxies: Record<string, ProxyEntry>;
 }
 
 export function recordsFile(root: string): string {
@@ -44,11 +49,18 @@ export async function readRecords(root: string): Promise<Records> {
   } catch {
     parsed = {};
   }
-  return {
-    baselines: parsed.baselines ?? [],
-    tickets: parsed.tickets ?? [],
-    proxy: { ...DEFAULT_PROXY, enabled: false, ...(parsed.proxy ?? {}) },
-  };
+  const baselines = parsed.baselines ?? [];
+  let proxies = parsed.proxies ?? {};
+  // Records from before there could be more than one proxy kept a single
+  // `proxy`: it belonged to the base it was set up for, the first one.
+  const legacy = (parsed as { proxy?: Partial<ProxyEntry> }).proxy;
+  if (!parsed.proxies && legacy && baselines[0]) proxies = { [baselines[0].sourceConnectionId]: { ...DEFAULT_PROXY, enabled: false, ...legacy } };
+  return { baselines, tickets: parsed.tickets ?? [], proxies };
+}
+
+/// A proxy's entry, or the defaults for one never set up.
+export function proxyEntry(r: Records, source: string): ProxyEntry {
+  return r.proxies[source] ?? { ...DEFAULT_PROXY, enabled: false };
 }
 
 /// Read, change, write — whole and atomically.
@@ -69,10 +81,15 @@ export interface Runtime {
   stopTicket(id: string): Promise<void>;
   /// Stop it, delete its data and its record.
   deleteTicket(id: string): Promise<TicketRecord | null>;
-  proxyState(): Promise<ProxyState>;
-  configureProxy(next: Partial<ProxyConfig> & { enabled?: boolean }): Promise<ProxyState>;
-  routeProxy(target: ProxyTarget): Promise<ProxyState & { dropped: number }>;
-  proxyClients(): Promise<ProxyClient[]>;
+  /// The branch made again from its base as the base is now: its changes
+  /// gone, its name, port and connection kept.
+  resetTicket(id: string): Promise<TicketState>;
+  /// One per base, configured or not.
+  proxyStates(): Promise<ProxyState[]>;
+  configureProxy(source: string, next: Partial<ProxyConfig> & { enabled?: boolean }): Promise<ProxyState>;
+  /// Point one base's proxy at its own server or at one of its branches.
+  routeProxy(source: string, target: ProxyTarget): Promise<ProxyState & { dropped: number }>;
+  proxyClients(source: string): Promise<ProxyClient[]>;
   /// What stopping would take away from something using it.
   inUse(): Promise<{ proxy: boolean; connections: number; running: string[] }>;
   /// Bring the proxy back if it was on.
@@ -83,14 +100,42 @@ export interface Runtime {
 
 function binFor(r: Records, t: TicketRecord): instances.Mysqld | null {
   const base = r.baselines.find((b) => b.id === t.baselineId);
-  return base ? { path: base.mysqld, version: base.version } : null;
+  return base ? { path: base.mysqld, version: base.version, ...(base.flavor ? { flavor: base.flavor } : {}) } : null;
+}
+
+/// What a proxy may be set to, whoever asks — the window or the helper's
+/// socket: a real port, a server named plainly, and a socket only in the
+/// temporary directory, where a database's own socket lives.
+export function checkProxyConfig(next: Partial<ProxyConfig>): void {
+  const port = (n: unknown) => Number.isInteger(n) && (n as number) > 0 && (n as number) < 65536;
+  if (next.port !== undefined && !port(next.port)) throw new Error('The proxy needs a port from 1 to 65535.');
+  if (next.server !== undefined && (!/^[\w.:-]+$/.test(next.server.host) || !port(next.server.port))) throw new Error('That server address is not one the proxy can use.');
+  if (next.socket) {
+    const at = path.resolve(next.socket);
+    const dirs = ['/tmp/', '/private/tmp/', `${path.resolve(os.tmpdir())}/`];
+    if (!dirs.some((d) => at.startsWith(d)) || !at.endsWith('.sock')) throw new Error('The proxy’s socket must be a .sock file in the temporary directory, like /tmp/mysql.sock.');
+  }
 }
 
 export class LocalRuntime implements Runtime {
-  private proxyError: string | null = null;
-  private proxyConflict: ProxyState['conflict'] = null;
+  private readonly proxies = new Map<string, proxy.ByteProxy>();
+  private readonly problems = new Map<string, { error: string; conflict: ProxyState['conflict'] }>();
+  /// Branches being reset or deleted: the proxy starts none of them.
+  private readonly changing = new Set<string>();
 
   constructor(private readonly root: string) {}
+
+  private proxyOf(source: string): proxy.ByteProxy {
+    let p = this.proxies.get(source);
+    if (!p) this.proxies.set(source, (p = new proxy.ByteProxy()));
+    return p;
+  }
+
+  /// The proxy whose current target is this branch, if any.
+  private routedTo(r: Records, ticketId: string): string | null {
+    for (const [source, e] of Object.entries(r.proxies)) if (e.target.kind === 'ticket' && e.target.id === ticketId) return source;
+    return null;
+  }
 
   async tickets(): Promise<TicketState[]> {
     const r = await readRecords(this.root);
@@ -105,12 +150,14 @@ export class LocalRuntime implements Runtime {
     if (!t) throw new Error('That branch no longer exists.');
     const bin = binFor(r, t) ?? (await instances.findMysqld(''));
     if (!bin) throw new Error('No mysqld found to run this branch with.');
+    // The source server's settings, kept with its base, every start.
+    const settings = r.baselines.find((b) => b.id === t.baselineId)?.report?.settings;
     let port = t.port;
     try {
       if (!port) throw new Error('no port yet');
-      await instances.start(t.id, bin, t.datadir, port);
+      await instances.start(t.id, bin, t.datadir, port, settings);
     } catch {
-      port = (await instances.start(t.id, bin, t.datadir)).port;
+      port = (await instances.start(t.id, bin, t.datadir, undefined, settings)).port;
       await updateRecords(this.root, (rr) => {
         const x = rr.tickets.find((y) => y.id === id);
         if (x) x.port = port;
@@ -121,108 +168,168 @@ export class LocalRuntime implements Runtime {
 
   async stopTicket(id: string): Promise<void> {
     await instances.stop(id);
-    const r = await readRecords(this.root);
-    if (r.proxy.target.kind === 'ticket' && r.proxy.target.id === id) proxy.dropConnections();
+    const source = this.routedTo(await readRecords(this.root), id);
+    if (source) this.proxies.get(source)?.drop();
   }
 
   async deleteTicket(id: string): Promise<TicketRecord | null> {
     const r = await readRecords(this.root);
     const t = r.tickets.find((x) => x.id === id);
     if (!t) return null;
-    await instances.stop(id);
-    await fs.rm(path.dirname(t.datadir), { recursive: true, force: true });
-    const wasTarget = await updateRecords(this.root, (rr) => {
-      rr.tickets = rr.tickets.filter((x) => x.id !== id);
-      if (rr.proxy.target.kind === 'ticket' && rr.proxy.target.id === id) {
-        rr.proxy.target = { kind: 'server' };
-        return true;
-      }
-      return false;
-    });
-    if (wasTarget) proxy.dropConnections();
+    this.changing.add(id);
+    try {
+      // Services go back to the server first, so none restarts it mid-delete.
+      const was = await updateRecords(this.root, (rr) => {
+        const source = this.routedTo(rr, id);
+        if (source) rr.proxies[source].target = { kind: 'server' };
+        return source;
+      });
+      if (was) this.proxies.get(was)?.drop();
+      await instances.stop(id);
+      await instances.stopStray(t.datadir);
+      await fs.rm(path.dirname(t.datadir), { recursive: true, force: true });
+      await updateRecords(this.root, (rr) => {
+        rr.tickets = rr.tickets.filter((x) => x.id !== id);
+      });
+    } finally {
+      this.changing.delete(id);
+    }
     return t;
   }
 
-  private async upstream(): Promise<proxy.Upstream> {
+  async resetTicket(id: string): Promise<TicketState> {
     const r = await readRecords(this.root);
-    const target = r.proxy.target;
-    if (target.kind === 'ticket' && r.tickets.some((x) => x.id === target.id)) {
+    const t = r.tickets.find((x) => x.id === id);
+    if (!t) throw new Error('That branch no longer exists.');
+    const base = baseOf(t, r.baselines);
+    if (!base) throw new Error('Its base is gone, so there is nothing to reset it to. Make a new branch from another base.');
+    // While its files are replaced, the proxy does not start it for a
+    // service that happens to connect.
+    this.changing.add(id);
+    try {
+      const source = this.routedTo(r, id);
+      if (source) this.proxies.get(source)?.drop();
+      await instances.stop(id);
+      await instances.stopStray(t.datadir);
+      await fs.rm(t.datadir, { recursive: true, force: true });
+      await instances.cloneDir(base.datadir, t.datadir);
+      await instances.makeDistinct(t.datadir);
+      await updateRecords(this.root, (rr) => {
+        const x = rr.tickets.find((y) => y.id === id);
+        if (x) {
+          x.resetAt = new Date().toISOString();
+          x.baselineId = base.id;
+        }
+      });
+    } finally {
+      this.changing.delete(id);
+    }
+    return this.startTicket(id);
+  }
+
+  private async upstream(source: string): Promise<proxy.Upstream> {
+    const r = await readRecords(this.root);
+    const e = proxyEntry(r, source);
+    const target = e.target;
+    if (target.kind === 'ticket' && r.tickets.some((x) => x.id === target.id && x.sourceConnectionId === source)) {
+      if (this.changing.has(target.id)) throw new Error('That branch is being reset or deleted; connect again in a moment.');
       const running = instances.runningInstance(target.id);
       const port = running?.port ?? (await this.startTicket(target.id)).port;
       return { host: '127.0.0.1', port };
     }
-    return r.proxy.server;
+    return e.server;
   }
 
-  async proxyState(): Promise<ProxyState> {
-    const r = await readRecords(this.root);
-    const { enabled: _enabled, configured, ...config } = r.proxy;
+  private stateOf(r: Records, source: string): ProxyState {
+    const { enabled: _enabled, configured, ...config } = proxyEntry(r, source);
+    const p = this.proxies.get(source);
+    const problem = this.problems.get(source);
     return {
+      source,
       config,
-      running: proxy.proxyRunning(),
-      error: this.proxyError,
-      conflict: this.proxyConflict,
-      connections: proxy.proxyConnections(),
+      running: !!p?.running,
+      error: problem?.error ?? null,
+      conflict: problem?.conflict ?? null,
+      connections: p?.connections ?? 0,
       configured: !!configured,
     };
   }
 
-  async configureProxy(next: Partial<ProxyConfig> & { enabled?: boolean }): Promise<ProxyState> {
+  async proxyStates(): Promise<ProxyState[]> {
+    const r = await readRecords(this.root);
+    const sources = [...new Set([...r.baselines.map((b) => b.sourceConnectionId), ...Object.keys(r.proxies)])];
+    return sources.map((s) => this.stateOf(r, s));
+  }
+
+  async configureProxy(source: string, next: Partial<ProxyConfig> & { enabled?: boolean }): Promise<ProxyState> {
+    checkProxyConfig(next);
+    const all = await readRecords(this.root);
     const cfg = await updateRecords(this.root, (r) => {
-      r.proxy = { ...r.proxy, ...next, configured: true };
-      return r.proxy;
+      r.proxies[source] = { ...proxyEntry(r, source), ...next, configured: true };
+      return r.proxies[source];
     });
-    this.proxyError = null;
-    this.proxyConflict = null;
+    this.problems.delete(source);
+    const p = this.proxyOf(source);
     if (cfg.enabled) {
+      // Two proxies cannot share a port; say so before the OS does it less clearly.
+      const clash = Object.entries(all.proxies).find(([s, e]) => s !== source && e.enabled && e.port === cfg.port);
       try {
-        await proxy.startProxy({ port: cfg.port, socket: cfg.socket, upstream: () => this.upstream() });
+        if (clash) throw new Error(`Port ${cfg.port} is already another base's proxy. Give this one its own port.`);
+        await p.start({ port: cfg.port, socket: cfg.socket, upstream: () => this.upstream(source) });
       } catch (err) {
-        this.proxyError = err instanceof Error ? err.message : String(err);
-        if (/in use/i.test(this.proxyError)) {
+        const error = err instanceof Error ? err.message : String(err);
+        let conflict: ProxyState['conflict'] = null;
+        if (/in use/i.test(error)) {
           const owner = await portOwner(cfg.port).catch(() => null);
-          this.proxyConflict = { port: cfg.port, process: owner?.process ?? null };
+          conflict = { port: cfg.port, process: owner?.process ?? null };
         }
+        this.problems.set(source, { error, conflict });
         // Not listening is off: a conflict must not be retried at every start.
         await updateRecords(this.root, (r) => {
-          r.proxy.enabled = false;
+          r.proxies[source].enabled = false;
         });
       }
     } else {
-      await proxy.stopProxy();
+      await p.stop();
     }
-    return this.proxyState();
+    return this.stateOf(await readRecords(this.root), source);
   }
 
-  async routeProxy(target: ProxyTarget): Promise<ProxyState & { dropped: number }> {
+  async routeProxy(source: string, target: ProxyTarget): Promise<ProxyState & { dropped: number }> {
+    const r0 = await readRecords(this.root);
+    if (target.kind === 'ticket' && !r0.tickets.some((t) => t.id === target.id && t.sourceConnectionId === source)) {
+      throw new Error('That branch belongs to another base.');
+    }
     await updateRecords(this.root, (r) => {
-      r.proxy.target = target;
+      r.proxies[source] = { ...proxyEntry(r, source), target };
     });
     if (target.kind === 'ticket' && !instances.runningInstance(target.id)) await this.startTicket(target.id);
-    const dropped = proxy.dropConnections();
-    return { ...(await this.proxyState()), dropped };
+    const dropped = this.proxies.get(source)?.drop() ?? 0;
+    return { ...this.stateOf(await readRecords(this.root), source), dropped };
   }
 
-  proxyClients(): Promise<ProxyClient[]> {
-    return proxy.proxyClients();
+  async proxyClients(source: string): Promise<ProxyClient[]> {
+    return proxy.proxyClients(this.proxies.get(source)?.port ?? null);
   }
 
   async inUse(): Promise<{ proxy: boolean; connections: number; running: string[] }> {
     const r = await readRecords(this.root);
+    const live = [...this.proxies.values()].filter((p) => p.running);
     return {
-      proxy: proxy.proxyRunning(),
-      connections: proxy.proxyConnections(),
+      proxy: live.length > 0,
+      connections: live.reduce((n, p) => n + p.connections, 0),
       running: r.tickets.filter((t) => instances.runningInstance(t.id)).map((t) => t.name),
     };
   }
 
+  /// Bring back every proxy that was on.
   async resume(): Promise<void> {
     const r = await readRecords(this.root);
-    if (r.proxy.enabled) await this.configureProxy({});
+    for (const [source, e] of Object.entries(r.proxies)) if (e.enabled) await this.configureProxy(source, {});
   }
 
   async shutdown(): Promise<void> {
-    await proxy.stopProxy();
+    await Promise.all([...this.proxies.values()].map((p) => p.stop()));
     await instances.stopAll();
   }
 }

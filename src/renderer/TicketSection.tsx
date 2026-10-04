@@ -1,14 +1,13 @@
 import { useState } from 'react';
 import type { BaselineRecord, TicketState } from '@shared/instances';
+import { baseIsNewer, baseOf, proxyConnectionId } from '@shared/instances';
 import { useStore } from './store';
 import { Dropdown, MenuDivider, MenuItem } from './Menu';
-import { isTarget, routeTo, targetItems, useTickets } from './ticketsStore';
+import { isTarget, proxyFor, routeTo, targetItems, useTickets } from './ticketsStore';
 
-// Branches in the sidebar: the small databases you make per ticket from a
+// Branches in the sidebar: the small databases you make from a
 // base, nested under the connection they were made from.
 // See docs/design/baselines.md.
-
-export const PROXY_CONNECTION_ID = 'overdb-proxy';
 
 /// A base's name, renamed in place: click it (or the pencil), type,
 /// Enter to keep, Escape to leave it as it was.
@@ -79,8 +78,6 @@ export function Branches({
   const select = useStore((s) => s.select);
   const selection = useStore((s) => s.selection);
   const connections = useStore((s) => s.connections);
-  const hasProxyConn = connections.some((c) => c.id === PROXY_CONNECTION_ID);
-
   if (!t.loaded) return null;
   const known = new Set(connections.map((c) => c.id));
   const mine = (sourceId: string) => (sourceConnectionId === null ? !known.has(sourceId) : sourceId === sourceConnectionId);
@@ -89,16 +86,23 @@ export function Branches({
   if (!base && all.length === 0) return null;
   const branches = all.filter((x) => !query || `${x.name} ${x.note}`.toLowerCase().includes(query));
 
-  // The proxy's server is your own; its read-only window sits with the
-  // branches of the connection that has a base, the first if several do.
-  const target = t.proxy?.config.target;
+  // Each base has its own proxy; its read-only window sits with that base's
+  // branches.
+  const proxy = proxyFor(t, sourceConnectionId ?? undefined);
+  const proxyId = sourceConnectionId ? proxyConnectionId(sourceConnectionId) : '';
+  const target = proxy?.config.target;
   const routed = target?.kind === 'ticket' ? t.tickets.find((x) => x.id === target.id) : undefined;
-  const proxyHome = routed?.sourceConnectionId ?? t.baselines[0]?.sourceConnectionId;
-  const showProxy = !!t.proxy?.running && hasProxyConn && proxyHome === sourceConnectionId;
-  const proxySelected = selection?.kind === 'connection' && selection.id === PROXY_CONNECTION_ID;
-  const seeing = routed?.name ?? (target?.kind === 'ticket' ? 'a branch' : 'your own server');
+  // A shared server's proxy pointed at the server itself has no window of its
+  // own: services see that server, which is already a connection — the row
+  // opens it rather than a second copy holding its password.
+  const throughSource = !!proxy?.running && target?.kind === 'server' && !connections.some((c) => c.id === proxyId);
+  const seeId = throughSource && sourceConnectionId ? sourceConnectionId : proxyId;
+  const showProxy = !!proxy?.running && connections.some((c) => c.id === seeId);
+  const proxySelected = selection?.kind === 'connection' && selection.id === proxyId;
+  const seeing = routed?.name ?? (target?.kind === 'ticket' ? 'a branch' : 'its own server');
   const serving = routed && all.some((x) => x.id === routed.id) ? routed : undefined;
   const newBranch = () => setSheet({ kind: 'tickets' });
+  const remoteSource = !!sourceConnectionId && connections.find((c) => c.id === sourceConnectionId)?.env !== 'local';
 
   if (folded) {
     return (
@@ -108,8 +112,8 @@ export function Branches({
         className="ml-9 mr-2 mb-1 w-[calc(100%-44px)] flex items-center gap-1.5 px-2 py-1 rounded-[6px] bg-accent/10 hover:bg-accent/15 text-left text-[11px]"
       >
         <svg width="7" height="7" viewBox="0 0 8 8" aria-hidden="true" className="text-ink-faint"><path d="M2 1l4 3-4 3z" fill="currentColor" /></svg>
-        <span className="flex-1 truncate text-ink">{all.length === 1 ? '1 branch' : `${all.length} branches`}</span>
-        {serving && <span className="shrink-0 text-[9px] font-bold px-1.5 py-px rounded-[4px] bg-accent-strong text-white">{serving.name}</span>}
+        <span className="flex-1 truncate text-ink">{all.length === 1 ? '1 branch' : `${all.length} branches`}{remoteSource && <span className="text-ink-muted"> · local</span>}</span>
+        {serving && <span className="shrink-0 text-[9.5px] font-semibold px-1.5 rounded-[4px] border border-accent/45 text-accent-strong">{serving.name}</span>}
       </button>
     );
   }
@@ -126,6 +130,14 @@ export function Branches({
           <BranchIcon />
           Branches{all.length ? ` · ${all.length}` : ''}
         </button>
+        <BranchesInfo />
+        {remoteSource && (
+          // Under a shared server, say plainly that these are not on it.
+          <span className="flex items-center gap-1 text-[10px] text-ink-muted" title="Branches run on this machine, made from a copy of this server — writing to one never touches it">
+            <span className="w-1.5 h-1.5 rounded-full bg-good" aria-hidden="true" />
+            local
+          </span>
+        )}
         {base && (
           <button
             onClick={newBranch}
@@ -138,27 +150,26 @@ export function Branches({
       </div>
       {showProxy && (
         <button
-          onClick={() => select({ kind: 'connection', id: PROXY_CONNECTION_ID })}
-          className={`group/see flex items-center gap-2 px-1.5 py-1 rounded-[6px] border text-left focus:outline-none focus-visible:ring-1 focus-visible:ring-accent ${
-            proxySelected ? 'bg-accent/25 border-accent/60' : 'bg-accent/10 border-accent/25 hover:bg-accent/20 hover:border-accent/50'
+          onClick={() => select({ kind: 'connection', id: seeId })}
+          className={`group/see mx-1 flex items-center gap-2 pl-2 pr-1 py-1 rounded-[6px] text-left focus:outline-none focus-visible:ring-1 focus-visible:ring-accent ${
+            proxySelected ? 'bg-accent/25' : 'hover:bg-wash-strong'
           }`}
-          title="A read-only connection through the proxy: it queries whatever the Services switch points at"
+          title={throughSource ? 'Services reach the server itself: this opens its connection' : 'A read-only connection through the proxy: it queries whatever the Services switch points at'}
         >
-          <span className="text-accent-strong shrink-0" aria-hidden="true">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <span className="w-2 shrink-0 flex justify-center text-accent-strong" aria-hidden="true">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
               <path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z" /><circle cx="12" cy="12" r="3" />
             </svg>
           </span>
           <span className="flex-1 min-w-0 flex flex-col">
-            <span className={`text-[11.5px] truncate text-ink ${proxySelected ? 'font-semibold' : 'font-medium'}`}>What services see</span>
-            <span className="text-[10px] text-ink-muted truncate">{seeing} · read-only</span>
+            <span className={`text-[12px] truncate ${proxySelected ? 'font-semibold text-ink' : 'text-ink'}`}>What services see</span>
+            <span className="text-[10.5px] text-ink-muted truncate">{throughSource ? 'its own server · opens it' : `${seeing} · read-only`}</span>
           </span>
-          <span className={`shrink-0 text-[10.5px] text-accent-strong ${proxySelected ? 'hidden' : 'opacity-0 group-hover/see:opacity-100'}`} aria-hidden="true">Open →</span>
         </button>
       )}
       {all.length === 0 ? (
-        <p className="px-1.5 py-1 text-[11px] text-ink-muted">
-          No branches yet. <button className="text-accent-strong hover:underline" onClick={newBranch}>Make one</button> for the ticket you are on.
+        <p className="px-1.5 py-1 text-[11px] leading-relaxed text-ink-muted">
+          {BRANCH_IS} <button className="text-accent-strong hover:underline" onClick={newBranch}>Make one</button> for a ticket, or just to try something.
         </p>
       ) : (
         branches.map((x) => <CopyRow key={x.id} ticket={x} />)
@@ -178,6 +189,51 @@ export function Branches({
   );
 }
 
+const BRANCH_IS = 'A branch is your own writable copy of this database — for a ticket, an experiment, anything — made in seconds from the base. It runs on this machine; nothing you do in it touches the server.';
+
+/// What a branch is, where the question comes up: three lines, and the
+/// picture in How overdb works for more.
+function BranchesInfo(): JSX.Element {
+  const setSheet = useStore((s) => s.setSheet);
+  // Placed on the window, not in the sidebar: the list scrolls and clips,
+  // and the panel is wider than the room either side of the button.
+  const [at, setAt] = useState<{ x: number; y: number } | null>(null);
+  const open = at !== null;
+  const setOpen = (v: boolean) => { if (!v) setAt(null); };
+  return (
+    <span className="relative flex">
+      <button
+        // Its own toggle: kept from the panel's click-outside, which would
+        // close it on mousedown only for this click to open it again.
+        onMouseDown={(e) => e.stopPropagation()}
+        onClick={(e) => {
+          if (open) return setAt(null);
+          const r = e.currentTarget.getBoundingClientRect();
+          setAt({ x: r.left - 8, y: r.bottom + 4 });
+        }}
+        aria-label="What are branches?"
+        aria-expanded={open}
+        className="w-4 h-4 rounded-full text-[9.5px] font-semibold leading-none border border-ink-faint/50 text-ink-muted hover:text-ink hover:border-ink-muted"
+      >
+        i
+      </button>
+      <Dropdown open={open} onClose={() => setOpen(false)} label="What are branches?" width={280} at={at ?? undefined} role="dialog">
+        <div className="px-2.5 py-2 flex flex-col gap-2 text-[11.5px] leading-relaxed text-ink-muted">
+          <p><b className="text-ink">Branch</b> — {BRANCH_IS.replace(/^A branch is /, '')}</p>
+          <p><b className="text-ink">Proxy</b> — your services keep one address, and you pick which branch they reach from Services, top right. No config change.</p>
+          <p><b className="text-ink">Base</b> — the small copy of the server every branch starts from, with only the clients you picked. Rebuild it for fresher data.</p>
+          <button
+            className="self-start text-accent-strong hover:underline"
+            onClick={() => { setOpen(false); setSheet({ kind: 'basics', section: 'branches' }); }}
+          >
+            More in How overdb works →
+          </button>
+        </div>
+      </Dropdown>
+    </span>
+  );
+}
+
 function BranchIcon(): JSX.Element {
   return (
     <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -194,9 +250,11 @@ function CopyRow({ ticket }: { ticket: TicketState }): JSX.Element {
   const selection = useStore((s) => s.selection);
   const [menu, setMenu] = useState(false);
   const selected = selection?.kind === 'connection' && selection.id === ticket.connectionId;
-  const serving = !!t.proxy?.running && isTarget(t, { kind: 'ticket', id: ticket.id });
+  const proxy = proxyFor(t, ticket.sourceConnectionId);
+  const serving = !!proxy?.running && isTarget(t, ticket.sourceConnectionId, { kind: 'ticket', id: ticket.id });
   const busy = t.busy[ticket.id];
-  const item = targetItems(t).find((i) => i.target.kind === 'ticket' && i.target.id === ticket.id);
+  const item = targetItems(t, ticket.sourceConnectionId).find((i) => i.target.kind === 'ticket' && i.target.id === ticket.id);
+  const newer = baseIsNewer(ticket, baseOf(ticket, t.baselines));
 
   return (
     <div
@@ -219,12 +277,13 @@ function CopyRow({ ticket }: { ticket: TicketState }): JSX.Element {
           <span className={`text-[12px] truncate ${selected ? 'font-semibold text-ink' : ticket.running ? 'text-ink' : 'text-ink-muted'}`}>{ticket.name}</span>
           <span className="text-[10.5px] text-ink-muted truncate">
             {busy ?? (ticket.running ? `${ticket.note ? `${ticket.note} · ` : ''}:${ticket.port}` : `stopped · ${since(ticket.createdAt)}`)}
+            {!busy && newer && <span className="text-accent-strong"> · base is newer</span>}
           </span>
         </span>
       </button>
       {serving && (
-        <span className="shrink-0 text-[9px] font-bold tracking-wide px-1.5 py-0.5 rounded-[4px] bg-accent-strong text-white group-hover:hidden" title="Your services reach this branch">
-          SERVICES
+        <span className="shrink-0 text-[9.5px] font-semibold px-1.5 rounded-[4px] border border-accent/45 text-accent-strong group-hover:hidden" title="Your services reach this branch">
+          services
         </span>
       )}
       <span className={`shrink-0 items-center gap-1 ${menu ? 'flex' : 'hidden group-hover:flex group-focus-within:flex'}`}>
@@ -246,7 +305,7 @@ function CopyRow({ ticket }: { ticket: TicketState }): JSX.Element {
         </button>
       </span>
       <Dropdown open={menu} onClose={() => setMenu(false)} label={ticket.name} width={250}>
-        {t.proxy?.running && item && !serving && (
+        {proxy?.running && item && !serving && (
           <MenuItem
             label={`Services use ${ticket.name}`}
             kbd={item.digit !== null ? `⌥⌘${item.digit}` : undefined}
@@ -265,6 +324,22 @@ function CopyRow({ ticket }: { ticket: TicketState }): JSX.Element {
         ) : (
           <MenuItem label="Start" onSelect={() => { setMenu(false); void t.start(ticket.id); }} />
         )}
+        <MenuItem
+          label="Reset to base…"
+          detail={newer ? 'The base is newer — takes its fresh data' : 'Throws away this branch’s changes'}
+          onSelect={() => {
+            setMenu(false);
+            askConfirm({
+              title: `Reset ${ticket.name} to its base?`,
+              body: newer
+                ? 'Its data is replaced with the base as rebuilt — the fresher data. Everything written to this branch since it was made is lost. Its name, port and connection stay, so nothing pointed at it changes.'
+                : 'Its data goes back to the base as it is. Everything written to this branch since it was made is lost. Its name, port and connection stay, so nothing pointed at it changes.',
+              confirmLabel: 'Reset branch',
+              destructive: true,
+              onConfirm: () => void t.reset(ticket.id),
+            });
+          }}
+        />
         <MenuItem
           label="Delete…"
           onSelect={() => {

@@ -6,16 +6,21 @@ import { parseCodeReading, type CodeReading, type LinkVerdict, type TableSuggest
 import { repoLinkOwner } from '@shared/overcliHandoff';
 import { recipeHome, repoLinks } from '@shared/repoLinks';
 import { linksFromMap } from '@shared/mapLinks';
+import { runningFor, useBuilds } from './buildsStore';
+import { useTickets } from './ticketsStore';
 import type { DbMap } from '@shared/dbMap';
 import { useStore } from './store';
 import type { BaselineRecord } from '@shared/instances';
 import {
   buildRecipe,
   findLinks,
+  tenantNamesakes,
+  keyOf,
   withExtraLinks,
   linkKey,
   loginTables,
   nameColumns,
+  searchColumns,
   onlySchemas,
   roleColumns,
   polymorphicColumns,
@@ -56,6 +61,8 @@ export interface TenantRow {
   label: string;
   /// From an active/status-like column, where the table has one.
   inactive: boolean;
+  /// Found in another table keyed the same way, not the tenant's own.
+  from?: string;
 }
 
 export interface LoginHit {
@@ -108,6 +115,10 @@ interface BaselineState {
   tenantTerm: string;
   tenantSearching: boolean;
   tenantHits: TenantRow[] | null;
+  /// The table a search is reading now, while it goes through several.
+  tenantSearchingIn: string | null;
+  /// Every table the last search read, so it can say where it looked.
+  tenantLookedIn: string[];
   /// The tenant rows the baseline is built around.
   tenants: TenantRow[];
   tenantError: string | null;
@@ -139,8 +150,16 @@ interface BaselineState {
   /// One table's real count for the chosen tenants, which the size
   /// estimate scales by — keyed by the tenants it was measured for.
   measured: { table: string; rows: number; total: number; for: string } | null;
+  /// A count in flight for the estimate; false once it answered or could not.
+  measuring: boolean;
 
   claude: boolean;
+  /// What this copy runs on here: the server binary it would be built
+  /// with, or the Homebrew formula that would provide one. Null until read.
+  server: { flavor: 'mysql' | 'mariadb' | 'postgres' | null; version: string; found: { path: string; version: string } | null; formula: string | null; brew: boolean } | null;
+  /// A `brew install` in flight, with its latest line; an error once it fails.
+  install: { jobId: string; formula: string; line: string } | null;
+  installError: string | null;
   codeJob: string | null;
   codeSteps: SeedStep[];
   codeError: string | null;
@@ -175,6 +194,8 @@ interface BaselineState {
   setTenantTerm(term: string): void;
   searchTenant(): Promise<void>;
   toggleTenant(row: TenantRow): void;
+  /// Search one table the person chose for the tenant's name.
+  searchTenantIn(ref: TableRef): Promise<void>;
   addLogin(role?: string): void;
   /// Add each login in `text` — one, or several separated by commas,
   /// spaces or lines — and look each one up. Ones already added are skipped.
@@ -188,6 +209,9 @@ interface BaselineState {
   /// Save the recipe if it changed, then build it.
   build(): Promise<void>;
   stopBuild(): void;
+  /// Close the sheet and let the running build finish on its own, followed
+  /// by the pill at the bottom of the window.
+  background(): void;
   progress(jobId: string, p: BuildProgress): void;
   /// The linked repos changed: the recipe saves to the new home from its
   /// next save.
@@ -201,6 +225,10 @@ interface BaselineState {
   applyAll(): void;
   /// The map was built or refreshed: read it again and settle the links.
   mapChanged(): Promise<void>;
+  /// Read again what server this copy would run on.
+  checkServer(): Promise<void>;
+  /// Install it with Homebrew, then check again.
+  installServer(): Promise<void>;
 }
 
 const INITIAL = {
@@ -222,6 +250,8 @@ const INITIAL = {
   tenantTerm: '',
   tenantSearching: false,
   tenantHits: null,
+  tenantSearchingIn: null as string | null,
+  tenantLookedIn: [] as string[],
   tenants: [],
   tenantError: null,
   schemasOn: [] as string[],
@@ -241,7 +271,11 @@ const INITIAL = {
   savedPath: null,
   saveError: null,
   measured: null,
+  measuring: false,
   claude: false,
+  server: null as BaselineState['server'],
+  install: null as BaselineState['install'],
+  installError: null as string | null,
   codeJob: null,
   codeSteps: [] as SeedStep[],
   codeError: null,
@@ -299,6 +333,18 @@ function settle(map: DbMap | null, snapshot: SchemaSnapshot, links: Link[]): { l
   const r = linksFromMap(map, snapshot, links);
   return { links: r.links, counts: { confirmed: r.confirmed, corrected: r.corrected, added: r.added } };
 }
+
+/// A found row's label, from `[key, ...searchColumns]`: its name columns
+/// (the first `names` searched), or when those are empty the first other
+/// searched column with a value — the one that matched, usually — or the key.
+function hitLabel(row: Cell[], names: number): string {
+  const values = row.slice(1).map(text);
+  return values.slice(0, names).filter(Boolean).join(' · ') || values.slice(names).find(Boolean) || text(row[0]);
+}
+
+/// The latest tenant search and measurement; an older one's answer is dropped.
+let searchSeq = 0;
+let measureSeq = 0;
 
 export const useBaseline = create<BaselineState>((set, get) => ({
   ...INITIAL,
@@ -361,6 +407,7 @@ export const useBaseline = create<BaselineState>((set, get) => ({
     });
     void get().readPolymorphic();
     void get().relabel();
+    void get().checkServer();
     // The logins a saved recipe was built around, looked up again.
     const loginTerms = (previous?.starts ?? [])
       .filter((p) => !p.narrows && !(tenant && tableKey(p.ref) === tableKey(tenant)))
@@ -420,6 +467,23 @@ export const useBaseline = create<BaselineState>((set, get) => ({
       polyProgress: null,
       links: settle(get().map, snapshot, [...findLinks(snapshot), ...found]).links,
     });
+  },
+
+  async checkServer() {
+    const { connectionId, snapshot } = get();
+    if (!connectionId || !snapshot || (snapshot.engine !== 'mysql' && snapshot.engine !== 'postgres')) return;
+    const server = await window.overdb.invoke('baseline:serverFor', { engine: snapshot.engine, serverVersion: snapshot.serverVersion }).catch(() => null);
+    if (get().connectionId === connectionId) set({ server });
+  },
+
+  async installServer() {
+    const formula = get().server?.formula;
+    if (!formula || get().install) return;
+    const jobId = crypto.randomUUID();
+    set({ install: { jobId, formula, line: `brew install ${formula}` }, installError: null });
+    const res = await window.overdb.invoke('baseline:installServer', { jobId, formula }).catch((err: unknown) => ({ ok: false, error: String(err) }));
+    set({ install: null, installError: res.ok ? null : res.error ?? 'The install did not finish.' });
+    await get().checkServer();
   },
 
   async mapChanged() {
@@ -551,7 +615,9 @@ export const useBaseline = create<BaselineState>((set, get) => ({
   },
 
   setTenantTerm(tenantTerm) {
-    set({ tenantTerm });
+    // A search for the old term answers into nothing, and stops spinning.
+    searchSeq++;
+    set({ tenantTerm, tenantSearching: false, tenantSearchingIn: null });
   },
 
   async searchTenant() {
@@ -563,28 +629,111 @@ export const useBaseline = create<BaselineState>((set, get) => ({
     const names = nameColumns(info);
     const status = info.columns.find((c) => STATUSISH.test(c.name))?.name;
     const select = [tenant.column, ...names, ...(status ? [status] : [])];
-    set({ tenantSearching: true, tenantError: null });
+    const seq = ++searchSeq;
+    set({ tenantSearching: true, tenantError: null, tenantHits: null, tenantSearchingIn: null, tenantLookedIn: [`${tenant.schema}.${tenant.table}`] });
     const res = await window.overdb.invoke('baseline:find', {
       connectionId,
       req: {
-        schema: tenant.schema, table: tenant.table, select, match: [tenant.column, ...names],
+        schema: tenant.schema, table: tenant.table, select, match: [...new Set([tenant.column, ...searchColumns(info)])],
         mode: 'contains', term, limit: 20,
       },
     });
-    if (get().tenantTerm.trim() !== term) return;
+    if (seq !== searchSeq) return;
     if (!res.ok) {
       set({ tenantSearching: false, tenantError: res.error });
       return;
     }
-    const hits = res.rows.map((r) => ({
+    let hits: TenantRow[] = res.rows.map((r) => ({
       key: text(r[0]),
       label: names.map((_, i) => text(r[1 + i])).filter(Boolean).join(' · ') || text(r[0]),
       inactive: status ? inactiveFrom(status, r[select.length - 1]) : false,
     }));
+    // Not in the tenant's own table: look in the others keyed the same way.
+    // A data mart mirrors one client into several tables, and the one most
+    // tables point at is not always the one that holds every name.
+    // No exact match in the tenant's own table: look in the others keyed
+    // the same way — a data mart mirrors one client into several tables and
+    // views. Results show as each table answers, grouped by table.
+    const exact = (label: string) => label.toLowerCase().split(' · ').some((x) => x === term.toLowerCase());
+    if (snapshot && !hits.some((h) => exact(h.label))) {
+      const links = get().links;
+      const inbound = (ref: TableRef) => links.filter((l) => !l.audit && tableKey(l.to) === tableKey(ref)).length;
+      // Closest name first (`acme_db_client` before `acme_db_z123_client`),
+      // then the one more of the mart points at.
+      const extra = (name: string) => name.split('_').length;
+      const ranked = tenantNamesakes(snapshot, tenant)
+        .sort((a, b) => extra(a.table) - extra(b.table) || inbound(b) - inbound(a) || a.table.localeCompare(b.table))
+        .slice(0, 8);
+      const quality = (label: string) => {
+        const l = label.toLowerCase();
+        const q = term.toLowerCase();
+        return exact(label) ? 0 : l.startsWith(q) ? 1 : 2;
+      };
+      set({ tenantHits: hits });
+      for (const other of ranked) {
+        const on = searchColumns(other.info);
+        if (on.length === 0) continue;
+        set({ tenantSearchingIn: `${other.schema}.${other.table}`, tenantLookedIn: [...get().tenantLookedIn, `${other.schema}.${other.table}`] });
+        const r2 = await window.overdb.invoke('baseline:find', {
+          connectionId,
+          req: { schema: other.schema, table: other.table, select: [tenant.column, ...on], match: on, mode: 'contains', term, limit: 30 },
+        });
+        if (seq !== searchSeq) return;
+        if (!r2.ok) continue;
+        const found = r2.rows
+          .filter((r) => !hits.some((h) => h.key === text(r[0])))
+          .map((r) => ({ key: text(r[0]), label: hitLabel(r, nameColumns(other.info).length), inactive: false, from: `${other.schema}.${other.table}` }))
+          .sort((a, b) => quality(a.label) - quality(b.label) || a.label.localeCompare(b.label))
+          .slice(0, 8);
+        hits = [...hits, ...found];
+        set({ tenantHits: hits });
+      }
+      // Tables with an exact match first.
+      const best = (from: string | undefined) => (hits.some((h) => h.from === from && exact(h.label)) ? 0 : 1);
+      hits = [...hits].sort((a, b) => (a.from === undefined ? -1 : b.from === undefined ? 1 : best(a.from) - best(b.from)));
+      set({ tenantSearchingIn: null });
+    }
     // One active match is the answer; anything else is a choice.
     const active = hits.filter((h) => !h.inactive);
     const tenants = get().tenants.length === 0 && active.length === 1 ? [active[0]] : get().tenants;
     set({ tenantSearching: false, tenantHits: hits, tenants, savedPath: null });
+  },
+
+  async searchTenantIn(ref) {
+    const { connectionId, tenant, tenantTerm, snapshot } = get();
+    const term = tenantTerm.trim();
+    const info = tableInfo(snapshot, ref);
+    if (!connectionId || !tenant || !term || !info) return;
+    // The key column the table holds for the tenant: the tenant's own, or
+    // the table's own key when it is named the same way.
+    const key = info.columns.find((c) => c.name.toLowerCase() === tenant.column.toLowerCase())?.name ?? keyOf(info);
+    const on = searchColumns(info);
+    if (!key || on.length === 0) {
+      set({ tenantError: `${ref.schema}.${ref.table} has no ${tenant.column} and name column to search.` });
+      return;
+    }
+    const from = `${ref.schema}.${ref.table}`;
+    const seq = ++searchSeq;
+    set({ tenantSearching: true, tenantError: null, tenantSearchingIn: from, tenantLookedIn: [...get().tenantLookedIn.filter((x) => x !== from), from] });
+    const res = await window.overdb.invoke('baseline:find', {
+      connectionId,
+      req: { schema: ref.schema, table: ref.table, select: [key, ...on], match: on, mode: 'contains', term, limit: 30 },
+    });
+    if (seq !== searchSeq) return;
+    if (!res.ok) {
+      set({ tenantSearching: false, tenantSearchingIn: null, tenantError: res.error });
+      return;
+    }
+    // The table you picked wins: its rows go first, under its own heading,
+    // and take over any key another table already showed — a mart mirrors
+    // the same client ids into several tables, so they often overlap.
+    const found: TenantRow[] = res.rows
+      .map((r) => ({ key: text(r[0]), label: hitLabel(r, nameColumns(info).length), inactive: false, from }));
+    const have = (get().tenantHits ?? []).filter((h) => h.from !== from && !found.some((f) => f.key === h.key));
+    set({
+      tenantSearching: false, tenantSearchingIn: null, tenantHits: [...found, ...have],
+      tenantError: found.length === 0 ? `Nothing in ${from} matched “${term}” — searched ${on.join(', ')}.` : null,
+    });
   },
 
   toggleTenant(row) {
@@ -743,14 +892,39 @@ export const useBaseline = create<BaselineState>((set, get) => ({
   },
 
   async build() {
+    if (runningFor(get().connectionId)) {
+      useStore.getState().toast('This one is already being built in the background — it is at the bottom of the window.', 'error');
+      return;
+    }
     if (!get().savedPath) await get().save();
     const { connectionId, savedPath } = get();
     if (!connectionId || !savedPath) return;
     const jobId = crypto.randomUUID();
     set({ step: 'build', buildJob: jobId, buildStartedAt: Date.now(), buildLog: [], buildError: null, buildLogFile: null, built: null });
     const res = await window.overdb.invoke('baseline:build', { jobId, connectionId });
+    // Wherever it is followed — this sheet, or the pill once the sheet was
+    // closed — the base is new, so branches and the sidebar should know.
+    if (res.ok) void useTickets.getState().refresh();
+    useBuilds.getState().finish(jobId, res);
     if (get().buildJob !== jobId) return;
     set(res.ok ? { buildJob: null, built: res.baseline } : { buildJob: null, buildError: res.error, buildLogFile: res.log ?? null });
+  },
+
+  background() {
+    const s = get();
+    if (!s.buildJob || !s.connectionId) return;
+    const conn = useStore.getState().connections.find((c) => c.id === s.connectionId);
+    useBuilds.getState().add({
+      jobId: s.buildJob,
+      connectionId: s.connectionId,
+      name: conn?.name ?? 'a base',
+      remote: !!conn && conn.env !== 'local',
+      startedAt: s.buildStartedAt ?? Date.now(),
+      last: s.buildLog[s.buildLog.length - 1] ?? null,
+    });
+    // Handed over: closing the sheet must no longer cancel it.
+    set({ buildJob: null });
+    useStore.getState().setSheet(null);
   },
 
   stopBuild() {
@@ -770,9 +944,13 @@ export const useBaseline = create<BaselineState>((set, get) => ({
 
   async measure() {
     const s = get();
-    if (!s.connectionId || !s.snapshot || !s.tenant || s.tenants.length === 0) return;
+    // Only the latest call owns the "measuring…" flag; any call that ends
+    // without a count clears it.
+    const seq = ++measureSeq;
+    const done = () => set({ measuring: false });
+    if (!s.connectionId || !s.snapshot || !s.tenant || s.tenants.length === 0) return done();
     const key = measureKey(s);
-    if (s.measured?.for === key) return;
+    if (s.measured?.for === key) return done();
     // The biggest table carrying the narrowest chosen key itself: the one
     // whose share says most about how much of the data is kept.
     const level = s.levels.filter((l) => (s.narrowing[tableKey(l.ref)] ?? []).length > 0).pop();
@@ -781,12 +959,14 @@ export const useBaseline = create<BaselineState>((set, get) => ({
     const pick = plansFor({ ...s, measured: null })
       .filter((p) => p.action === 'scoped' && p.via.length === 1 && family.has(tableKey(p.via[0])) && (p.rows ?? 0) > 0)
       .sort((a, b) => (b.rows ?? 0) - (a.rows ?? 0))[0];
-    if (!pick) return;
-    const res = await window.overdb.invoke('baseline:measure', {
-      connectionId: s.connectionId, schema: pick.ref.schema, table: pick.ref.table, column: pick.via[0].column, values,
-    });
-    if (!res.ok || measureKey(get()) !== key) return;
-    set({ measured: { table: tableKey(pick.ref), rows: res.rows, total: pick.rows ?? 1, for: key } });
+    if (!pick) return done();
+    set({ measuring: true });
+    const res = await window.overdb
+      .invoke('baseline:measure', { connectionId: s.connectionId, schema: pick.ref.schema, table: pick.ref.table, column: pick.via[0].column, values })
+      .catch(() => ({ ok: false as const }));
+    if (seq !== measureSeq) return;
+    if (measureKey(get()) !== key) return done();
+    set({ measuring: false, ...(res.ok ? { measured: { table: tableKey(pick.ref), rows: res.rows, total: pick.rows ?? 1, for: key } } : {}) });
   },
 
   async readCode() {

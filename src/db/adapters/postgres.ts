@@ -160,9 +160,16 @@ export class PostgresAdapter implements DbAdapter {
 
   async query(sql: string, params: unknown[] = [], maxRows = 100_000): Promise<QueryResult> {
     const handle = await this.stream(sql, params);
-    const { rows, done } = await handle.next(maxRows);
-    await handle.close();
-    return { columns: handle.columns, rows, rowCount: rows.length, truncated: !done };
+    // Closed whether the read worked or not: closing is what ends the
+    // read-only transaction the statement opened. A failed read that skipped
+    // it left that transaction open and aborted, and every statement after
+    // it on the connection failed with "current transaction is aborted".
+    try {
+      const { rows, done } = await handle.next(maxRows);
+      return { columns: handle.columns, rows, rowCount: rows.length, truncated: !done };
+    } finally {
+      await handle.close().catch(() => undefined);
+    }
   }
 
   async stream(

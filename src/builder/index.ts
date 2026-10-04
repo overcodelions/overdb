@@ -14,6 +14,9 @@ import type { Connection, RowDataPacket } from 'mysql2';
 import type { Connection as PromiseConnection } from 'mysql2/promise';
 import type { BuildPlan, BuildProgress, BuildReport, BuildTable, FollowRule } from '../shared/baselineBuild';
 import { tableKey, type TableRef } from '../shared/baseline';
+import type { ConnectSpec } from '../db/adapter';
+import { tlsOptions } from '../db/tls';
+import { buildPostgres, type PgBuildRequest } from './pg';
 
 export interface Endpoint {
   host?: string;
@@ -21,9 +24,15 @@ export interface Endpoint {
   socketPath?: string;
   user?: string;
   password?: string;
+  /// Postgres only: the database the copy is read from and written to.
+  database?: string;
+  /// How a shared server is reached securely: the connection's own TLS
+  /// settings, turned into options on this side because they include a
+  /// function that cannot cross between processes.
+  tls?: Pick<ConnectSpec, 'engine' | 'ssl' | 'sslRootCert' | 'sslCert' | 'sslKey' | 'tlsServerName' | 'host'>;
 }
 
-export type BuilderRequest = {
+export type BuilderRequest = ({ op: 'buildPostgres' } & PgBuildRequest) | {
   op: 'build';
   source: Endpoint;
   target: Endpoint;
@@ -32,6 +41,10 @@ export type BuilderRequest = {
   /// copy of it gets the same password, so the same connection settings
   /// reach a ticket copy.
   login: { user: string; password: string } | null;
+  /// The copy's own root password, set last: until then the build alone
+  /// uses root, and after it nothing on this machine reaches the copy — or
+  /// the account hashes it keeps for your services — without a password.
+  admin: string;
 };
 
 export type BuilderMessage =
@@ -70,6 +83,11 @@ const KEY_CHUNK = 2_000;
 const FILL_ROUNDS = 4;
 
 const q = (name: string) => '`' + name.replace(/`/g, '``') + '`';
+
+/// Server settings copied from the source before any table is created,
+/// besides sql_mode: whether InnoDB refuses a table or row it would only warn
+/// about, and the row format a table gets when its DDL names none.
+const MIRRORED = ['innodb_strict_mode', 'innodb_default_row_format'] as const;
 const qt = (ref: TableRef) => `${q(ref.schema)}.${q(ref.table)}`;
 
 function open(ep: Endpoint): Promise<Connection> {
@@ -80,6 +98,7 @@ function open(ep: Endpoint): Promise<Connection> {
       socketPath: ep.socketPath,
       user: ep.user,
       password: ep.password,
+      ssl: ep.tls ? tlsOptions(ep.tls as ConnectSpec) : undefined,
       charset: 'utf8mb4',
       // Values go back exactly as they came: no Date objects (and their
       // time zones), no floating-point decimals, no parsed JSON.
@@ -125,6 +144,7 @@ async function build(req: BuilderRequest, progress: (p: BuildProgress) => void):
   const started = Date.now();
   const report: BuildReport = { tables: 0, rows: 0, copied: {}, filled: 0, skipped: [], durationMs: 0 };
   const plan = req.plan;
+  setStartKeys(plan);
 
   progress({ stage: 'start', text: 'Connecting to your server and to the new instance' });
   const sourceRaw = await open(req.source);
@@ -143,6 +163,23 @@ async function build(req: BuilderRequest, progress: (p: BuildProgress) => void):
     // The app runs with the server's own mode once the baseline is in use.
     const [mode] = await rows<{ m: string }>(source, 'SELECT @@GLOBAL.sql_mode AS m');
     await target.query('SET PERSIST sql_mode = ?', [mode?.m ?? '']).catch(() => target.query('SET GLOBAL sql_mode = ?', [mode?.m ?? '']));
+    report.settings = { sql_mode: mode?.m ?? '' };
+    // What decides whether a table or a row is accepted at all, as the
+    // server has it. RDS and Aurora run with strict mode off, so a COMPACT
+    // table whose widest row would pass 8 KB was created there with a
+    // warning — and a local server's default refuses the same CREATE.
+    const matched: string[] = [];
+    for (const name of MIRRORED) {
+      const [v] = await rows<{ v: string | number | null }>(source, `SELECT @@GLOBAL.${name} AS v`).catch(() => []);
+      if (v?.v === null || v?.v === undefined) continue;
+      // The build's own session first: CREATE TABLE reads it, not the global.
+      await target.query(`SET SESSION ${name} = ?`, [v.v]).catch(() => undefined);
+      await target.query(`SET PERSIST ${name} = ?`, [v.v]).catch(() => target.query(`SET GLOBAL ${name} = ?`, [v.v]).catch(() => undefined));
+      const value = String(v.v) === '0' ? 'OFF' : String(v.v) === '1' ? 'ON' : String(v.v);
+      matched.push(`${name} ${value}`);
+      report.settings = { ...report.settings, [name]: value };
+    }
+    if (matched.length) progress({ stage: 'start', text: `Matching the server's settings: ${matched.join(', ')}` });
 
     progress({ stage: 'schemas', text: `Creating ${plan.schemas.length} schemas` });
     for (const s of plan.schemas) {
@@ -276,6 +313,7 @@ async function build(req: BuilderRequest, progress: (p: BuildProgress) => void):
 
     progress({ stage: 'users', text: 'Recreating the accounts your services connect as' });
     await recreateUsers(source, target, report, req.login);
+    await lockRoot(target, req.admin);
 
     report.durationMs = Date.now() - started;
     progress({ stage: 'finish', text: `Built: ${report.tables} tables, ${report.rows.toLocaleString()} rows` });
@@ -309,6 +347,26 @@ async function copyTable(
 
 /// Rows whose column holds a key already copied into the parent — and,
 /// following a narrowed level, the tenant's rows that belong to no level.
+/// The keys a person started from, by table and column. A table that
+/// follows its starting point follows these too, even when that row is not
+/// in the table itself — a data mart keeps one client in several tables,
+/// and the one most tables point at may not hold the one you picked.
+let startKeys = new Map<string, unknown[]>();
+
+function setStartKeys(plan: BuildPlan): void {
+  startKeys = new Map();
+  for (const t of plan.tables) {
+    if (t.rows.kind === 'keys') startKeys.set(`${tableKey(t.ref)}.${t.rows.column}`.toLowerCase(), t.rows.values);
+  }
+}
+
+function withStartKeys(found: unknown[], parent: TableRef, column: string): unknown[] {
+  const start = startKeys.get(`${tableKey(parent)}.${column}`.toLowerCase());
+  if (!start) return found;
+  const have = new Set(found.map((v) => String(v)));
+  return [...found, ...start.filter((v) => !have.has(String(v)))];
+}
+
 async function follow(
   ref: TableRef,
   r: FollowRule,
@@ -316,8 +374,10 @@ async function follow(
   copyIn: (ref: TableRef, column: string, values: unknown[], when?: { column: string; value: string }) => Promise<number>,
   target: PromiseConnection,
 ): Promise<number> {
-  const keysOf = (parent: TableRef, column: string) =>
-    rows<{ v: unknown }>(target, `SELECT DISTINCT ${q(column)} AS v FROM ${qt(parent)} WHERE ${q(column)} IS NOT NULL`);
+  const keysOf = async (parent: TableRef, column: string) => {
+    const got = await rows<{ v: unknown }>(target, `SELECT DISTINCT ${q(column)} AS v FROM ${qt(parent)} WHERE ${q(column)} IS NOT NULL`);
+    return withStartKeys(got.map((x) => x.v), parent, column).map((v) => ({ v }));
+  };
   const parents = await keysOf(r.parent, r.refColumn);
   let n = parents.length === 0 ? 0 : await copyIn(ref, r.column, parents.map((p) => p.v), r.when);
   for (const m of r.more ?? []) n += await follow(ref, m, copy, copyIn, target);
@@ -445,18 +505,34 @@ async function recreateUsers(
   await target.query('FLUSH PRIVILEGES');
 }
 
+/// The copy's root accounts get their password, and the anonymous ones a
+/// fresh instance may have are dropped. The last statement of a build.
+async function lockRoot(target: PromiseConnection, admin: string) {
+  const roots = await rows<{ u: string; h: string }>(target, "SELECT User AS u, Host AS h FROM mysql.user WHERE User IN ('root', '')");
+  for (const { u, h } of roots) {
+    const who = `${mysql.escape(u)}@${mysql.escape(h)}`;
+    await target.query(u === '' ? `DROP USER IF EXISTS ${who}` : `ALTER USER ${who} IDENTIFIED BY ?`, u === '' ? [] : [admin]);
+  }
+  await target.query('FLUSH PRIVILEGES');
+}
+
 /// An account statement with its password or hash masked: `IDENTIFIED BY
 /// '…'`, `BY PASSWORD '…'`, `AS '…'` (MySQL) and `USING '…'` (MariaDB).
 export function redactSecrets(sql: string): string {
   if (!/\bIDENTIFIED\b|\bPASSWORD\b/i.test(sql)) return sql;
-  return sql.replace(/\b(BY|AS|USING|PASSWORD)(\s*(?:PASSWORD\s*)?(?:\(\s*)?)'(?:[^'\\]|\\.)*'/gi, "$1$2'…'");
+  return sql
+    .replace(/\b(BY|AS|USING|PASSWORD)(\s*(?:PASSWORD\s*)?(?:\(\s*)?)'(?:[^'\\]|\\.)*'/gi, "$1$2'…'")
+    // The same hash printed as hex (print_identified_with_as_hex).
+    .replace(/\b(BY|AS|USING)(\s+)0x[0-9a-f]+/gi, '$1$20x…');
 }
 
 const wire = transport();
 wire.onMessage((req) => {
-  if (req.op !== 'build') return;
-  build(req, (progress) => wire.send({ kind: 'progress', progress }))
-    .then((report) => wire.send({ kind: 'done', report }))
+  if (req.op !== 'build' && req.op !== 'buildPostgres') return;
+  const send = (progress: BuildProgress) => wire.send({ kind: 'progress', progress });
+  (req.op === 'buildPostgres' ? buildPostgres(req, send) : build(req, send))
+    // A skipped statement's error can quote it, and an account's with it.
+    .then((report) => wire.send({ kind: 'done', report: { ...report, skipped: report.skipped.map((x) => ({ ...x, reason: redactSecrets(x.reason) })) } }))
     .catch((err) => {
       // mysql2 puts the statement on its errors; long ones are cut.
       // A password never reaches the log: the accounts step sets them.

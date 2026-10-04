@@ -141,3 +141,15 @@ describe('a login table', () => {
     expect(p.tables.find((t) => t.ref.table === 'portal_user')?.rows).toEqual({ kind: 'keys', column: 'portal_user_id', values: ['pu-9'] });
   });
 });
+
+describe('completing links read from names', () => {
+  it('fetches a kept row’s parent through a column the schema never declared', () => {
+    // deal.partner_id has no foreign key; a kept deal still brings its partner.
+    const plan = buildPlan(recipe, plans, snapshot);
+    expect(plan.fills).toContainEqual({ child: { schema: 'app', table: 'deal' }, column: 'partner_id', parent: { schema: 'app', table: 'partner' }, refColumn: 'partner_id' });
+    // Each column completes once, and never into a log.
+    const keys = plan.fills.map((f) => `${tableKey(f.child)}.${f.column}`);
+    expect(new Set(keys).size).toBe(keys.length);
+    expect(plan.fills.some((f) => f.parent.table === 'audit_log')).toBe(false);
+  });
+});

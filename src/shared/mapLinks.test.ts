@@ -56,6 +56,29 @@ describe('settling a base’s links from the map', () => {
     expect(r.links[0]).toMatchObject({ columns: ['site_ref'], to: { schema: 'app', table: 'site' }, source: 'code' });
   });
 
+  it('takes no link between two columns neither of which is a key', () => {
+    // Redshift: no declared keys, so each table's key is read off its name.
+    const t = (name: string, columns: string[]) => ({ name, kind: 'table', columns: columns.map(col), primaryKey: [], foreignKeys: [], indexes: [] });
+    const mart = {
+      engine: 'postgres',
+      schemas: [{ name: 'public', tables: [t('client', ['client_id']), t('partner', ['partner_id', 'client_id']), t('deal', ['deal_id', 'partner_id', 'client_id'])] }],
+    } as unknown as SchemaSnapshot;
+    const named = (column: string, to: string): Link => ({
+      from: { schema: 'public', table: 'deal' }, columns: [column], to: { schema: 'public', table: to }, refColumns: [column], source: 'name', audit: false, alternatives: [],
+    });
+    const r = linksFromMap(
+      mapWith([
+        { from: 'public.deal.client_id', to: 'public.partner.client_id', why: 'joined on partner_id and client_id' },
+        { from: 'public.deal.partner_id', to: 'public.partner.partner_id', why: 'joined on partner_id and client_id' },
+      ]),
+      mart,
+      [named('client_id', 'client'), named('partner_id', 'partner')],
+    );
+    expect(r.links.find((l) => l.columns[0] === 'client_id')?.to.table).toBe('client');
+    expect(r.links.find((l) => l.columns[0] === 'partner_id')?.cited).toBeDefined();
+    expect(r.corrected).toBe(0);
+  });
+
   it('leaves foreign keys and unknown columns alone', () => {
     const fk = { ...guess('form_id', 'app.form'), source: 'fk' as const };
     const r = linksFromMap(mapWith([{ from: 'app.submission.form_id', to: 'app.old_form.id', why: 'x' }, { from: 'app.nope.x', to: 'app.form.id', why: 'y' }]), snapshot, [fk]);

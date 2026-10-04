@@ -38,7 +38,8 @@ export function emptyList<T>(): readonly T[] {
 
 export type Sheet =
   | { kind: 'about' }
-  | { kind: 'basics' }
+  /// `section` scrolls to one part, for a link that means one idea.
+  | { kind: 'basics'; section?: 'branches' }
   | { kind: 'shortcuts' }
   /// `section` opens Settings on one pane, for a link that means one setting.
   | { kind: 'settings'; section?: SettingsSection }

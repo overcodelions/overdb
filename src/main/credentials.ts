@@ -45,6 +45,7 @@ export async function resolve(
     user: credential.user ?? conn.user,
     password: credential.password,
     ssl: conn.ssl,
+    ...(conn.tlsServerName ? { tlsServerName: conn.tlsServerName } : {}),
     sslRootCert: conn.sslRootCert,
     sslCert: conn.sslCert,
     sslKey: conn.sslKey,

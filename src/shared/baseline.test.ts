@@ -12,6 +12,8 @@ import {
   nameColumns,
   nameTokens,
   parseRecipe,
+  keyOf,
+  referenceBase,
   sortTables,
   summarize,
   tableKey,
@@ -369,8 +371,10 @@ describe('finding starting points', () => {
         mode: 'contains', term: '50%_off', limit: 10,
       }),
     ).toEqual({
-      sql: 'SELECT `account_id`, `account_name` FROM `app`.`account` WHERE LOWER(`account_name`) LIKE LOWER(?) LIMIT 10',
-      params: ['%50\\%\\_off%'],
+      sql: 'SELECT `account_id`, `account_name` FROM `app`.`account` WHERE LOWER(`account_name`) LIKE LOWER(?)'
+        + ' ORDER BY CASE WHEN LOWER(`account_name`) LIKE LOWER(?) THEN 0 WHEN LOWER(`account_name`) LIKE LOWER(?) THEN 1 ELSE 2 END LIMIT 10',
+      // Contains, then exactly that, then starting with it.
+      params: ['%50\\%\\_off%', '50\\%\\_off', '50\\%\\_off%'],
     });
     expect(
       findSql('postgres', {
@@ -446,8 +450,9 @@ describe('tenancy levels', () => {
         limit: 10, within: { column: 'account_id', values: ['a1', 'a2'] },
       }),
     ).toEqual({
-      sql: 'SELECT `partner_id`, `name` FROM `app`.`partner` WHERE (LOWER(`name`) LIKE LOWER(?)) AND `account_id` IN (?, ?) LIMIT 10',
-      params: ['%acme%', 'a1', 'a2'],
+      sql: 'SELECT `partner_id`, `name` FROM `app`.`partner` WHERE (LOWER(`name`) LIKE LOWER(?)) AND `account_id` IN (?, ?)'
+        + ' ORDER BY CASE WHEN LOWER(`name`) LIKE LOWER(?) THEN 0 WHEN LOWER(`name`) LIKE LOWER(?) THEN 1 ELSE 2 END LIMIT 10',
+      params: ['%acme%', 'a1', 'a2', 'acme', 'acme%'],
     });
   });
 });
@@ -467,5 +472,82 @@ describe('roleColumns', () => {
     const r = roleColumns(t, { schema: 'app', table: 'member' }, findLinks(s2));
     expect(r.direct).toEqual(['roles_mask', 'is_admin']);
     expect(r.viaLink).toEqual([{ column: 'role_id', to: { schema: 'app', table: 'roles' }, refColumn: 'id' }]);
+  });
+});
+
+describe('a data mart with no declared keys', () => {
+  const col = (name: string) => ({ name, ordinal: 1, typeName: 'character varying(32)', nullable: true, defaultExpr: null });
+  const t = (name: string, cols: string[]) => ({ name, kind: 'table' as const, columns: cols.map(col), primaryKey: [], indexes: [], foreignKeys: [] });
+  const snap = {
+    engine: 'postgres' as const,
+    serverVersion: 'PostgreSQL 8.0.2 Redshift 1.0',
+    capturedAt: '',
+    schemas: [{ name: 'public', tables: [t('client', ['client_id', 'name']), t('partners', ['partner_id', 'client_id']), t('deal', ['deal_id', 'client_id', 'partner_id'])] }],
+  };
+
+  it('reads each table’s own `…_id` column as its key, and links to it', async () => {
+    const { findLinks, keyOf, tenantCandidates } = await import('./baseline');
+    expect(keyOf(snap.schemas[0].tables[1])).toBe('partner_id');
+    const links = findLinks(snap).map((l) => `${l.from.table}.${l.columns[0]}→${l.to.table}`).sort();
+    expect(links).toEqual(['deal.client_id→client', 'deal.partner_id→partners', 'partners.client_id→client']);
+    expect(tenantCandidates(snap, findLinks(snap))[0]).toMatchObject({ ref: { table: 'client' }, column: 'client_id' });
+  });
+});
+
+describe('a client mirrored into several tables', () => {
+  const col = (name: string) => ({ name, ordinal: 1, typeName: 'character varying(32)', nullable: true, defaultExpr: null });
+  const t = (name: string, cols: string[]) => ({ name, kind: 'table' as const, columns: cols.map(col), primaryKey: [], indexes: [], foreignKeys: [] });
+  const snap = {
+    engine: 'postgres' as const,
+    serverVersion: 'PostgreSQL 8.0.2 Redshift 1.0',
+    capturedAt: '',
+    schemas: [
+      { name: 'public', tables: [t('client', ['client_id', 'name']), t('acme_db_client', ['client_id', 'client_name', 'client_key']), t('deal', ['deal_id', 'client_id'])] },
+      { name: 'acme_dm', tables: [t('client', ['client_id', 'client_name'])] },
+    ],
+  };
+
+  it('keys a mirrored table by the end of its name, and finds every namesake of the tenant', async () => {
+    const { keyOf, tenantNamesakes } = await import('./baseline');
+    expect(keyOf(snap.schemas[0].tables[1])).toBe('client_id');
+    expect(tenantNamesakes(snap, { schema: 'public', table: 'client', column: 'client_id' }).map((x) => `${x.schema}.${x.table}`)).toEqual([
+      'public.acme_db_client',
+      'acme_dm.client',
+    ]);
+  });
+});
+
+describe('an empty table you start from', () => {
+  it('is still the starting point, so what points at it keeps the tenant’s rows', () => {
+    // A sandbox mart: the tenant table is empty, its rows live elsewhere.
+    const empty = stats.map((s) => (s.schema === 'app' && s.table === 'account' ? { ...s, rows: 0 } : s));
+    const plans = sortTables({ snapshot, stats: empty, links, tenant: { schema: 'app', table: 'account', column: 'account_id' }, starts: [], keepShare: 0.01 });
+    const plan = (t: string) => plans.find((p) => p.ref.schema === 'app' && p.ref.table === t);
+    expect(plan('account')).toMatchObject({ action: 'scoped', reason: 'what you start from' });
+    expect(plan('partner')?.action).toBe('scoped');
+    // Any other empty table is still set aside.
+    expect(plan('unused_feature')).toMatchObject({ action: 'schema', reason: 'empty today' });
+  });
+});
+
+describe('ids kept for another system', () => {
+  it('are not read as links to a table here', () => {
+    expect(referenceBase('remote_client_id')).toBeNull();
+    expect(referenceBase('crm_account_id')).toBeNull();
+    expect(referenceBase('external_user_id')).toBeNull();
+    expect(referenceBase('client_id')).toEqual(['client']);
+    expect(referenceBase('created_by_user_id')).toEqual(['created', 'by', 'user']);
+  });
+});
+
+describe('a key read from a table’s name', () => {
+  const keyless = (name: string, cols: string[]): TableInfo => ({
+    name, kind: 'table', primaryKey: [], indexes: [], foreignKeys: [],
+    columns: cols.map((c, i) => ({ name: c, ordinal: i + 1, typeName: 'varchar(32)', nullable: true, defaultExpr: null })),
+  });
+  it('takes the whole name, or a shorter ending only as the first column', () => {
+    expect(keyOf(keyless('client', ['name', 'client_id']))).toBe('client_id');
+    expect(keyOf(keyless('acme_db_client', ['client_id', 'name']))).toBe('client_id');
+    expect(keyOf(keyless('deal_comment', ['deal_id', 'comment_id']))).toBe(null);
   });
 });

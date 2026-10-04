@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { cloneDir, compareVersions, makeDistinct } from './instances';
+import { cloneDir, compareVersions, makeDistinct, pickMysqld, settingFlags } from './instances';
 
 describe('compareVersions', () => {
   it('compares numerically, not as text', () => {
@@ -31,5 +31,43 @@ describe('cloning a data directory', () => {
     // The original is untouched.
     expect(await fs.readFile(path.join(from, 'auto.cnf'), 'utf-8')).toContain('server-uuid');
     await fs.rm(base, { recursive: true, force: true });
+  });
+});
+
+describe('choosing the server binary for a copy', () => {
+  const found = [
+    { path: '/m/mariadb@10.8', version: '10.8.8', flavor: 'mariadb' as const },
+    { path: '/m/mysql@8.0', version: '8.0.39', flavor: 'mysql' as const },
+    { path: '/m/mysql', version: '9.2.0', flavor: 'mysql' as const },
+  ];
+  it('takes the same kind and version', () => {
+    expect(pickMysqld(found, '10.8.8-MariaDB')?.path).toBe('/m/mariadb@10.8');
+    expect(pickMysqld(found, '8.0.32')?.path).toBe('/m/mysql@8.0');
+  });
+  it('falls back to the newest of the same kind, never the other kind', () => {
+    expect(pickMysqld(found, '8.4.1')?.path).toBe('/m/mysql');
+    expect(pickMysqld([found[0]], '8.0.32')).toBeNull();
+    expect(pickMysqld([found[1]], '10.6.4-MariaDB')).toBeNull();
+  });
+  it('takes the newest of anything when the version is unknown', () => {
+    expect(pickMysqld(found, '')?.path).toBe('/m/mariadb@10.8');
+  });
+});
+
+describe('the settings a copy starts with', () => {
+  it('passes the known ones as flags, and nothing else', () => {
+    expect(
+      settingFlags({
+        sql_mode: 'NO_ENGINE_SUBSTITUTION,STRICT_TRANS_TABLES',
+        innodb_strict_mode: 'OFF',
+        innodb_default_row_format: 'dynamic',
+        init_file: '/tmp/evil.sql',
+        innodb_strict_mode_x: 'ON',
+      }),
+    ).toEqual(['--sql-mode=NO_ENGINE_SUBSTITUTION,STRICT_TRANS_TABLES', '--innodb-strict-mode=OFF', '--innodb-default-row-format=dynamic']);
+  });
+  it('drops a value with anything a setting never holds', () => {
+    expect(settingFlags({ sql_mode: "ANSI' --init-file=/x" })).toEqual([]);
+    expect(settingFlags(undefined)).toEqual([]);
   });
 });

@@ -46,7 +46,11 @@ describe('the background helper', () => {
     const script = path.join(ROOT, 'dist', 'helper', 'index.js');
     if (!fs.existsSync(script)) return; // built by `npm run build`
     const root = fs.mkdtempSync(path.join('/tmp', 'ovh-'));
-    fs.writeFileSync(path.join(root, 'records.json'), JSON.stringify({ baselines: [], tickets: [], proxy: { enabled: false } }));
+    // Records from before a proxy per base: the one proxy belongs to the first base.
+    fs.writeFileSync(
+      path.join(root, 'records.json'),
+      JSON.stringify({ baselines: [{ id: 'b1', sourceConnectionId: 'src-1' }], tickets: [], proxy: { enabled: false, port: 3310 } }),
+    );
     const child = spawn(process.execPath, [script], { env: { ...process.env, OVERDB_INSTANCES: root }, stdio: 'ignore' });
     try {
       const client = new HelperClient(path.join(root, 'helper.sock'));
@@ -57,8 +61,9 @@ describe('the background helper', () => {
       }
       expect(pid).toBe(child.pid);
       expect(await client.tickets()).toEqual([]);
-      const state = await client.proxyState();
-      expect(state).toMatchObject({ running: false, configured: false, config: { port: 3306 } });
+      const states = await client.proxyStates();
+      expect(states).toHaveLength(1);
+      expect(states[0]).toMatchObject({ source: 'src-1', running: false, config: { port: 3310 } });
       await expect(client.call('nonsense' as never)).rejects.toThrow(/Unknown operation/);
       expect(fs.statSync(path.join(root, 'helper.sock')).mode & 0o777).toBe(0o600);
     } finally {

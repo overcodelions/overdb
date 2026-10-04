@@ -48,11 +48,12 @@ export class HelperClient implements Runtime {
   tickets() { return this.call<Awaited<ReturnType<Runtime['tickets']>>>('tickets'); }
   startTicket(id: string) { return this.call<Awaited<ReturnType<Runtime['startTicket']>>>('startTicket', id); }
   stopTicket(id: string) { return this.call<void>('stopTicket', id); }
+  resetTicket(id: string) { return this.call<Awaited<ReturnType<Runtime['resetTicket']>>>('resetTicket', id); }
   deleteTicket(id: string) { return this.call<Awaited<ReturnType<Runtime['deleteTicket']>>>('deleteTicket', id); }
-  proxyState() { return this.call<Awaited<ReturnType<Runtime['proxyState']>>>('proxyState'); }
-  configureProxy(next: Parameters<Runtime['configureProxy']>[0]) { return this.call<Awaited<ReturnType<Runtime['configureProxy']>>>('configureProxy', next); }
-  routeProxy(target: Parameters<Runtime['routeProxy']>[0]) { return this.call<Awaited<ReturnType<Runtime['routeProxy']>>>('routeProxy', target); }
-  proxyClients() { return this.call<Awaited<ReturnType<Runtime['proxyClients']>>>('proxyClients'); }
+  proxyStates() { return this.call<Awaited<ReturnType<Runtime['proxyStates']>>>('proxyStates'); }
+  configureProxy(source: string, next: Parameters<Runtime['configureProxy']>[1]) { return this.call<Awaited<ReturnType<Runtime['configureProxy']>>>('configureProxy', source, next); }
+  routeProxy(source: string, target: Parameters<Runtime['routeProxy']>[1]) { return this.call<Awaited<ReturnType<Runtime['routeProxy']>>>('routeProxy', source, target); }
+  proxyClients(source: string) { return this.call<Awaited<ReturnType<Runtime['proxyClients']>>>('proxyClients', source); }
   inUse() { return this.call<Awaited<ReturnType<Runtime['inUse']>>>('inUse'); }
   resume() { return this.call<void>('resume'); }
   shutdown() { return this.call<void>('shutdown'); }

@@ -2,6 +2,7 @@ import { useEffect } from 'react';
 import { create } from 'zustand';
 import type { Connection } from '@shared/types';
 import type { BaselineRecord, HelperStatus, ProxyClient, ProxyConfig, ProxyState, ProxyTarget, TicketState } from '@shared/instances';
+import { isProxyConnectionId, proxyConnectionId } from '@shared/instances';
 import { useStore } from './store';
 
 // Ticket databases: the baselines built so far, the copies made from them,
@@ -15,9 +16,11 @@ interface TicketsState {
   loaded: boolean;
   baselines: BaselineRecord[];
   tickets: TicketState[];
-  proxy: ProxyState | null;
+  /// One per base, by the base's source connection.
+  proxies: ProxyState[];
   helper: HelperStatus | null;
-  clients: ProxyClient[];
+  /// Who is connected through each proxy, by source.
+  clients: Record<string, ProxyClient[]>;
   busy: Record<string, string>;
   error: string | null;
 
@@ -25,11 +28,12 @@ interface TicketsState {
   create(baselineId: string, name: string, note: string): Promise<TicketState | null>;
   start(id: string): Promise<void>;
   stop(id: string): Promise<void>;
+  reset(id: string): Promise<void>;
   remove(id: string): Promise<void>;
   renameBaseline(id: string, label: string): Promise<void>;
-  configure(next: Partial<ProxyConfig> & { enabled?: boolean }): Promise<void>;
-  route(target: ProxyTarget): Promise<number | null>;
-  loadClients(): Promise<void>;
+  configure(source: string, next: Partial<ProxyConfig> & { enabled?: boolean }): Promise<void>;
+  route(source: string, target: ProxyTarget): Promise<number | null>;
+  loadClients(source: string): Promise<void>;
   /// Hand the proxy and the copies to the background helper, or take them back.
   setBackground(on: boolean): Promise<void>;
 }
@@ -59,27 +63,34 @@ async function dropConnection(id: string): Promise<void> {
   await window.overdb.invoke('store:saveConnections', next);
 }
 
-const PROXY_CONNECTION_ID = 'overdb-proxy';
-
-/// Keep the sidebar's "Services see" connection in step with the proxy:
-/// there while it runs, gone when it stops, renamed and reconnected when it
-/// points somewhere else so the schema tree is never the last database's.
-async function syncProxyConnection(retarget: boolean): Promise<void> {
-  const conn = await window.overdb.invoke('proxy:connection');
-  const had = useStore.getState().connections.some((c) => c.id === PROXY_CONNECTION_ID);
-  if (!conn) {
-    if (had) {
-      await window.overdb.invoke('conn:close', PROXY_CONNECTION_ID).catch(() => undefined);
-      await dropConnection(PROXY_CONNECTION_ID);
-    }
-    return;
+/// Keep each proxy's "Services see" connection in step with it: there
+/// while it runs, gone when it stops, renamed and reconnected when it points
+/// somewhere else so the schema tree is never the last database's. The one
+/// shared id from before there was a proxy per base is retired here.
+async function syncProxyConnections(proxies: ProxyState[], retarget: boolean): Promise<void> {
+  for (const c of useStore.getState().connections.filter((x) => isProxyConnectionId(x.id))) {
+    if (proxies.some((p) => proxyConnectionId(p.source) === c.id)) continue;
+    await window.overdb.invoke('conn:close', c.id).catch(() => undefined);
+    await dropConnection(c.id);
   }
-  await addConnection(conn);
-  if (had && retarget) {
-    await window.overdb.invoke('conn:close', PROXY_CONNECTION_ID).catch(() => undefined);
-    const st = useStore.getState();
-    if (st.schemas[PROXY_CONNECTION_ID] || (st.selection?.kind === 'connection' && st.selection.id === PROXY_CONNECTION_ID)) {
-      await st.loadSchema(PROXY_CONNECTION_ID, { force: true }).catch(() => undefined);
+  for (const p of proxies) {
+    const id = proxyConnectionId(p.source);
+    const conn = await window.overdb.invoke('proxy:connection', p.source);
+    const had = useStore.getState().connections.some((c) => c.id === id);
+    if (!conn) {
+      if (had) {
+        await window.overdb.invoke('conn:close', id).catch(() => undefined);
+        await dropConnection(id);
+      }
+      continue;
+    }
+    await addConnection(conn);
+    if (had && retarget) {
+      await window.overdb.invoke('conn:close', id).catch(() => undefined);
+      const st = useStore.getState();
+      if (st.schemas[id] || (st.selection?.kind === 'connection' && st.selection.id === id)) {
+        await st.loadSchema(id, { force: true }).catch(() => undefined);
+      }
     }
   }
 }
@@ -101,16 +112,16 @@ export const useTickets = create<TicketsState>((set, get) => {
     loaded: false,
     baselines: [],
     tickets: [],
-    proxy: null,
+    proxies: [],
     helper: null,
-    clients: [],
+    clients: {},
     busy: {},
     error: null,
 
     async refresh() {
       const [r, helper] = await Promise.all([window.overdb.invoke('baseline:instances'), window.overdb.invoke('helper:status')]);
-      set({ loaded: true, baselines: r.baselines, tickets: r.tickets, proxy: r.proxy, helper });
-      void syncProxyConnection(false);
+      set({ loaded: true, baselines: r.baselines, tickets: r.tickets, proxies: r.proxies, helper });
+      void syncProxyConnections(r.proxies, false);
       // Branches were "ticket copies" once; their connections say so in
       // their names until renamed here.
       for (const t of r.tickets) {
@@ -122,6 +133,13 @@ export const useTickets = create<TicketsState>((set, get) => {
         }
         const c = useStore.getState().connections.find((x) => x.id === t.connectionId);
         if (c?.name.endsWith(' · ticket copy')) await patchConnection(c.id, { name: c.name.replace(/ · ticket copy$/, ' · branch') });
+        // A branch started by something other than its Start button — the
+        // proxy, on a service's first connection — may have moved to a free
+        // port; its connection follows, whatever started it.
+        if (c && t.port && c.port !== t.port) {
+          await window.overdb.invoke('conn:close', c.id).catch(() => undefined);
+          await patchConnection(c.id, { port: t.port });
+        }
         // Made before branches followed their source's repos.
         if (c && !c.branchOf) await patchConnection(c.id, { branchOf: t.sourceConnectionId, repoPaths: undefined });
       }
@@ -158,6 +176,19 @@ export const useTickets = create<TicketsState>((set, get) => {
       });
     },
 
+    async reset(id) {
+      await working(id, 'Resetting', async () => {
+        const conn = await window.overdb.invoke('ticket:reset', id);
+        // Who it logs in as, and with what — the rest of it is yours.
+        if (conn) await patchConnection(conn.id, { user: conn.user, secretSource: conn.secretSource, secretRef: conn.secretRef });
+        await get().refresh();
+        // Its tables are the base's again: what the window held is stale.
+        const t = get().tickets.find((x) => x.id === id);
+        const st = useStore.getState();
+        if (t && st.schemas[t.connectionId]) await st.loadSchema(t.connectionId, { force: true }).catch(() => undefined);
+      });
+    },
+
     async remove(id) {
       await working(id, 'Deleting', async () => {
         const res = await window.overdb.invoke('ticket:delete', id);
@@ -173,22 +204,23 @@ export const useTickets = create<TicketsState>((set, get) => {
       });
     },
 
-    async configure(next) {
-      await working('proxy', 'Applying', async () => {
-        const state = await window.overdb.invoke('proxy:configure', next);
-        set({ proxy: state });
-        await syncProxyConnection(false);
+    async configure(source, next) {
+      await working(`proxy:${source}`, 'Applying', async () => {
+        const state = await window.overdb.invoke('proxy:configure', { source, next });
+        const proxies = [...get().proxies.filter((p) => p.source !== source), state];
+        set({ proxies });
+        await syncProxyConnections(proxies, false);
       });
     },
 
-    async route(target) {
+    async route(source, target) {
       let dropped: number | null = null;
-      await working('proxy', 'Switching', async () => {
-        const res = await window.overdb.invoke('proxy:route', target);
+      await working(`proxy:${source}`, 'Switching', async () => {
+        const res = await window.overdb.invoke('proxy:route', { source, target });
         if (!res.ok) throw new Error(res.error);
         dropped = res.state.dropped;
         await get().refresh();
-        await syncProxyConnection(true);
+        await syncProxyConnections(get().proxies, true);
       });
       return dropped;
     },
@@ -203,15 +235,18 @@ export const useTickets = create<TicketsState>((set, get) => {
       });
     },
 
-    async loadClients() {
-      set({ clients: await window.overdb.invoke('proxy:clients') });
+    async loadClients(source) {
+      set({ clients: { ...get().clients, [source]: await window.overdb.invoke('proxy:clients', source) } });
     },
   };
 });
 
-/// Where services can be sent, in menu order: your own server, then each
-/// copy, oldest first so ⌥⌘1 stays the same copy as more are made.
+/// Where one base's services can be sent, in menu order: its own server,
+/// then each of its branches. Digits are shared across every base — ⌥⌘1 is
+/// the oldest branch anywhere — so a shortcut keeps meaning the same branch
+/// as more are made, whichever base it belongs to.
 export interface TargetItem {
+  source: string;
   target: ProxyTarget;
   label: string;
   detail: string;
@@ -220,23 +255,47 @@ export interface TargetItem {
   digit: number | null;
 }
 
-export function targetItems(s: Pick<TicketsState, 'tickets' | 'proxy'>): TargetItem[] {
-  const server = s.proxy?.config.server;
-  const copies = [...s.tickets].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+type Slice = Pick<TicketsState, 'tickets' | 'proxies'>;
+
+export function proxyFor(s: Pick<TicketsState, 'proxies'>, source: string | undefined): ProxyState | null {
+  return (source && s.proxies.find((p) => p.source === source)) || null;
+}
+
+/// Branches in the order their digits run: oldest first, across bases.
+function digitOrder(s: Slice): TicketState[] {
+  return [...s.tickets].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+}
+
+export function digitOf(s: Slice, ticketId: string): number | null {
+  const i = digitOrder(s).findIndex((t) => t.id === ticketId);
+  return i >= 0 && i < 9 ? i + 1 : null;
+}
+
+export function targetItems(s: Slice, source: string): TargetItem[] {
+  const server = proxyFor(s, source)?.config.server;
   return [
-    { target: { kind: 'server' }, label: 'Your own server', detail: server ? `${server.host}:${server.port} · all your data` : 'all your data', running: true, digit: 0 },
-    ...copies.map((t, i) => ({
-      target: { kind: 'ticket', id: t.id } as ProxyTarget,
-      label: t.name,
-      detail: t.running ? `branch · running · :${t.port}` : 'stopped · starts when chosen',
-      running: t.running,
-      digit: i < 9 ? i + 1 : null,
-    })),
+    { source, target: { kind: 'server' }, label: 'Its own server', detail: server ? `${server.host}:${server.port} · all its data` : 'all its data', running: true, digit: null },
+    ...digitOrder(s)
+      .filter((t) => t.sourceConnectionId === source)
+      .map((t) => ({
+        source,
+        target: { kind: 'ticket', id: t.id } as ProxyTarget,
+        label: t.name,
+        detail: t.running ? `branch · running · :${t.port}` : 'stopped · starts when chosen',
+        running: t.running,
+        digit: digitOf(s, t.id),
+      })),
   ];
 }
 
-export function isTarget(s: Pick<TicketsState, 'proxy'>, target: ProxyTarget): boolean {
-  const cur = s.proxy?.config.target;
+/// The branch a digit picks, wherever it lives.
+export function itemForDigit(s: Slice, digit: number): TargetItem | null {
+  const t = digitOrder(s)[digit - 1];
+  return t ? targetItems(s, t.sourceConnectionId).find((i) => i.target.kind === 'ticket' && i.target.id === t.id) ?? null : null;
+}
+
+export function isTarget(s: Pick<TicketsState, 'proxies'>, source: string, target: ProxyTarget): boolean {
+  const cur = proxyFor(s, source)?.config.target;
   if (!cur || cur.kind !== target.kind) return false;
   return target.kind === 'server' || (cur.kind === 'ticket' && cur.id === target.id);
 }
@@ -257,11 +316,21 @@ export function useTicketsLive(): void {
   }, []);
 }
 
-/// Send services somewhere, saying what happened.
+/// Send one base's services somewhere, saying what happened.
 export async function routeTo(item: TargetItem): Promise<void> {
-  const n = await useTickets.getState().route(item.target);
+  const n = await useTickets.getState().route(item.source, item.target);
   if (n === null) return;
   useStore.getState().toast(
     n > 0 ? `Closed ${n} open connection${n === 1 ? '' : 's'}; they reconnect to ${item.label}.` : `Services now reach ${item.label}.`,
   );
+}
+
+/// Every running proxy back to its own server: ⌥⌘0.
+export async function routeAllToServers(): Promise<void> {
+  const st = useTickets.getState();
+  let n = 0;
+  for (const p of st.proxies.filter((x) => x.running && x.config.target.kind === 'ticket')) {
+    n += (await st.route(p.source, { kind: 'server' })) ?? 0;
+  }
+  useStore.getState().toast(n > 0 ? `Closed ${n} open connection${n === 1 ? '' : 's'}; they reconnect to their own servers.` : 'Services now reach their own servers.');
 }

@@ -3,8 +3,8 @@ import type { AiTool, Cell, SeedSize, SeedStep } from '@shared/types';
 import type { GateCheck } from '@shared/seedGate';
 import { bareTicketKey } from '@shared/seedSql';
 import { useStore } from './store';
-import { useTickets } from './ticketsStore';
-import { PROXY_CONNECTION_ID } from './TicketSection';
+import { proxyFor, useTickets } from './ticketsStore';
+import { isProxyConnectionId } from '@shared/instances';
 import { useSeed, type SeedPhase } from './seedStore';
 import { RepoLinksPanel, RepoNames } from './RepoLinks';
 import { MapCard } from './MapCard';
@@ -84,7 +84,8 @@ export function SeedSheet({ connectionId }: { connectionId: string }): JSX.Eleme
   // use, or your own server.
   const tickets = useTickets();
   const setSheetNow = useStore((s) => s.setSheet);
-  const through = connectionId === PROXY_CONNECTION_ID;
+  const through = isProxyConnectionId(connectionId);
+  const viaSource = useStore((s) => s.connections.find((c) => c.id === connectionId)?.branchOf);
   const [fresh, setFresh] = useState(false);
   useEffect(() => {
     // Read the proxy and the branches now, not from the last poll: which one
@@ -93,13 +94,10 @@ export function SeedSheet({ connectionId }: { connectionId: string }): JSX.Eleme
   }, []);
   useEffect(() => {
     if (!through || !fresh) return;
-    const target = tickets.proxy?.config.target;
-    const to =
-      target?.kind === 'ticket'
-        ? tickets.tickets.find((t) => t.id === target.id)?.connectionId
-        : tickets.baselines[0]?.sourceConnectionId;
+    const target = proxyFor(tickets, viaSource)?.config.target;
+    const to = target?.kind === 'ticket' ? tickets.tickets.find((t) => t.id === target.id)?.connectionId : viaSource;
     setSheetNow(to ? { kind: 'seed', connectionId: to } : null);
-  }, [through, fresh, tickets, setSheetNow]);
+  }, [through, fresh, tickets, setSheetNow, viaSource]);
   const exists = useStore((s) => s.connections.some((c) => c.id === connectionId));
   if (through || !fresh) return null;
   if (!exists) {

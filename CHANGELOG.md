@@ -7,7 +7,22 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-04
+
 ### Added
+- The Services switch in the title bar shows every base's proxy at once —
+  a branch by name, a base on its own server dimmed — and What services
+  see stays one connection under its base as you switch, its own server
+  included.
+- Reset a branch to its base: its changes thrown away and its data taken
+  again from the base, in seconds, keeping its name, port and connection so
+  nothing pointed at it changes. After a base is rebuilt, each older branch
+  says "base is newer" and its Reset takes the fresh data. In the branch's
+  ⋯ menu in the sidebar, and in Branches.
+- What a branch is, where the question comes up: an ⓘ beside Branches in
+  the sidebar, the same words when there are none yet, and a Branches per
+  ticket section in How overdb works with the picture — server, base,
+  branches, and the proxy your services keep.
 - Seed for a ticket. Describe the data a ticket needs — or paste the ticket —
   and overdb investigates, proposes a plan in plain words, writes the SQL,
   and runs it in a transaction you commit or roll back after reading back
@@ -172,6 +187,45 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   failed, and the results say plainly when what came back is one server's
   answer and not a comparison. overdb checks again every twenty seconds
   while a member is down, and when the network or the window comes back.
+- Copy a shared server to this machine. A base can now be made from a
+  shared dev, sandbox or staging MySQL server, not only your own: "Copy
+  to this machine…" on its ⋯ menu, ⌘K, a set's Compare page, the Branches
+  sheet, and the Writes panel when writes go on for one. overdb reads it —
+  through its SSH tunnel and over its TLS, and only ever reads — and builds
+  a small copy here on a server of the same kind (MySQL for MySQL, MariaDB
+  for MariaDB). When this machine has none, the sheet says so from the
+  first step and installs it with Homebrew at a click; nothing is run as a
+  service. Branches clone it as they do any base. Never from production,
+  and never from an untagged server: there is no override.
+- Copy Postgres and Redshift to this machine. A Postgres server is
+  copied into a local Postgres; Redshift, which has no local edition, into
+  Postgres too — its distribution and sort keys and encodings left behind,
+  IDENTITY made an identity column, SUPER made jsonb, its clock functions
+  made now(). The same plan as a MySQL base: starting points, rows
+  following their parents, missing parents fetched, then keys, indexes,
+  foreign keys (NOT VALID) and views, with any the copy refuses listed.
+  Redshift's table sizes are read from svv_table_info. Postgres installs
+  from the copy sheet like MySQL does.
+- "Copy another server here" lists every connection that could be copied,
+  and the ones that cannot yet say why, rather than leaving them out.
+- A proxy per base. Each base has its own address for its services, so a
+  service that uses two databases is switched in two places — with no
+  branch chosen, a shared server's proxy forwards to that server itself.
+  The title bar's switch lists each base with its branches; ⌥⌘1–9 pick a
+  branch and move only its base's proxy, ⌥⌘0 sends every one back. The
+  proxy set up before moves onto the first base, as it was. A proxy for a
+  production connection is refused, and two cannot share a port.
+
+- A base build or a copy can keep going in the background. The sheet's
+  "Keep going in the background" closes it without stopping anything, and
+  a small panel at the bottom of the window follows the build — its step,
+  how long it has run, Stop — then offers to make a branch when it lands,
+  or the log when it fails. Starting the same one twice is refused.
+- Right-click a connection in the sidebar for what you can do with it:
+  open it or a new tab, seed it, create a base or copy it to this machine,
+  its branches and map, star, edit, duplicate or delete. Sets in the dock
+  have their own: compare, star, edit, delete. The menu opens at the
+  pointer and stays inside the window.
 
 ### Changed
 - The sidebar lists every connection under its environment, whether or
@@ -209,7 +263,87 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - Linking repos takes several at once: the folder picker allows more than
   one (hold ⌘), and each repo's schemas are suggested together.
 
+### Security
+- A base's server has a password. Its root (or `postgres`) account gets a
+  random one, kept in the system keychain, as the build's last step — or
+  yours, when you connect as that account — and a Postgres copy takes
+  password logins only. Until now any program on this machine could log in
+  to a running base or branch as its superuser and read the account hashes
+  it keeps for your services. Rebuild a base built before this to get it,
+  then reset its branches.
+- A base or branch server reads and writes no files from SQL
+  (`--secure-file-priv` on an empty directory), and a copied view whose
+  definition holds a second statement, or a column type that is not a type
+  name, is never run on the copy.
+- The proxy only takes a socket path in the temporary directory, removes
+  only a socket to take it, and checks the port and server it is given,
+  whether from the window or the background helper's socket — which is now
+  private from the moment it is created.
+- What services see keeps a server's "Verify full" certificate check
+  through the proxy, against the server's own name.
+- Password hashes printed as hex are kept out of build logs, as are any in
+  a skipped statement's error.
+- Stopping a leftover server only ever stops a MySQL, MariaDB or Postgres
+  server whose data directory is exactly the one being replaced.
+
 ### Fixed
+- A branch or base server left running by an earlier overdb is stopped
+  before its data is replaced or it is started again. A reset no longer
+  swaps files under a live server and goes on answering from the old data.
+- A base keeps the parent rows its kept rows name in columns the schema
+  never declared — a login's company, a deal's partner — not only those
+  behind real foreign keys.
+- A column holding another system's id (`remote_client_id`,
+  `crm_account_id`, `external_user_id`) is no longer read as a link to a
+  table here, so it no longer scopes a table by the wrong key.
+- A table you start from is no longer set aside for being empty: in a data
+  mart the tenant table can be empty while every table pointing at it holds
+  the tenant's rows.
+- Postgres and Redshift requests on one connection run one at a time.
+  Each runs in its own read-only transaction and a connection has one, so
+  two at once — discovery and the schema tree — interleaved, and one
+  refused statement failed the other with "current transaction is
+  aborted". Cancel, acks and close still go straight through. Discovery
+  also asks whether it may read a table before reading it.
+- The client search says where it looked, and "Look in another table"
+  searches any table or view you choose.
+- Links are found in a database that declares no keys — every Redshift
+  table, most data marts. A table's own `<table>_id` column, or a bare
+  `id`, is read as its key, so `client_id` and `partner_id` columns link to
+  `client` and `partner` and the tenant is found from them.
+- Finding the client you work in looks past the tenant's own table: when
+  it has no match, every other table keyed the same way is searched — a
+  data mart mirrors one client into several, like `acme_db_client` — and
+  each hit says which table it came from. A table is also keyed by the end
+  of its name (`acme_db_client.client_id`). Two levels of the same name
+  show their schema, and a server that gives no sizes shows "—", not 0 B.
+  Views are searched too, closest name first; results appear as each
+  table answers, grouped under the table they came from, tables with an
+  exact match on top, with a line saying which table is being read. And a table that follows a starting point follows the keys
+  you picked even when that row is not in the starting table itself, so a
+  client found in a mirror still scopes everything that carries its id.
+- A Postgres or Redshift database keeps its own recipe in the repo
+  (`.overdb/baseline-redshift-<database>.json`) instead of picking up the
+  MySQL one beside it, and a recipe whose engine or tenant does not match
+  the database is set aside with a note rather than applied.
+- A Postgres or Redshift statement that failed while overdb read the
+  catalog no longer leaves the connection broken. The read-only
+  transaction it ran in was left open and aborted, and everything after it
+  failed with "current transaction is aborted" until reconnecting.
+- Discovering a Redshift base works for a user without rights to
+  svv_table_info: sizes fall back to pg_class, and a table with no estimate
+  is counted. A table whose size is still unknown is no longer copied
+  whole as if it were small — it is left for you to decide.
+- A copy of an RDS or Aurora server creates every table the server has.
+  Those run with InnoDB's strict mode off, so a COMPACT table whose widest
+  row would pass 8 KB exists there but is refused by a local server's
+  default ("Row size too large"). The build now matches the server's strict
+  mode and default row format, as it already matched its sql_mode, and
+  says so in the log.
+- A base and its branches keep the server's settings across restarts.
+  overdb starts its servers with `--no-defaults`, which also skips what
+  `SET PERSIST` saved, so sql_mode was lost on every start; the settings
+  are now kept with the base and passed each time it or a branch starts.
 - A base built from MariaDB copies JSON columns. MariaDB keeps JSON as
   text flagged as JSON, which the driver parsed into objects and wrote back
   as `'[object Object]'` lists ("Operand should contain 1 column(s)"); the
@@ -473,7 +607,8 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - DynamoDB has no server-side read-only session. Use read-only IAM credentials
   for a durable production boundary.
 
-[Unreleased]: https://github.com/overcodelions/overdb/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/overcodelions/overdb/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/overcodelions/overdb/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/overcodelions/overdb/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/overcodelions/overdb/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/overcodelions/overdb/releases/tag/v0.1.0

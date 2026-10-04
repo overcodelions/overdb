@@ -2,7 +2,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { dropConnections, parseClients, proxyConnections, proxyRunning, setUpstream, startProxy, stopProxy } from './proxy';
+import { ByteProxy, parseClients } from './proxy';
 
 // Two stand-in servers that answer every line with their own name, so a
 // test can tell which one a connection reached.
@@ -33,8 +33,10 @@ function ask(opts: net.NetConnectOpts, text: string): Promise<{ reply: string; s
   });
 }
 
+let px = new ByteProxy();
 afterEach(async () => {
-  await stopProxy();
+  await px.stop();
+  px = new ByteProxy();
 });
 
 describe('proxy', () => {
@@ -42,8 +44,8 @@ describe('proxy', () => {
     const a = await namedServer('a');
     const port = await freePort();
     const sock = path.join(os.tmpdir(), `overdb-proxy-test-${process.pid}.sock`);
-    await startProxy({ port, socket: sock, upstream: async () => ({ host: '127.0.0.1', port: a.port }) });
-    expect(proxyRunning()).toBe(true);
+    await px.start({ port, socket: sock, upstream: async () => ({ host: '127.0.0.1', port: a.port }) });
+    expect(px.running).toBe(true);
 
     const tcp = await ask({ host: '127.0.0.1', port }, 'select 1');
     expect(tcp.reply).toBe('a:select 1');
@@ -59,16 +61,15 @@ describe('proxy', () => {
     const b = await namedServer('b');
     const port = await freePort();
     let target = a.port;
-    await startProxy({ port, socket: null, upstream: async () => ({ host: '127.0.0.1', port: target }) });
+    await px.start({ port, socket: null, upstream: async () => ({ host: '127.0.0.1', port: target }) });
 
     const first = await ask({ host: '127.0.0.1', port }, 'x');
     expect(first.reply).toBe('a:x');
-    expect(proxyConnections()).toBe(1);
+    expect(px.connections).toBe(1);
     const closed = new Promise<void>((r) => first.socket.once('close', () => r()));
 
     target = b.port;
-    setUpstream(async () => ({ host: '127.0.0.1', port: target }));
-    expect(dropConnections()).toBe(1);
+    expect(px.drop()).toBe(1);
     await closed;
 
     const second = await ask({ host: '127.0.0.1', port }, 'y');
@@ -80,7 +81,7 @@ describe('proxy', () => {
 
   it('says plainly when the port is taken', async () => {
     const a = await namedServer('a');
-    await expect(startProxy({ port: a.port, socket: null, upstream: async () => ({ host: '127.0.0.1', port: 1 }) })).rejects.toThrow(
+    await expect(px.start({ port: a.port, socket: null, upstream: async () => ({ host: '127.0.0.1', port: 1 }) })).rejects.toThrow(
       /in use — most likely by your own server/,
     );
     await a.close();
@@ -91,11 +92,35 @@ describe('proxy', () => {
     const owner = net.createServer().listen(sock);
     await new Promise((r) => owner.once('listening', r));
     const port = await freePort();
-    await expect(startProxy({ port, socket: sock, upstream: async () => ({ host: '127.0.0.1', port: 1 }) })).rejects.toThrow(
+    await expect(px.start({ port, socket: sock, upstream: async () => ({ host: '127.0.0.1', port: 1 }) })).rejects.toThrow(
       /belongs to a running server/,
     );
-    expect(proxyRunning()).toBe(false);
+    expect(px.running).toBe(false);
     await new Promise<void>((r) => owner.close(() => r()));
+  });
+});
+
+describe('two proxies at once', () => {
+  it('each forwards to its own upstream, and stopping one leaves the other', async () => {
+    const a = await namedServer('a');
+    const b = await namedServer('b');
+    const other = new ByteProxy();
+    const [pa, pb] = [await freePort(), await freePort()];
+    await px.start({ port: pa, socket: null, upstream: async () => ({ host: '127.0.0.1', port: a.port }) });
+    await other.start({ port: pb, socket: null, upstream: async () => ({ host: '127.0.0.1', port: b.port }) });
+    const x = await ask({ host: '127.0.0.1', port: pa }, '1');
+    const y = await ask({ host: '127.0.0.1', port: pb }, '2');
+    expect([x.reply, y.reply]).toEqual(['a:1', 'b:2']);
+    x.socket.destroy();
+    y.socket.destroy();
+    await px.stop();
+    expect(other.running).toBe(true);
+    const z = await ask({ host: '127.0.0.1', port: pb }, '3');
+    expect(z.reply).toBe('b:3');
+    z.socket.destroy();
+    await other.stop();
+    await a.close();
+    await b.close();
   });
 });
 

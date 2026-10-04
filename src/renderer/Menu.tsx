@@ -1,4 +1,4 @@
-import { useEffect, useRef, type ReactNode } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 
 // A dropdown anchored under its trigger. The trigger and the panel sit in
 // one `relative` wrapper the caller provides; the panel positions itself
@@ -17,6 +17,7 @@ export function Dropdown({
   align = 'right',
   width = 300,
   role = 'menu',
+  at,
   children,
 }: {
   open: boolean;
@@ -25,16 +26,33 @@ export function Dropdown({
   align?: 'left' | 'right';
   width?: number;
   role?: 'menu' | 'dialog';
+  /// A context menu: opened where the pointer was rather than under a
+  /// trigger, and fixed to the window so a scrolling list cannot clip it.
+  at?: { x: number; y: number };
   children: ReactNode;
 }): JSX.Element | null {
   const panel = useRef<HTMLDivElement>(null);
+  // Kept inside the window: a menu opened near the bottom or right edge
+  // opens up or left instead of running off it.
+  const [placed, setPlaced] = useState<{ x: number; y: number } | null>(null);
+  useLayoutEffect(() => {
+    if (!open || !at) return setPlaced(null);
+    const r = panel.current?.getBoundingClientRect();
+    const w = r?.width ?? width;
+    const h = r?.height ?? 0;
+    setPlaced({
+      x: Math.max(4, Math.min(at.x, window.innerWidth - w - 4)),
+      y: at.y + h + 4 > window.innerHeight ? Math.max(4, at.y - h) : at.y,
+    });
+  }, [open, at?.x, at?.y]);
 
   useEffect(() => {
     if (!open) return;
     const onDown = (e: MouseEvent) => {
       // The wrapper holds the trigger too; a click on it toggles through
       // its own handler, and closing here first would reopen it.
-      const wrapper = panel.current?.parentElement;
+      // A context menu has no trigger to spare: anything outside it closes it.
+      const wrapper = at ? panel.current : panel.current?.parentElement;
       if (wrapper && !wrapper.contains(e.target as Node)) onClose();
     };
     const onKey = (e: KeyboardEvent) => {
@@ -49,7 +67,7 @@ export function Dropdown({
       window.removeEventListener('mousedown', onDown);
       window.removeEventListener('keydown', onKey, true);
     };
-  }, [open, onClose]);
+  }, [open, onClose, at]);
 
   // A menu opened from the keyboard should be usable from the keyboard.
   useEffect(() => {
@@ -76,8 +94,8 @@ export function Dropdown({
       role={role}
       aria-label={label}
       onKeyDown={onKeyDown}
-      style={{ width }}
-      className={`absolute top-full mt-1.5 z-40 ${align === 'right' ? 'right-0' : 'left-0'} rounded-lg border border-card bg-surface-elevated shadow-2xl shadow-black/40 ${
+      style={at ? { width, left: (placed ?? at).x, top: (placed ?? at).y, visibility: placed ? 'visible' : 'hidden' } : { width }}
+      className={`${at ? 'fixed z-50' : `absolute top-full mt-1.5 z-40 ${align === 'right' ? 'right-0' : 'left-0'}`} rounded-lg border border-card bg-surface-elevated shadow-2xl shadow-black/40 ${
         role === 'menu' ? 'p-1 flex flex-col gap-px' : 'p-3.5'
       }`}
     >

@@ -156,6 +156,10 @@ export interface Connection {
   /// private CA; `sslCert`/`sslKey` are how CockroachDB and mutual-TLS
   /// Postgres identify you INSTEAD of a password.
   sslRootCert?: string;
+  /// The name its certificate is checked against when that is not `host` —
+  /// overdb's own window through a proxy reaches 127.0.0.1, and the
+  /// certificate names the server behind it.
+  tlsServerName?: string;
   sslCert?: string;
   sslKey?: string;
   /// Reach the database through an SSH bastion. See src/shared/sshTunnel.ts:
@@ -878,6 +882,10 @@ export interface IPCInvokeMap {
     | { ok: true; tables: number; links: number; dropped: number; leftOut: number; failures: string[] }
     | { ok: false; error: string };
   'map:cancel': (jobId: string) => void;
+  /// Forget the map: its file, and the links a saved base recipe took from
+  /// it, so the next base plans from the names alone until it is mapped
+  /// again. `links` is how many recipe links went with it.
+  'map:clear': (connectionId: string) => { ok: true; links: number } | { ok: false; error: string };
   /// The whole map, for the Map pane, the diagram and a base. Null when
   /// there is none yet.
   'map:read': (connectionId: string) => import('./dbMap').DbMap | null;
@@ -962,7 +970,18 @@ export interface IPCInvokeMap {
   'baseline:cancelReadCode': (jobId: string) => void;
   /// Name a baseline; a rebuild keeps the name.
   'baseline:rename': (args: { id: string; label: string }) => void;
-  'baseline:instances': () => { baselines: BaselineRecord[]; tickets: TicketState[]; proxy: ProxyState };
+  /// What a copy of a server at this version needs here: the binary it would
+  /// be built with, or the Homebrew formula that would provide one.
+  'baseline:serverFor': (args: { engine: string; serverVersion: string }) => {
+    flavor: 'mysql' | 'mariadb' | 'postgres' | null;
+    version: string;
+    found: { path: string; version: string } | null;
+    formula: string | null;
+    brew: boolean;
+  };
+  /// `brew install` that formula; progress as `baseline:installProgress`.
+  'baseline:installServer': (args: { jobId: string; formula: string }) => { ok: boolean; error?: string };
+  'baseline:instances': () => { baselines: BaselineRecord[]; tickets: TicketState[]; proxies: ProxyState[] };
   /// A ticket copy: a clone of a baseline, started on its own port, and the
   /// connection that reaches it — for the window to add to its list.
   'ticket:create': (args: { baselineId: string; name: string; note: string }) =>
@@ -971,20 +990,23 @@ export interface IPCInvokeMap {
   'ticket:start': (id: string) => { ok: true; ticket: TicketState } | { ok: false; error: string };
   'ticket:stop': (id: string) => void;
   /// Stops it, deletes its data, and says which connection to remove.
+  'ticket:reset': (id: string) => Connection | null;
   'ticket:delete': (id: string) => { connectionId: string | null };
   /// A branch's connection, made again from its record — for one that went
   /// missing from the connection list. Null when its source is gone.
   'ticket:connection': (id: string) => Connection | null;
-  /// The proxy: on or off, its port and socket, where your own server is.
-  'proxy:configure': (next: Partial<ProxyConfig> & { enabled?: boolean }) => ProxyState;
-  /// Send new connections somewhere else and close the open ones.
-  'proxy:route': (target: ProxyTarget) =>
+  /// One base's proxy, by its source connection: on or off, its port and
+  /// socket, where its own server is. Refused for a production source.
+  'proxy:configure': (args: { source: string; next: Partial<ProxyConfig> & { enabled?: boolean } }) => ProxyState;
+  /// Send one base's new connections somewhere else and close its open ones.
+  'proxy:route': (args: { source: string; target: ProxyTarget }) =>
     | { ok: true; state: ProxyState & { dropped: number } }
     | { ok: false; error: string };
-  'proxy:clients': () => ProxyClient[];
-  /// "Services see · PROJ-123": a read-only connection to the proxy, to
-  /// query what services reach. Null while the proxy is off.
-  'proxy:connection': () => Connection | null;
+  'proxy:clients': (source: string) => ProxyClient[];
+  /// "Services see · PROJ-123": a read-only connection to one proxy, to
+  /// query what its services reach. Null while it is off, or while a
+  /// shared server's proxy points at that server itself.
+  'proxy:connection': (source: string) => Connection | null;
   /// The background helper (src/helper/index.ts): whether it is installed
   /// and answering. Enabling installs a LaunchAgent and hands it the proxy
   /// and the copies; disabling removes it and takes them back.
@@ -1040,6 +1062,7 @@ export type MainToRendererEvent =
   | { kind: 'map:progress'; jobId: string; repo: string | null; step: { kind: string; text: string } }
   /// A line of a baseline build's progress.
   | { kind: 'baseline:progress'; jobId: string; progress: BuildProgress }
+  | { kind: 'baseline:installProgress'; jobId: string; line: string }
   | { kind: 'baseline:codeStep'; jobId: string; step: SeedStep }
   /// A menu item the window has to carry out — opening a help sheet, the
   /// palette. See src/main/menu.ts.

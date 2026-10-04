@@ -8,6 +8,7 @@ import { sortRows } from '@shared/sortRows';
 import { previewUpdate } from '@shared/rowEdit';
 import { bindFor, paramSlots, previewBound, resolveParams, unfilledParams } from '@shared/params';
 import { useStore } from './store';
+import { useBuilds } from './buildsStore';
 import { useFanout } from './fanoutStore';
 import { useSeed } from './seedStore';
 import { useBaseline } from './baselineStore';
@@ -861,6 +862,11 @@ export function subscribeToMainEvents(): () => void {
     }
     if (event.kind === 'baseline:progress') {
       useBaseline.getState().progress(event.jobId, event.progress);
+      useBuilds.getState().progress(event.jobId, event.progress);
+      return;
+    }
+    if (event.kind === 'baseline:installProgress') {
+      useBaseline.setState((st) => (st.install?.jobId === event.jobId ? { install: { ...st.install, line: event.line } } : {}));
       return;
     }
     if (event.kind === 'seed:step') {

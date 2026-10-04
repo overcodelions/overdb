@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import type { Connection, EnvKind } from '@shared/types';
 import { variantLabel } from '@shared/engines';
+import { isOverdbConnection } from '@shared/instances';
 import { useStore } from './store';
 import { RepoNames } from './RepoLinks';
 import { MapCard } from './MapCard';
@@ -30,7 +31,9 @@ export function EnvSetForm({
   suggested?: { name: string; memberIds: string[]; baselineId: string };
   onDone(): void;
 }): JSX.Element {
-  const connections = useStore((s) => s.connections);
+  const everything = useStore((s) => s.connections);
+  // Branches and proxy windows are overdb's own; a set is for yours.
+  const connections = useMemo(() => everything.filter((c) => !isOverdbConnection(c)), [everything]);
   const envSets = useStore((s) => s.envSets);
   const saveEnvSet = useStore((s) => s.saveEnvSet);
   const existing = id ? envSets.find((e) => e.id === id) : undefined;
