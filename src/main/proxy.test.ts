@@ -40,7 +40,8 @@ afterEach(async () => {
 });
 
 describe('proxy', () => {
-  it('forwards byte for byte to the current upstream, over TCP and a socket', async () => {
+  // A socket path is the macOS and Linux take-over; Windows has none.
+  it.skipIf(process.platform === 'win32')('forwards byte for byte to the current upstream, over TCP and a socket', async () => {
     const a = await namedServer('a');
     const port = await freePort();
     const sock = path.join(os.tmpdir(), `overdb-proxy-test-${process.pid}.sock`);
@@ -87,7 +88,7 @@ describe('proxy', () => {
     await a.close();
   });
 
-  it('refuses a socket a running server answers on', async () => {
+  it.skipIf(process.platform === 'win32')('refuses a socket a running server answers on', async () => {
     const sock = path.join(os.tmpdir(), `overdb-proxy-owned-${process.pid}.sock`);
     const owner = net.createServer().listen(sock);
     await new Promise((r) => owner.once('listening', r));
