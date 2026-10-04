@@ -1,11 +1,14 @@
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { scanRepoSchemas, scanTableMentions } from './repoScan';
 import { suggestSchemas } from '../shared/repoLinks';
 
-const root = path.join(os.tmpdir(), `overdb-reposcan-${process.pid}`);
+let root = '';
+beforeAll(async () => {
+  root = await fs.mkdtemp(path.join(os.tmpdir(), 'overdb-reposcan-'));
+});
 const write = async (rel: string, text: string) => {
   await fs.mkdir(path.dirname(path.join(root, rel)), { recursive: true });
   await fs.writeFile(path.join(root, rel), text);

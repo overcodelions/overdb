@@ -37,6 +37,21 @@ async function* walk(root: string): AsyncGenerator<string> {
   }
 }
 
+/// A file's text when it is small enough to read, else ''. Sized and read
+/// through one handle, so the file measured is the file read.
+async function readSmall(file: string): Promise<string> {
+  const h = await fs.open(file, 'r').catch(() => null);
+  if (!h) return '';
+  try {
+    const stat = await h.stat();
+    return stat.size > MAX_BYTES ? '' : await h.readFile('utf-8');
+  } catch {
+    return '';
+  } finally {
+    await h.close().catch(() => undefined);
+  }
+}
+
 export async function scanRepoSchemas(repo: string, schemas: readonly string[]): Promise<Record<string, SchemaEvidence>> {
   const evidence: Record<string, SchemaEvidence> = Object.fromEntries(schemas.map((s) => [s, { config: 0, code: 0 }]));
   if (schemas.length === 0) return evidence;
@@ -62,9 +77,7 @@ export async function scanRepoSchemas(repo: string, schemas: readonly string[]):
   }
 
   const one = async (file: string) => {
-    const stat = await fs.stat(file).catch(() => null);
-    if (!stat || stat.size > MAX_BYTES) return;
-    const text = await fs.readFile(file, 'utf-8').catch(() => '');
+    const text = await readSmall(file);
     if (!any.test(text)) return;
     const isConfig = CONFIG.test(file);
     for (const t of tests) {
@@ -117,9 +130,7 @@ export async function scanTableMentions(repo: string, tables: readonly string[])
   }
 
   const one = async (file: string) => {
-    const stat = await fs.stat(file).catch(() => null);
-    if (!stat || stat.size > MAX_BYTES) return;
-    const text = await fs.readFile(file, 'utf-8').catch(() => '');
+    const text = await readSmall(file);
     const rel = path.relative(repo, file);
     const seen = new Set<string>();
     for (const tok of text.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? []) {

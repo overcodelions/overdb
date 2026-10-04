@@ -329,7 +329,7 @@ async function finishTables(target: Client, plan: BuildPlan, catalog: PgTable[],
       }
     }
     for (const c of t.columns) {
-      if (!/^nextval\(|"?identity"?\s*\(/i.test(c.defaultExpr ?? '')) continue;
+      if (!/^(nextval\(|"?identity"?\s*\()/i.test(c.defaultExpr ?? '')) continue;
       await target
         .query(`SELECT setval(pg_get_serial_sequence($1, $2), COALESCE((SELECT max(${q(c.name)}) FROM ${qt(ref)}), 0) + 1, false)`, [qt(ref), c.name])
         .catch(() => undefined);

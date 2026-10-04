@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
@@ -32,8 +33,9 @@ export async function loadMap(file: string): Promise<DbMap | null> {
 export async function saveMap(file: string, map: DbMap): Promise<void> {
   await fs.mkdir(path.dirname(file), { recursive: true });
   // Passes finish in parallel; each write gets its own temporary file.
-  const tmp = `${file}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
-  await fs.writeFile(tmp, JSON.stringify(map, null, 2));
+  const tmp = `${file}.${randomBytes(8).toString('hex')}.tmp`;
+  // Created new, never opened if something is already there, and yours alone.
+  await fs.writeFile(tmp, JSON.stringify(map, null, 2), { flag: 'wx', mode: 0o600 });
   await fs.rename(tmp, file);
 }
 

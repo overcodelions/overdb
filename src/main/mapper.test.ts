@@ -2,12 +2,15 @@ import { spawnSync } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { gitBehind, gitChanged, gitHead, loadMap, mapPath, saveMap } from './mapper';
 import { emptyMap } from '../shared/dbMap';
 import { mapPrompt } from './mapPrompts';
 
-const root = path.join(os.tmpdir(), `overdb-mapper-${process.pid}`);
+let root = '';
+beforeAll(async () => {
+  root = await fs.mkdtemp(path.join(os.tmpdir(), 'overdb-mapper-'));
+});
 afterAll(() => fs.rm(root, { recursive: true, force: true }));
 
 const git = (...args: string[]) => spawnSync('git', ['-C', root, ...args], { encoding: 'utf-8' });
