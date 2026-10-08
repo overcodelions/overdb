@@ -32,10 +32,24 @@ if (!fs.existsSync(root)) {
 }
 
 walk(root);
+
+// Every top-level folder the build writes has to be in the packaging list,
+// or the installed app is missing code it loads at runtime. v0.2.0 shipped
+// without dist/helper and dist/builder and crashed on launch.
+const packaged = new Set(
+  JSON.parse(fs.readFileSync('package.json', 'utf8'))
+    .build.files.map((pattern) => pattern.match(/^dist\/([^/*]+)\//)?.[1])
+    .filter(Boolean),
+);
+for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+  if (entry.isDirectory() && !packaged.has(entry.name)) {
+    failures.push(`dist/${entry.name}: built but not in package.json build.files, so the packaged app would not have it`);
+  }
+}
 if (failures.length) {
   console.error('Unsafe files found in the distributable tree:');
   for (const failure of failures) console.error(`- ${failure}`);
   process.exit(1);
 }
 
-console.log('Distributable tree contains no compiled tests or absolute user-home paths.');
+console.log('Distributable tree contains no compiled tests or absolute user-home paths, and every built folder is packaged.');

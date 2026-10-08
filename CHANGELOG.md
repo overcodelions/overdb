@@ -7,6 +7,8 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-08
+
 ### Added
 - Interface size, in Settings → General: 85% to 150%, scaling all text and
   controls. ⌘+ / ⌘− / ⌘0 (Ctrl on Windows and Linux) change it from
@@ -18,11 +20,19 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   strip with a solid PRODUCTION badge.
 
 ### Fixed
+- 0.2.0 did not open. The installers left out the background helper and the
+  baseline builder, so the app stopped at launch, before any window, and
+  each click on its icon left another invisible copy running. Both are
+  packaged again, and the build now fails if any part the app loads is
+  missing from the installer.
 - Going to another connection and back emptied the results pane. Each
   connection's last results now come back with it, and a statement still
   running on a connection you left keeps filling its own results there.
 - A statement still streaming rows on a connection you had clicked away
   from stopped after two chunks and its batch never finished.
+- On Windows, the rule that keeps `.env` files and secrets folders out of a
+  repo scan matched paths written with `/` only. It now holds for Windows
+  paths too.
 
 ## [0.2.0] - 2026-10-04
 
@@ -624,7 +634,8 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - DynamoDB has no server-side read-only session. Use read-only IAM credentials
   for a durable production boundary.
 
-[Unreleased]: https://github.com/overcodelions/overdb/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/overcodelions/overdb/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/overcodelions/overdb/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/overcodelions/overdb/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/overcodelions/overdb/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/overcodelions/overdb/compare/v0.1.0...v0.1.1
