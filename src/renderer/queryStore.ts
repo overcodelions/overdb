@@ -12,6 +12,7 @@ import { useBuilds } from './buildsStore';
 import { useFanout } from './fanoutStore';
 import { useSeed } from './seedStore';
 import { useBaseline } from './baselineStore';
+import { stepScale } from '@shared/uiScale';
 
 export type TabStatus = 'pending' | 'running' | 'done' | 'error' | 'cancelled';
 
@@ -162,7 +163,9 @@ interface QueryState {
   ): Promise<void>;
   ingest(event: MainToRendererEvent): void;
   clearLog(): void;
-  reset(): void;
+  /// The pane now shows `key`'s selection: park the results being left and
+  /// bring back the ones last seen there, if any.
+  reset(key: string | null): void;
 }
 
 /// Resolvers for the statement currently in flight, so the batch can run
@@ -171,10 +174,60 @@ const settle = new Map<string, () => void>();
 /// Outcomes of statements that belong to no tab — inline edits. Read once
 /// by the caller that started them, then dropped.
 const offTab = new Map<string, { affectedRows: number | null; error: string | null }>();
+/// The results of one selection: what the pane shows, or showed before you
+/// clicked somewhere else.
+interface View {
+  connectionId: string | null;
+  tabs: ResultTab[];
+  active: number;
+  running: boolean;
+}
+
+/// Which results are on screen. Every view has its own token, and a batch,
+/// a sort or an incoming chunk writes to the view it belongs to — on screen
+/// or parked. Writing by tab index into whatever is on screen put one
+/// connection's statement into another connection's results.
+type Token = object;
+let liveToken: Token = {};
+/// The selection the on-screen view belongs to.
+let shown: string | null = null;
+
+/// Results of the selections you have left, so going back to a connection
+/// shows what you last ran there instead of an empty pane. Oldest first;
+/// a handful is enough, and each can hold a row cap's worth per tab.
+const parked = new Map<string, View & { token: Token }>();
+const PARK_LIMIT = 8;
+
 /// Set the moment a cancel is requested, so the batch loop stops before
 /// starting the next statement. Without it, cancelling statement two of five
-/// simply moved on to statement three.
-let cancelledBatch = false;
+/// simply moved on to statement three. Per view: cancelling here must not
+/// stop a batch still finishing on a connection you have left.
+const cancelled = new WeakSet<Token>();
+
+function readView(token: Token): View | null {
+  if (token === liveToken) return useQuery.getState();
+  for (const p of parked.values()) if (p.token === token) return p;
+  return null;
+}
+
+/// Apply a change to the view `token` names, wherever it is now. A view
+/// that was dropped from the parked list takes nothing.
+function patchView(token: Token, fn: (v: View) => Partial<View>): void {
+  if (token === liveToken) {
+    useQuery.setState((st) => fn(st));
+    return;
+  }
+  for (const p of parked.values()) {
+    if (p.token === token) {
+      Object.assign(p, fn(p));
+      return;
+    }
+  }
+}
+
+function patchTabs(token: Token, fn: (tabs: ResultTab[]) => ResultTab[]): void {
+  patchView(token, (v) => ({ tabs: fn(v.tabs) }));
+}
 
 /// Fill a statement's placeholders from the value library, for THIS
 /// connection.
@@ -231,7 +284,10 @@ export const useQuery = create<QueryState>((set, get) => ({
     const statements = splitStatements(sql, engine);
     if (statements.length === 0) return;
 
-    cancelledBatch = false;
+    // This batch writes to the view it started in, even after you have
+    // clicked away to another connection and that view is parked.
+    const token = liveToken;
+    cancelled.delete(token);
     set({
       connectionId,
       tabs: statements.map((s, i) => blankTab(i, s.sql)),
@@ -245,9 +301,9 @@ export const useQuery = create<QueryState>((set, get) => ({
       const opened = await window.overdb.invoke('conn:open', connectionId);
       if (!opened.ok) {
         useStore.getState().setConnectError(connectionId, opened.error ?? 'Could not connect.');
-        set((st) => ({
+        patchView(token, (v) => ({
           running: false,
-          tabs: st.tabs.map((t, i) =>
+          tabs: v.tabs.map((t, i) =>
             i === 0 ? { ...t, status: 'error', error: opened.error ?? 'Could not connect.' } : t,
           ),
         }));
@@ -267,22 +323,20 @@ export const useQuery = create<QueryState>((set, get) => ({
     }
 
     for (const [i, statement] of statements.entries()) {
-      if (cancelledBatch) {
-        set((st) => ({
-          tabs: st.tabs.map((t, j) =>
-            j >= i && t.status === 'pending' ? { ...t, status: 'cancelled' } : t,
-          ),
-        }));
+      if (cancelled.has(token)) {
+        patchTabs(token, (tabs) =>
+          tabs.map((t, j) => (j >= i && t.status === 'pending' ? { ...t, status: 'cancelled' } : t)),
+        );
         break;
       }
       // Stop the batch at the first failure. Running statement three after
       // two blew up is how you get a confusing half-applied script.
-      if (get().tabs[i - 1]?.status === 'error') {
-        set((st) => ({
-          tabs: st.tabs.map((t, j) =>
+      if (readView(token)?.tabs[i - 1]?.status === 'error') {
+        patchTabs(token, (tabs) =>
+          tabs.map((t, j) =>
             j >= i ? { ...t, status: 'error', error: 'Skipped — an earlier statement failed.' } : t,
           ),
-        }));
+        );
         break;
       }
 
@@ -310,8 +364,10 @@ export const useQuery = create<QueryState>((set, get) => ({
       const bound = bindStatement(connectionId, statement.sql, engine);
       if (bound.error) {
         const message = bound.error;
+        patchTabs(token, (tabs) =>
+          tabs.map((t, j) => (j === i ? { ...t, status: 'error', error: message } : t)),
+        );
         set((st) => ({
-          tabs: st.tabs.map((t, j) => (j === i ? { ...t, status: 'error', error: message } : t)),
           log: st.log.map((l) =>
             l.id === logId
               ? { ...l, status: 'error' as TabStatus, error: message, durationMs: 0 }
@@ -331,8 +387,10 @@ export const useQuery = create<QueryState>((set, get) => ({
         write = Boolean(accepted.write);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
+        patchTabs(token, (tabs) =>
+          tabs.map((t, j) => (j === i ? { ...t, status: 'error', error: message } : t)),
+        );
         set((st) => ({
-          tabs: st.tabs.map((t, j) => (j === i ? { ...t, status: 'error', error: message } : t)),
           log: st.log.map((l) =>
             l.id === logId
               ? { ...l, status: 'error' as TabStatus, error: message, durationMs: Date.now() - started }
@@ -342,9 +400,11 @@ export const useQuery = create<QueryState>((set, get) => ({
         continue;
       }
 
+      patchView(token, (v) => ({
+        active: standing(v.active) ?? i,
+        tabs: v.tabs.map((t, j) => (j === i ? { ...t, runId, status: 'running' } : t)),
+      }));
       set((st) => ({
-        active: standing(st.active) ?? i,
-        tabs: st.tabs.map((t, j) => (j === i ? { ...t, runId, status: 'running' } : t)),
         log: st.log.map((l) =>
           l.id === logId
             ? {
@@ -370,7 +430,7 @@ export const useQuery = create<QueryState>((set, get) => ({
       // session log above is wiped by quitting; this is what answers "what
       // was that query I ran on Tuesday". Main decides what is worth
       // keeping (src/shared/history.ts) and does the fold.
-      const settled = get().tabs[i];
+      const settled = readView(token)?.tabs[i];
       void useStore.getState().recordRun({
         connectionId,
         connectionName:
@@ -385,35 +445,32 @@ export const useQuery = create<QueryState>((set, get) => ({
         write,
       });
 
-      set((st) => {
-        const tab = st.tabs[i];
-        const durationMs = tab?.durationMs ?? Date.now() - started;
-        return {
-          tabs: st.tabs.map((t, j) =>
-            j === i && t.durationMs === null ? { ...t, durationMs: Date.now() - started } : t,
-          ),
-          log: st.log.map((l) =>
-            l.id === logId
-              ? {
-                  ...l,
-                  status: tab?.status ?? ('done' as TabStatus),
-                  // A cancelled statement never reports a rowCount, but the
-                  // rows that got here before the cancel are the whole
-                  // reason to look at the log line.
-                  rowCount:
-                    tab?.status === 'cancelled'
-                      ? tab.rows.length
-                      : tab?.affectedRows ?? tab?.rowCount ?? null,
-                  durationMs,
-                  error: tab?.error ?? null,
-                }
-              : l,
-          ),
-        };
-      });
+      patchTabs(token, (tabs) =>
+        tabs.map((t, j) =>
+          j === i && t.durationMs === null ? { ...t, durationMs: Date.now() - started } : t,
+        ),
+      );
+      const tab = readView(token)?.tabs[i];
+      set((st) => ({
+        log: st.log.map((l) =>
+          l.id === logId
+            ? {
+                ...l,
+                status: tab?.status ?? ('done' as TabStatus),
+                // A cancelled statement never reports a rowCount, but the
+                // rows that got here before the cancel are the whole
+                // reason to look at the log line.
+                rowCount:
+                  tab?.status === 'cancelled'
+                    ? tab.rows.length
+                    : tab?.affectedRows ?? tab?.rowCount ?? null,
+                durationMs: tab?.durationMs ?? Date.now() - started,
+                error: tab?.error ?? null,
+              }
+            : l,
+        ),
+      }));
     }
-
-    set({ running: false });
 
     // A statement can move the session out from under the picker — `USE
     // other_db;` typed as SQL does exactly that, and so does a reconnect
@@ -423,8 +480,12 @@ export const useQuery = create<QueryState>((set, get) => ({
 
     // Land on the first tab that failed, if any — the error is the thing
     // you need to see, not the last successful result.
-    const failed = get().tabs.findIndex((t) => t.status === 'error');
-    if (failed >= 0 && standing(get().active) === null) set({ active: failed });
+    patchView(token, (v) => {
+      const failed = v.tabs.findIndex((t) => t.status === 'error');
+      return failed >= 0 && standing(v.active) === null
+        ? { running: false, active: failed }
+        : { running: false };
+    });
   },
 
   async cancel() {
@@ -432,7 +493,7 @@ export const useQuery = create<QueryState>((set, get) => ({
     if (!connectionId) return;
     // Flag first, then ask the server: the flag is what stops the batch
     // moving on, and it must be set even if the cancel round-trip is slow.
-    cancelledBatch = true;
+    cancelled.add(liveToken);
     const inFlight = tabs.find((t) => t.status === 'running');
     set((st) => ({
       tabs: st.tabs.map((t) => (t.status === 'running' ? { ...t, status: 'cancelled' } : t)),
@@ -465,6 +526,15 @@ export const useQuery = create<QueryState>((set, get) => ({
     set((st) => ({
       log: st.log.map((l) => (l.id === id ? { ...l, status: 'cancelled' as TabStatus } : l)),
     }));
+    // Its results are parked with the connection you left: stop that batch
+    // there too, the way Cancel would have had you still been looking.
+    const owner = [...parked.values()].find((p) => p.tabs.some((t) => t.runId === entry.runId));
+    if (owner) {
+      cancelled.add(owner.token);
+      patchTabs(owner.token, (tabs) =>
+        tabs.map((t) => (t.runId === entry.runId ? { ...t, status: 'cancelled' } : t)),
+      );
+    }
     await window.overdb.invoke('query:cancel', {
       connectionId: entry.connectionId,
       runId: entry.runId,
@@ -534,6 +604,7 @@ export const useQuery = create<QueryState>((set, get) => ({
       return { ok: false, affectedRows: null, error: 'Something else is running.' };
     }
 
+    const token = liveToken;
     const started = Date.now();
     const logId = crypto.randomUUID();
     set((st) => ({
@@ -572,8 +643,8 @@ export const useQuery = create<QueryState>((set, get) => ({
       outcome = { affectedRows: null, error: err instanceof Error ? err.message : String(err) };
     }
 
+    patchView(token, () => ({ running: false }));
     set((st) => ({
-      running: false,
       log: st.log.map((l) =>
         l.id === logId
           ? {
@@ -589,8 +660,9 @@ export const useQuery = create<QueryState>((set, get) => ({
 
     // Re-read rather than patching the cell in place: a trigger, a default or
     // a check constraint may have stored something else, and showing what you
-    // typed would be a claim overdb cannot make.
-    if (!outcome.error) await get().applyView(index, {}, engine);
+    // typed would be a claim overdb cannot make. Only while the tab is still
+    // on screen: `index` means nothing in another connection's results.
+    if (!outcome.error && token === liveToken) await get().applyView(index, {}, engine);
     return { ok: !outcome.error, ...outcome };
   },
 
@@ -615,10 +687,11 @@ export const useQuery = create<QueryState>((set, get) => ({
           )
         : deriveStatement(tab.sql, { filters, sort: sort && !sort.local ? sort : null }, engine);
 
+    const token = liveToken;
     const started = Date.now();
-    set((st) => ({
+    patchView(token, (v) => ({
       running: true,
-      tabs: st.tabs.map((t, j) =>
+      tabs: v.tabs.map((t, j) =>
         j === index
           ? {
               ...t,
@@ -642,8 +715,8 @@ export const useQuery = create<QueryState>((set, get) => ({
     const bound = bindStatement(connectionId, sql, engine);
     if (bound.error) {
       const message = bound.error;
-      set((st) => ({
-        tabs: st.tabs.map((t, j) => (j === index ? { ...t, status: 'error', error: message } : t)),
+      patchView(token, (v) => ({
+        tabs: v.tabs.map((t, j) => (j === index ? { ...t, status: 'error', error: message } : t)),
         running: false,
       }));
       return;
@@ -653,22 +726,22 @@ export const useQuery = create<QueryState>((set, get) => ({
       const { runId } = await window.overdb.invoke('query:run', {
         connectionId, sql: bound.sql, params: bound.params, origin: 'editor',
       });
-      set((st) => ({ tabs: st.tabs.map((t, j) => (j === index ? { ...t, runId } : t)) }));
+      patchTabs(token, (tabs) => tabs.map((t, j) => (j === index ? { ...t, runId } : t)));
       await new Promise<void>((resolve) => settle.set(runId, resolve));
       settle.delete(runId);
-      set((st) => ({
-        tabs: st.tabs.map((t, j) => (j === index ? { ...t, durationMs: Date.now() - started } : t)),
-      }));
+      patchTabs(token, (tabs) =>
+        tabs.map((t, j) => (j === index ? { ...t, durationMs: Date.now() - started } : t)),
+      );
     } catch (err) {
-      set((st) => ({
-        tabs: st.tabs.map((t, j) =>
+      patchTabs(token, (tabs) =>
+        tabs.map((t, j) =>
           j === index
             ? { ...t, status: 'error', error: err instanceof Error ? err.message : String(err) }
             : t,
         ),
-      }));
+      );
     } finally {
-      set({ running: false });
+      patchView(token, () => ({ running: false }));
     }
   },
 
@@ -685,9 +758,17 @@ export const useQuery = create<QueryState>((set, get) => ({
     if (useFanout.getState().runs.some((r) => r.runId === event.runId)) return;
     // The seed flow's statements, likewise — it reads its own results back.
     if (useSeed.getState().owns(event.runId)) return;
-    const { connectionId, tabs } = get();
-    const idx = tabs.findIndex((t) => t.runId === event.runId);
-    if (idx < 0) {
+    // The tab may be on screen or in a view you have left: a statement
+    // still streaming on a connection you clicked away from keeps filling
+    // its own results, and keeps being acked — unacked, the host stops at
+    // two chunks and the batch never finishes.
+    const owner = [{ token: liveToken, ...get() }, ...parked.values()].find((v) =>
+      v.tabs.some((t) => t.runId === event.runId),
+    );
+    const token = owner?.token;
+    const connectionId = owner?.connectionId;
+    const idx = owner ? owner.tabs.findIndex((t) => t.runId === event.runId) : -1;
+    if (!token || idx < 0) {
       // A statement no tab owns — an inline edit, which reports through its
       // own path. It still has to release whoever is waiting on it, or the
       // edit hangs forever on a promise nothing will settle.
@@ -720,13 +801,13 @@ export const useQuery = create<QueryState>((set, get) => ({
       // needs to accumulate into a ref/buffer outside the store and swap
       // the reference into state on a throttled cadence, which is a bigger
       // change than this pass makes.
-      set((st) => ({
-        tabs: st.tabs.map((t, j) =>
+      patchTabs(token, (tabs) =>
+        tabs.map((t, j) =>
           j === idx && t.status !== 'cancelled'
             ? { ...t, columns: event.columns ?? t.columns, rows: t.rows.concat(event.rows) }
             : t,
         ),
-      }));
+      );
       // Acking is what applies backpressure: the host holds at two unacked
       // chunks, so a fast server cannot outrun this render.
       if (connectionId) {
@@ -738,8 +819,8 @@ export const useQuery = create<QueryState>((set, get) => ({
     }
 
     if (event.kind === 'query:done') {
-      set((st) => ({
-        tabs: st.tabs.map((t, j) =>
+      patchTabs(token, (tabs) =>
+        tabs.map((t, j) =>
           j === idx && t.status !== 'cancelled'
             ? {
                 ...t,
@@ -752,25 +833,50 @@ export const useQuery = create<QueryState>((set, get) => ({
               }
             : t,
         ),
-      }));
+      );
     } else if (event.kind === 'query:error') {
       // A cancel is usually reported by the server as an error — Postgres
       // says "canceling statement due to user request" — and showing a red
       // failure for something you did on purpose is a lie about what
       // happened.
-      set((st) => ({
-        tabs: st.tabs.map((t, j) =>
+      patchTabs(token, (tabs) =>
+        tabs.map((t, j) =>
           j === idx && t.status !== 'cancelled'
             ? { ...t, status: 'error', error: event.message }
             : t,
         ),
-      }));
+      );
     }
     settle.get(event.runId)?.();
   },
 
-  reset() {
-    set({ tabs: [], active: pendingPane ?? 0, running: false });
+  reset(key) {
+    if (key === shown) {
+      if (pendingPane !== null) set({ active: pendingPane });
+      pendingPane = null;
+      return;
+    }
+    // Park what you are leaving, still running or not: going back to a
+    // connection shows what you last ran there, and a batch still going
+    // keeps writing into it.
+    const st = get();
+    if (shown !== null && st.tabs.length > 0) {
+      parked.delete(shown);
+      parked.set(shown, {
+        token: liveToken, connectionId: st.connectionId, tabs: st.tabs, active: st.active, running: st.running,
+      });
+      while (parked.size > PARK_LIMIT) parked.delete(parked.keys().next().value!);
+    }
+    const back = key !== null ? parked.get(key) : undefined;
+    if (key !== null) parked.delete(key);
+    shown = key;
+    liveToken = back?.token ?? {};
+    set({
+      connectionId: back?.connectionId ?? null,
+      tabs: back?.tabs ?? [],
+      active: pendingPane ?? back?.active ?? 0,
+      running: back?.running ?? false,
+    });
     pendingPane = null;
   },
 }));
@@ -816,6 +922,13 @@ function runMenuCommand(command: MenuCommand): void {
       return;
     case 'sample':
       void st.openSample();
+      return;
+    case 'zoomIn':
+    case 'zoomOut':
+    case 'zoomReset':
+      st.saveSettings({
+        uiScale: command === 'zoomReset' ? 1 : stepScale(st.settings.uiScale, command === 'zoomIn' ? 1 : -1),
+      });
       return;
     case 'closeTab':
       // Only the editor has tabs. Behind a sheet, the palette or a confirm,
