@@ -3,7 +3,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { LocalRuntime, readRecords } from './runtime';
+import { LocalRuntime, UNPRIMED_NOTE, readRecords, type LoginPrimer } from './runtime';
 
 function namedServer(name: string): Promise<{ port: number; close(): Promise<void> }> {
   return new Promise((resolve) => {
@@ -81,5 +81,60 @@ describe('a proxy per base', () => {
     const b = await rt.configureProxy('B', { enabled: true, port, socket: null, server: { host: '127.0.0.1', port: 1 } });
     expect(b.running).toBe(false);
     expect(b.error).toMatch(/already another base's proxy/);
+  });
+});
+
+describe('warming logins', () => {
+  function fakePrimer() {
+    const calls: string[] = [];
+    const primer: LoginPrimer = {
+      prime: async (source, to) => {
+        calls.push(`prime ${source} ${to.port}`);
+      },
+      forget: (to) => {
+        calls.push(`forget ${to ? to.port : 'all'}`);
+      },
+    };
+    return { primer, calls };
+  }
+
+  it('warms the server a connection is about to reach, before it reaches it', async () => {
+    const a = await namedServer('a');
+    cleanup.push(a.close);
+    const root = await rootWith({ baselines: [{ id: 'ba', sourceConnectionId: 'A', flavor: 'mysql' }], tickets: [] });
+    const { primer, calls } = fakePrimer();
+    const rt = new LocalRuntime(root, { primer });
+    cleanup.push(() => rt.shutdown());
+    const port = await freePort();
+    const state = await rt.configureProxy('A', { enabled: true, port, socket: null, server: { host: '127.0.0.1', port: a.port } });
+    expect(state.note).toBeUndefined();
+    expect(await ask(port, 'x')).toBe('a:x');
+    expect(calls).toEqual([`prime A ${a.port}`]);
+  });
+
+  it('forgets and warms your own server again when services are sent back to it', async () => {
+    const a = await namedServer('a');
+    cleanup.push(a.close);
+    const root = await rootWith({ baselines: [{ id: 'ba', sourceConnectionId: 'A', flavor: 'mysql' }], tickets: [] });
+    const { primer, calls } = fakePrimer();
+    const rt = new LocalRuntime(root, { primer });
+    cleanup.push(() => rt.shutdown());
+    const port = await freePort();
+    await rt.configureProxy('A', { enabled: true, port, socket: null, server: { host: '127.0.0.1', port: a.port } });
+    await rt.routeProxy('A', { kind: 'server' });
+    expect(calls).toEqual([`forget ${a.port}`, `prime A ${a.port}`]);
+  });
+
+  it('says so on a MySQL proxy that runs with no primer, as in the helper — and not on Postgres', async () => {
+    const root = await rootWith({
+      baselines: [{ id: 'ba', sourceConnectionId: 'A' }, { id: 'bb', sourceConnectionId: 'B', flavor: 'postgres' }],
+      tickets: [],
+    });
+    const rt = new LocalRuntime(root);
+    const states = await rt.proxyStates();
+    expect(states.find((s) => s.source === 'A')?.note).toBe(UNPRIMED_NOTE);
+    expect(states.find((s) => s.source === 'B')?.note).toBeUndefined();
+    rt.setPrimer(fakePrimer().primer);
+    expect((await rt.proxyStates()).find((s) => s.source === 'A')?.note).toBeUndefined();
   });
 });

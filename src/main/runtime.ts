@@ -117,13 +117,46 @@ export function checkProxyConfig(next: Partial<ProxyConfig>): void {
   }
 }
 
+/// What warms a MySQL server's login cache before a service's login reaches
+/// it — src/main/authPrimer.ts, in overdb. Only overdb has one: it needs
+/// passwords, and those are in the keychain, which only overdb reads.
+export interface LoginPrimer {
+  prime(source: string, to: proxy.Upstream): Promise<void>;
+  forget(to?: proxy.Upstream): void;
+}
+
+/// Said on a MySQL proxy that runs without a primer — in the background
+/// helper — so a first login that fails is not a mystery.
+export const UNPRIMED_NOTE =
+  'Logins are not warmed while the background helper runs this proxy. After a branch or your server starts, a service that does not allow public key retrieval fails its first login until something logs in once — open the branch in overdb, or set allowPublicKeyRetrieval=true.';
+
 export class LocalRuntime implements Runtime {
   private readonly proxies = new Map<string, proxy.ByteProxy>();
   private readonly problems = new Map<string, { error: string; conflict: ProxyState['conflict'] }>();
   /// Branches being reset or deleted: the proxy starts none of them.
   private readonly changing = new Set<string>();
+  private primer: LoginPrimer | null;
 
-  constructor(private readonly root: string) {}
+  constructor(
+    private readonly root: string,
+    opts: { primer?: LoginPrimer } = {},
+  ) {
+    this.primer = opts.primer ?? null;
+  }
+
+  setPrimer(primer: LoginPrimer | null): void {
+    this.primer = primer;
+  }
+
+  /// A copy just started on this port: its login cache is empty. If a proxy
+  /// sends services to it, warm it now rather than at their first login.
+  private freshServer(r: Records, t: TicketRecord, port: number): void {
+    if (!this.primer) return;
+    const to = { host: '127.0.0.1', port };
+    this.primer.forget(to);
+    const e = r.proxies[t.sourceConnectionId];
+    if (e?.target.kind === 'ticket' && e.target.id === t.id) void this.primer.prime(t.sourceConnectionId, to);
+  }
 
   private proxyOf(source: string): proxy.ByteProxy {
     let p = this.proxies.get(source);
@@ -163,11 +196,14 @@ export class LocalRuntime implements Runtime {
         if (x) x.port = port;
       });
     }
+    this.freshServer(r, t, port);
     return { ...t, port, running: true };
   }
 
   async stopTicket(id: string): Promise<void> {
+    const port = instances.runningInstance(id)?.port;
     await instances.stop(id);
+    if (port) this.primer?.forget({ host: '127.0.0.1', port });
     const source = this.routedTo(await readRecords(this.root), id);
     if (source) this.proxies.get(source)?.drop();
   }
@@ -185,6 +221,7 @@ export class LocalRuntime implements Runtime {
         return source;
       });
       if (was) this.proxies.get(was)?.drop();
+      if (t.port) this.primer?.forget({ host: '127.0.0.1', port: t.port });
       await instances.stop(id);
       await instances.stopStray(t.datadir);
       await fs.rm(path.dirname(t.datadir), { recursive: true, force: true });
@@ -209,6 +246,7 @@ export class LocalRuntime implements Runtime {
     try {
       const source = this.routedTo(r, id);
       if (source) this.proxies.get(source)?.drop();
+      if (t.port) this.primer?.forget({ host: '127.0.0.1', port: t.port });
       await instances.stop(id);
       await instances.stopStray(t.datadir);
       await fs.rm(t.datadir, { recursive: true, force: true });
@@ -244,6 +282,8 @@ export class LocalRuntime implements Runtime {
     const { enabled: _enabled, configured, ...config } = proxyEntry(r, source);
     const p = this.proxies.get(source);
     const problem = this.problems.get(source);
+    // A base built before Postgres has no flavor, and is MySQL.
+    const flavor = r.baselines.find((b) => b.sourceConnectionId === source)?.flavor ?? 'mysql';
     return {
       source,
       config,
@@ -252,6 +292,7 @@ export class LocalRuntime implements Runtime {
       conflict: problem?.conflict ?? null,
       connections: p?.connections ?? 0,
       configured: !!configured,
+      ...(!this.primer && flavor === 'mysql' ? { note: UNPRIMED_NOTE } : {}),
     };
   }
 
@@ -275,7 +316,13 @@ export class LocalRuntime implements Runtime {
       const clash = Object.entries(all.proxies).find(([s, e]) => s !== source && e.enabled && e.port === cfg.port);
       try {
         if (clash) throw new Error(`Port ${cfg.port} is already another base's proxy. Give this one its own port.`);
-        await p.start({ port: cfg.port, socket: cfg.socket, upstream: () => this.upstream(source) });
+        await p.start({
+          port: cfg.port,
+          socket: cfg.socket,
+          upstream: () => this.upstream(source),
+          // Read at each connection, so a primer set later is used.
+          beforeForward: (to) => this.primer?.prime(source, to) ?? Promise.resolve(),
+        });
       } catch (err) {
         const error = err instanceof Error ? err.message : String(err);
         let conflict: ProxyState['conflict'] = null;
@@ -305,6 +352,16 @@ export class LocalRuntime implements Runtime {
     });
     if (target.kind === 'ticket' && !instances.runningInstance(target.id)) await this.startTicket(target.id);
     const dropped = this.proxies.get(source)?.drop() ?? 0;
+    // Services reconnect now, to the new target: warm it first. Your own
+    // server is forgotten first — switching back is when it may have
+    // restarted since it was last warmed. A branch's start already forgot.
+    if (this.primer) {
+      const to = await this.upstream(source).catch(() => null);
+      if (to) {
+        if (target.kind === 'server') this.primer.forget(to);
+        void this.primer.prime(source, to);
+      }
+    }
     return { ...this.stateOf(await readRecords(this.root), source), dropped };
   }
 

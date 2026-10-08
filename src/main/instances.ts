@@ -299,7 +299,9 @@ async function startNow(id: string, bin: Mysqld, datadir: string, port?: number,
         bin.path,
         // Loopback only, its socket in the temp directory, and no settings
         // file but its own data directory's.
-        ['-D', datadir, '-p', String(p), '-c', 'listen_addresses=127.0.0.1', '-c', `unix_socket_directories=${os.tmpdir()}`, '-c', 'logging_collector=off'],
+        // Connections: Postgres runs a process for each, and macOS allows a
+        // user 6,000 processes, so a thousand rather than MySQL's ten.
+        ['-D', datadir, '-p', String(p), '-c', 'listen_addresses=127.0.0.1', '-c', `unix_socket_directories=${os.tmpdir()}`, '-c', 'logging_collector=off', '-c', 'max_connections=1000'],
         { stdio: ['ignore', out!.fd, out!.fd], detached: false },
       )
     : spawn(
@@ -317,6 +319,10 @@ async function startNow(id: string, bin: Mysqld, datadir: string, port?: number,
       ...(flavorOf(bin) === 'mysql' ? ['--mysqlx=OFF', '--disable-log-bin'] : []),
       ...settingFlags(settings),
       '--innodb-buffer-pool-size=64M',
+      // Services behind the proxy open pools of their own, and 151 — the
+      // default — runs out. Each connection is a file, so those go up too.
+      '--max-connections=10000',
+      '--open-files-limit=30000',
       // No reading or writing files from SQL: a copy replays statements
       // from another server, and LOAD_FILE or INTO OUTFILE has no use here.
       `--secure-file-priv=${noFiles}`,

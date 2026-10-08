@@ -527,6 +527,14 @@ export function redactSecrets(sql: string): string {
 }
 
 const wire = transport();
+// A driver's socket error with no listener, or a stray rejection, would
+// otherwise end the process with nothing said; main would only see it go.
+const die = (err: unknown) => {
+  wire.send({ kind: 'failed', error: err instanceof Error ? err.message : String(err) });
+  setTimeout(() => process.exit(1), 50);
+};
+process.on('uncaughtException', die);
+process.on('unhandledRejection', die);
 wire.onMessage((req) => {
   if (req.op !== 'build' && req.op !== 'buildPostgres') return;
   const send = (progress: BuildProgress) => wire.send({ kind: 'progress', progress });

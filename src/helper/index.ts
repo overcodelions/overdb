@@ -41,6 +41,10 @@ async function main(): Promise<void> {
     process.exit(2);
   }
   fs.mkdirSync(root, { recursive: true });
+  // No login primer (src/main/authPrimer.ts): warming MySQL's login cache
+  // takes the accounts' passwords, which are in overdb's keychain store, and
+  // this plain node process has no keychain. Its proxies say so in their
+  // state, rather than leaving a first login to fail unexplained.
   const runtime = new LocalRuntime(root);
   const sock = helperSocket(root);
   fs.rmSync(sock, { force: true });
