@@ -34,6 +34,7 @@ export function ConnectFailure({
     port: conn.port,
     user: conn.user,
     database: conn.database,
+    branch: !!conn.branchOf,
   });
   // Fixes the form can apply are behind its button; this only names them.
   const fixable = d.fixes.filter((f) => f.set);

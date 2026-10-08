@@ -12,6 +12,7 @@ import { useBuilds } from './buildsStore';
 import { useFanout } from './fanoutStore';
 import { useSeed } from './seedStore';
 import { useBaseline } from './baselineStore';
+import { useTickets } from './ticketsStore';
 import { stepScale } from '@shared/uiScale';
 
 export type TabStatus = 'pending' | 'running' | 'done' | 'error' | 'cancelled';
@@ -945,6 +946,15 @@ export function subscribeToMainEvents(): () => void {
     // main store so the sidebar can render it.
     if (event.kind === 'conn:state') {
       useStore.getState().setConnState(event.connectionId, event.state);
+      return;
+    }
+    if (event.kind === 'ticket:started') {
+      // Main saved the port; ours must match, or our next save puts the old
+      // one back. Then the sidebar and the Services switch say it is running.
+      useStore.setState((s) => ({
+        connections: s.connections.map((c) => (c.id === event.connectionId ? { ...c, port: event.port } : c)),
+      }));
+      void useTickets.getState().refresh().catch(() => undefined);
       return;
     }
     if (event.kind === 'menu') {

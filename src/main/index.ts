@@ -550,9 +550,32 @@ function registerIpc(): void {
     Store.dropBuffers(connectionId);
   });
 
-  ipcMain.handle('conn:open', async (_e, connectionId: string) => {
-    const conn = Store.load().connections.find((c) => c.id === connectionId);
+  ipcMain.handle('conn:open', async (_e, connectionId: string, opts?: { start?: boolean }) => {
+    let conn = Store.load().connections.find((c) => c.id === connectionId);
     if (!conn) return { ok: false, error: 'No such connection.' };
+    // A stopped branch starts here: Connect, Run, or just opening it is all
+    // it takes. Before, it dialled the port the branch last had, found
+    // nothing there, and suggested port 5432.
+    if (opts?.start !== false) {
+      const branch = (await baselines.tickets().catch(() => [])).find((t) => t.connectionId === connectionId);
+      if (branch && !branch.running) {
+        try {
+          const started = await baselines.startTicket(branch.id);
+          if (started.port !== conn.port) {
+            conn = { ...conn, port: started.port };
+            Store.saveConnections(Store.load().connections.map((c) => (c.id === connectionId ? { ...c, port: started.port } : c)));
+          }
+          mainWindow?.webContents.send('main:event', {
+            kind: 'ticket:started', ticketId: branch.id, connectionId, port: started.port,
+          });
+        } catch (err) {
+          return {
+            ok: false,
+            error: `The branch ${branch.name} is stopped, and it could not be started: ${err instanceof Error ? err.message : String(err)}`,
+          };
+        }
+      }
+    }
     try {
       const spec = await resolveWithTunnel(conn, connectionId);
       const ping = (await db.openConnection(connectionId, spec)) as {

@@ -37,6 +37,8 @@ export interface DiagnosisInput {
   host?: string;
   port?: number;
   database?: string;
+  /// One of overdb's branches: a server overdb runs, on a port it chose.
+  branch?: boolean;
 }
 
 const DEFAULT_PORT: Partial<Record<Engine, number>> = { postgres: 5432, mysql: 3306 };
@@ -139,6 +141,17 @@ export function diagnose(input: DiagnosisInput): ConnectDiagnosis {
       cause: `${input.host ?? 'That hostname'} does not resolve from this machine.`,
       fixes: [
         { label: 'Check the host name', detail: 'A typo, or a name that only resolves inside a VPN or private zone you are not on.' },
+      ],
+    };
+  }
+  if (/ECONNREFUSED/i.test(e) && input.branch) {
+    // overdb chose the port and runs the server; the standard port or a
+    // tunnel is never the answer, and connecting starts it.
+    return {
+      cause: `This branch's server is not running on ${where}.`,
+      fixes: [
+        { label: 'Try again', detail: 'Connecting starts a stopped branch.' },
+        { label: 'Start it from the sidebar', detail: 'If it stops again, Branches and proxies shows why.' },
       ],
     };
   }

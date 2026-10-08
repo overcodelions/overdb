@@ -54,13 +54,18 @@ export function ServicesChip(): JSX.Element | null {
     connections.find((c) => c.id === source)?.name ?? t.baselines.find((b) => b.sourceConnectionId === source)?.sourceName ?? 'a base';
   const currentOf = (p: ProxyState) => targetItems(t, p.source).find((i) => isTarget(t, p.source, i.target));
   const onBranch = live.filter((p) => p.config.target.kind === 'ticket');
-  const starting = onBranch.some((p) => !currentOf(p)?.running);
+  // A branch the proxy points at that is not running. It starts at a
+  // service's first connection, or here with Start — "starting" is said only
+  // while it actually is.
+  const stopped = onBranch.filter((p) => !currentOf(p)?.running);
+  const idOf = (p: ProxyState) => (p.config.target.kind === 'ticket' ? p.config.target.id : '');
+  const starting = stopped.some((p) => !!t.busy[idOf(p)]);
   const helperDown = !!t.helper?.installed && !t.helper.running;
   const background = !!t.helper?.installed && !!t.helper.running;
 
   const tone = live.length === 0
     ? 'border-dashed border-ink-faint/50 text-ink-muted hover:text-ink'
-    : starting || helperDown
+    : stopped.length > 0 || helperDown
       ? 'border-warn/50 bg-warn/10 text-warn-strong'
       : onBranch.length > 0
         ? 'border-accent/60 bg-accent/15 text-ink'
@@ -102,12 +107,27 @@ export function ServicesChip(): JSX.Element | null {
         ) : (
           <span className="font-semibold">{label}</span>
         )}
-        {starting && <span className="text-warn-strong">· starting</span>}
+        {stopped.length > 0 && <span className="text-warn-strong">· {starting ? 'starting' : 'stopped'}</span>}
         <span className="text-ink-muted" aria-hidden="true">▾</span>
       </button>
       <Dropdown open={open} onClose={() => setOpen(false)} label="What your services connect to" width={360}>
         {live.length > 0 ? (
           <>
+            {stopped.length > 0 && (
+              <>
+                <MenuItem
+                  icon={<span className="text-warn-strong"><PowerIcon /></span>}
+                  label={starting ? 'Starting…' : `Start ${stopped.length === 1 ? currentOf(stopped[0])?.label ?? 'the branch' : `${stopped.length} branches`}`}
+                  detail="Your services reach it straight away, rather than waiting on their first connection"
+                  disabled={starting}
+                  onSelect={() => {
+                    setOpen(false);
+                    for (const p of stopped) void t.start(idOf(p));
+                  }}
+                />
+                <MenuDivider />
+              </>
+            )}
             {live.map((p, n) => (
               <div key={p.source} className={n > 0 ? 'mt-1 pt-1 border-t border-card' : ''}>
                 <div className="px-2.5 pt-1.5 pb-1.5">
