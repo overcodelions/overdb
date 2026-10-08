@@ -7,6 +7,24 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-10-08
+
+### Fixed
+- A service's first login to a MySQL 8.4 or 9 branch through the proxy — or
+  to your own server after a restart — failed with "Public Key Retrieval is
+  not allowed" unless it used TLS or allowed fetching the server's key.
+  overdb now logs in once itself before forwarding, so the service's login
+  works without changing its settings. At most once per server a minute;
+  passwords stay in overdb. Proxies run by the background helper cannot do
+  this and say so.
+- A Postgres base build hung forever when a VPN dropped, and a builder crash
+  said only "The builder stopped before it finished". A dropped connection
+  now fails the build, and a crash reports its exit code and last output.
+- Services pointed at a branch ran out of connections. Copies now allow
+  10,000 MySQL connections and 1,000 Postgres connections.
+- The connect diagnosis recognises "Public Key Retrieval is not allowed"
+  and no longer suggests mysql_native_password, which MySQL 9 removed.
+
 ## [0.2.1] - 2026-10-08
 
 ### Added
@@ -634,7 +652,8 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - DynamoDB has no server-side read-only session. Use read-only IAM credentials
   for a durable production boundary.
 
-[Unreleased]: https://github.com/overcodelions/overdb/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/overcodelions/overdb/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/overcodelions/overdb/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/overcodelions/overdb/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/overcodelions/overdb/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/overcodelions/overdb/compare/v0.1.1...v0.1.2
