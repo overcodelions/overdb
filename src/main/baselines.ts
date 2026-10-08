@@ -26,8 +26,10 @@ import { baseOf, proxyConnectionId } from '../shared/instances';
 import type { BuilderMessage, BuilderRequest, Endpoint } from '../builder/index';
 import type { PgTable } from '../builder/pg';
 import * as instances from './instances';
-import { copySecret, deleteSecret, hasSecret, setSecret } from './secrets';
-import { LocalRuntime, readRecords, updateRecords, type Runtime } from './runtime';
+import { copySecret, deleteSecret, getSecret, hasSecret, setSecret } from './secrets';
+import { LocalRuntime, proxyEntry, readRecords, updateRecords, type Runtime } from './runtime';
+import { AuthPrimer, mysqlLogin, type Account } from './authPrimer';
+import { Store } from './store';
 import { HelperClient } from './helperClient';
 import * as helperInstall from './helperInstall';
 import { helperSocket } from '../helper/index';
@@ -49,8 +51,42 @@ let helperMode: boolean | null = null;
 async function rt(): Promise<Runtime> {
   if (helperMode === null) helperMode = await helperInstall.isInstalled(root());
   if (helperMode) return (helperClient ??= new HelperClient(helperSocket(root())));
-  return (local ??= new LocalRuntime(root()));
+  return (local ??= new LocalRuntime(root(), { primer }));
 }
+
+/// The accounts a MySQL base's proxy warms at its current target, read here
+/// in main and handed only to the primer — never logged, never over IPC.
+///
+/// The source connection's own login, when overdb keeps its password: the
+/// build gave a branch that account with the same password, and your own
+/// server has it already. On a branch, root too, with the password its base
+/// gave it — what a connection with no stored password uses. A password
+/// fetched at connect time (1Password, a command, IAM) is not fetched here:
+/// that would mean a prompt, or a command run, at a service's connection.
+async function primerAccounts(sourceId: string): Promise<Account[]> {
+  const r = await readRecords(root());
+  const base = r.baselines.find((b) => b.sourceConnectionId === sourceId);
+  const conn = Store.load().connections.find((c) => c.id === sourceId);
+  // caching_sha2_password is MySQL's; MariaDB and Postgres have no such cache.
+  if (!conn || conn.engine !== 'mysql' || (base?.flavor && base.flavor !== 'mysql')) return [];
+  const out: Account[] = [];
+  const stored = (!conn.secretSource || conn.secretSource === 'stored') && conn.secretRef ? getSecret(conn.secretRef) : undefined;
+  if (conn.user && stored) out.push({ user: conn.user, password: stored });
+  const target = proxyEntry(r, sourceId).target;
+  if (target.kind === 'ticket') {
+    const t = r.tickets.find((x) => x.id === target.id);
+    const ref = t ? baseOf(t, r.baselines)?.adminSecret : undefined;
+    const admin = ref && hasSecret(ref) ? getSecret(ref) : undefined;
+    if (admin && !out.some((a) => a.user === 'root')) out.push({ user: 'root', password: admin });
+  }
+  return out;
+}
+
+/// overdb's own primer, for the proxies it runs itself. The helper has none.
+const primer = new AuthPrimer({
+  accounts: (source) => primerAccounts(source),
+  login: mysqlLogin,
+});
 
 
 export async function helperStatus(): Promise<HelperStatus> {
@@ -70,6 +106,7 @@ export async function helperStatus(): Promise<HelperStatus> {
 export async function enableHelper(): Promise<HelperStatus> {
   const wasLocal = local;
   if (wasLocal) await wasLocal.shutdown();
+  primer.forget();
   await helperInstall.install({
     root: root(),
     script: path.join(__dirname, '..', 'helper', 'index.js'),
@@ -92,7 +129,9 @@ export async function disableHelper(): Promise<HelperStatus> {
   await helperInstall.uninstall(root());
   helperMode = false;
   helperClient = null;
-  local = new LocalRuntime(root());
+  // What the helper's servers were warmed with, overdb never knew.
+  primer.forget();
+  local = new LocalRuntime(root(), { primer });
   await local.resume().catch(() => undefined);
   return helperStatus();
 }
@@ -103,7 +142,14 @@ export async function disableHelper(): Promise<HelperStatus> {
 /// hundreds of thousands of rows, and none of that belongs on main's loop.
 function runBuilder(req: BuilderRequest, onProgress: (p: BuildProgress) => void, signal: { cancelled: boolean; kill?: () => void }): Promise<BuildReport> {
   return new Promise((resolve, reject) => {
-    const proc = utilityProcess.fork(path.join(__dirname, '..', 'builder', 'index.js'), [], { serviceName: 'overdb-baseline-builder' });
+    // stderr is kept: a crash the builder cannot catch — V8 out of memory,
+    // say — leaves its only account of itself there.
+    const proc = utilityProcess.fork(path.join(__dirname, '..', 'builder', 'index.js'), [], { serviceName: 'overdb-baseline-builder', stdio: 'pipe' });
+    let stderr = '';
+    proc.stderr?.on('data', (d: Buffer) => {
+      stderr = (stderr + d.toString('utf-8')).slice(-8_000);
+    });
+    proc.stdout?.resume();
     let settled = false;
     signal.kill = () => {
       if (!settled) proc.kill();
@@ -118,8 +164,11 @@ function runBuilder(req: BuilderRequest, onProgress: (p: BuildProgress) => void,
         reject(Object.assign(new Error(msg.error), msg.sql ? { sql: msg.sql } : {}));
       }
     });
-    proc.on('exit', () => {
-      if (!settled) reject(new Error(signal.cancelled ? 'Stopped.' : 'The builder stopped before it finished.'));
+    proc.on('exit', (code) => {
+      if (settled) return;
+      if (signal.cancelled) return reject(new Error('Stopped.'));
+      const said = stderr.trim();
+      reject(new Error(`The builder stopped before it finished (exit code ${code}).${said ? `\nIts last output:\n${said.split('\n').slice(-25).join('\n')}` : ''}`));
     });
     proc.postMessage(req);
   });

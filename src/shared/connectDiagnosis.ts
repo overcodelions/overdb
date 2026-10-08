@@ -249,12 +249,19 @@ export function diagnose(input: DiagnosisInput): ConnectDiagnosis {
       ],
     };
   }
-  if (/ER_NOT_SUPPORTED_AUTH_MODE|Client does not support authentication protocol/i.test(e)) {
+  // The last is Connector/J's word for the same thing.
+  if (/ER_NOT_SUPPORTED_AUTH_MODE|Client does not support authentication protocol|Public Key Retrieval is not allowed/i.test(e)) {
     return {
-      cause: "This account uses MySQL's caching_sha2_password, which needs an encrypted connection before it will send the password.",
+      cause: "This account uses MySQL's caching_sha2_password: the first login after the server starts sends the password itself, so it needs an encrypted connection or the server's public key.",
       fixes: [
         REQUIRE_SSL,
-        { label: 'Or change the account', detail: 'ALTER USER … IDENTIFIED WITH mysql_native_password, if TLS is not available.' },
+        // MySQL 9 removed mysql_native_password, so moving the account off
+        // caching_sha2_password is no longer a way out.
+        {
+          label: 'Or let the client fetch the server’s key',
+          detail:
+            'Without TLS, the first login after the server starts needs its RSA public key: allowPublicKeyRetrieval=true for Connector/J, --get-server-public-key for the mysql client. Through overdb’s proxy, overdb logs in once first, and the service needs neither.',
+        },
       ],
     };
   }

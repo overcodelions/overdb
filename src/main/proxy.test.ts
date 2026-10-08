@@ -1,7 +1,7 @@
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ByteProxy, parseClients } from './proxy';
 
 // Two stand-in servers that answer every line with their own name, so a
@@ -98,6 +98,88 @@ describe('proxy', () => {
     );
     expect(px.running).toBe(false);
     await new Promise<void>((r) => owner.close(() => r()));
+  });
+});
+
+describe('before forwarding', () => {
+  it('waits for the hook, with the upstream it resolved, before a byte reaches it', async () => {
+    const a = await namedServer('a');
+    const port = await freePort();
+    const order: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const before = vi.fn(async (to: { host: string; port: number }) => {
+      order.push(`hook ${to.port}`);
+      await gate;
+      order.push('hook done');
+    });
+    await px.start({ port, socket: null, upstream: async () => ({ host: '127.0.0.1', port: a.port }), beforeForward: before });
+    const pending = ask({ host: '127.0.0.1', port }, 'x').then((r) => {
+      order.push('reply');
+      return r;
+    });
+    await vi.waitFor(() => expect(before).toHaveBeenCalledTimes(1));
+    // Held: nothing reaches the server while the hook runs.
+    await new Promise((r) => setTimeout(r, 50));
+    expect(order).toEqual([`hook ${a.port}`]);
+    expect(px.connections).toBe(0);
+    release();
+    const r = await pending;
+    expect(r.reply).toBe('a:x');
+    expect(order).toEqual([`hook ${a.port}`, 'hook done', 'reply']);
+    r.socket.destroy();
+    await a.close();
+  });
+
+  it('forwards anyway when the hook fails, rejecting or throwing', async () => {
+    const a = await namedServer('a');
+    const port = await freePort();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    let n = 0;
+    await px.start({
+      port,
+      socket: null,
+      upstream: async () => ({ host: '127.0.0.1', port: a.port }),
+      beforeForward: (() => {
+        if (n++ === 0) return Promise.reject(new Error('warming failed'));
+        throw new Error('thrown outright');
+      }) as (to: { host: string; port: number }) => Promise<void>,
+    });
+    const one = await ask({ host: '127.0.0.1', port }, '1');
+    const two = await ask({ host: '127.0.0.1', port }, '2');
+    expect([one.reply, two.reply]).toEqual(['a:1', 'a:2']);
+    expect(warn.mock.calls.map((c) => String(c[0])).join('\n')).toMatch(/warming failed[\s\S]*thrown outright/);
+    warn.mockRestore();
+    one.socket.destroy();
+    two.socket.destroy();
+    await a.close();
+  });
+
+  it('closes a client still waiting on the hook when the target moves', async () => {
+    const a = await namedServer('a');
+    const port = await freePort();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let called = false;
+    await px.start({
+      port,
+      socket: null,
+      upstream: async () => ({ host: '127.0.0.1', port: a.port }),
+      beforeForward: async () => {
+        called = true;
+        await gate;
+      },
+    });
+    const socket = net.connect({ host: '127.0.0.1', port });
+    const closed = new Promise<void>((r) => socket.once('close', () => r()));
+    socket.on('error', () => undefined);
+    await vi.waitFor(() => expect(called).toBe(true));
+    px.drop();
+    await closed;
+    release();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(px.connections).toBe(0);
+    await a.close();
   });
 });
 

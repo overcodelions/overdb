@@ -101,6 +101,9 @@ export interface ProxyState {
   /// Whether it has ever been set up. Until it has, the window suggests
   /// settings from the connection the baselines came from.
   configured: boolean;
+  /// Something to know about how it runs — that logins are not warmed for
+  /// MySQL's caching_sha2_password, when the background helper runs it.
+  note?: string;
 }
 
 /// The spare port suggested for the proxy when your own server keeps its

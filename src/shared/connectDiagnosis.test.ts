@@ -138,6 +138,15 @@ describe('authentication', () => {
   it('knows caching_sha2 needs TLS before it will talk', () => {
     const d = diagnose({ ...my, ssl: 'disable', error: 'ER_NOT_SUPPORTED_AUTH_MODE: Client does not support authentication protocol requested by server' });
     expect(d.fixes[0].set).toEqual({ ssl: 'require' });
+    // MySQL 9 has no mysql_native_password to move the account to.
+    expect(JSON.stringify(d)).not.toMatch(/mysql_native_password/);
+    expect(d.fixes[1].detail).toMatch(/allowPublicKeyRetrieval=true/);
+    expect(d.fixes[1].detail).toMatch(/proxy/);
+  });
+
+  it('reads Connector/J’s refusal to fetch the key as the same thing', () => {
+    const d = diagnose({ ...my, ssl: 'disable', error: 'Public Key Retrieval is not allowed' });
+    expect(d.cause).toMatch(/caching_sha2_password/);
   });
 
   it('treats a bare pg_hba refusal as both a TLS and an auth question', () => {

@@ -18,6 +18,12 @@ import type { ProxyClient } from '../shared/instances';
 
 export type Upstream = { host: string; port: number };
 
+/// Something to do once a connection's destination is known and before a
+/// byte is forwarded to it — warming MySQL's login cache, for one. It may
+/// take its time, but it may not stop the connection: whatever it throws is
+/// logged and the bytes flow anyway.
+export type BeforeForward = (to: Upstream) => Promise<void>;
+
 interface Pair {
   client: net.Socket;
   upstream: net.Socket;
@@ -58,12 +64,28 @@ export class ByteProxy {
   private resolveUpstream: () => Promise<Upstream> = async () => {
     throw new Error('The proxy has nowhere to send connections.');
   };
+  private beforeForward: BeforeForward | null = null;
   private readonly pairs = new Set<Pair>();
+  /// Clients held while `beforeForward` runs: not carried yet, but a switch
+  /// of target must close them too, or they would reach the old one.
+  private readonly waiting = new Set<net.Socket>();
 
   private handle = (client: net.Socket): void => {
     client.pause();
     this.resolveUpstream()
-      .then((to) => {
+      .then(async (to) => {
+        const before = this.beforeForward;
+        if (before) {
+          // A client that gives up while it waits must not be an unhandled error.
+          client.on('error', () => client.destroy());
+          this.waiting.add(client);
+          await Promise.resolve()
+            .then(() => before(to))
+            .catch((err) => console.warn(`proxy: before forwarding to ${to.host}:${to.port}: ${err instanceof Error ? err.message : String(err)}`));
+          this.waiting.delete(client);
+          // It may have given up waiting, or the proxy been stopped, meanwhile.
+          if (client.destroyed) return;
+        }
         const upstream = net.connect({ host: to.host, port: to.port });
         const pair = { client, upstream };
         this.pairs.add(pair);
@@ -83,9 +105,10 @@ export class ByteProxy {
       .catch(() => client.destroy());
   };
 
-  async start(opts: { port: number; socket: string | null; upstream: () => Promise<Upstream> }): Promise<void> {
+  async start(opts: { port: number; socket: string | null; upstream: () => Promise<Upstream>; beforeForward?: BeforeForward }): Promise<void> {
     await this.stop();
     this.resolveUpstream = opts.upstream;
+    this.beforeForward = opts.beforeForward ?? null;
     const server = net.createServer(this.handle);
     try {
       await listen(server, { host: '127.0.0.1', port: opts.port });
@@ -134,6 +157,8 @@ export class ByteProxy {
   /// resolver now says.
   drop(): number {
     const n = this.pairs.size;
+    for (const c of [...this.waiting]) c.destroy();
+    this.waiting.clear();
     for (const p of [...this.pairs]) {
       p.client.destroy();
       p.upstream.destroy();

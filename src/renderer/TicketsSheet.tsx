@@ -493,6 +493,7 @@ function Proxy({ source: sourceId }: { source: string }): JSX.Element {
 
       {p.running && (
         <>
+          {p.note && <p className="text-[11px] text-ink-muted">{p.note}</p>}
           <div className="flex flex-col gap-1.5">
             <div className="font-semibold">Send them to</div>
             {targets.map((x) => {

@@ -68,6 +68,10 @@ function config(ep: PgEndpoint, database?: string): ClientConfig {
     ssl: ep.tls ? tlsOptions(ep.tls as ConnectSpec) : undefined,
     types: RAW,
     application_name: 'overdb-base-builder',
+    // A VPN that drops or changes address leaves the socket open with no
+    // one on the other end; without probes the build waits on it forever.
+    keepAlive: true,
+    keepAliveInitialDelayMillis: 30_000,
   };
 }
 
@@ -79,16 +83,22 @@ export async function buildPostgres(req: PgBuildRequest, progress: (p: BuildProg
   const byKey = new Map(req.catalog.map((t) => [tableKey({ schema: t.schema, table: t.table }), t]));
 
   progress({ stage: 'start', text: 'Connecting to the server and to the new instance' });
+  // A dropped connection is also emitted as an event; without a listener
+  // it ends the process. The query in flight rejects on its own.
+  const ignore = () => undefined;
   const source = new Client(config(req.source));
+  source.on('error', ignore);
   await source.connect();
   // The copy holds the same database name, so a service's connection
   // string changes only its host and port.
   const admin = new Client(config(req.target, 'postgres'));
+  admin.on('error', ignore);
   await admin.connect();
   const exists = await admin.query('SELECT 1 FROM pg_database WHERE datname = $1', [database]);
   if (exists.rowCount === 0) await admin.query(`CREATE DATABASE ${q(database)}`);
   await admin.end();
   const target = new Client(config(req.target, database));
+  target.on('error', ignore);
   await target.connect();
 
   try {
