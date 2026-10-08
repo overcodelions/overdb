@@ -10,6 +10,11 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ## [0.2.2] - 2026-10-08
 
 ### Fixed
+- A stopped branch could not be used from its connection: Connect and Run
+  failed with "Nothing is listening" and suggested the standard port.
+  Opening a stopped branch now starts it, a refused branch is explained as
+  a stopped branch, and the Services switch says "stopped" with a Start
+  item instead of claiming it is starting.
 - A service's first login to a MySQL 8.4 or 9 branch through the proxy — or
   to your own server after a restart — failed with "Public Key Retrieval is
   not allowed" unless it used TLS or allowed fetching the server's key.
