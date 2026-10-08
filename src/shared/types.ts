@@ -375,6 +375,8 @@ export interface SavedCatalog {
 
 export interface AppSettings {
   theme: 'dark' | 'light' | 'system';
+  /// The whole window's zoom: 1 is as designed. See src/shared/uiScale.ts.
+  uiScale: number;
   sidebarVisible: boolean;
   sidebarWidth: number;
   /// Height of the SQL editor, in px. Was a fixed 34% with a 1px border —
@@ -425,6 +427,7 @@ export interface AppSettings {
 
 export const DEFAULT_SETTINGS: AppSettings = {
   theme: 'system',
+  uiScale: 1,
   sidebarVisible: true,
   sidebarWidth: 260,
   editorHeight: 280,
@@ -1083,4 +1086,7 @@ export type MenuCommand =
   | 'importConnections'
   | 'newEnvSet'
   | 'closeTab'
-  | 'sample';
+  | 'sample'
+  | 'zoomIn'
+  | 'zoomOut'
+  | 'zoomReset';

@@ -7,8 +7,10 @@
 // shortcuts, and the sample database for anyone who wants to see it working
 // before pointing it at their own servers.
 //
-// Edit, View and Window keep Electron's standard roles — copy and paste in
-// every text field depend on the Edit menu existing on macOS.
+// Edit and Window keep Electron's standard roles — copy and paste in every
+// text field depend on the Edit menu existing on macOS. View keeps them too,
+// except zoom: that is the Interface size setting, so it lasts past a
+// restart and the settings sheet shows what ⌘+ did.
 
 import { Menu, shell, type MenuItemConstructorOptions } from 'electron';
 import type { MenuCommand } from '../shared/types';
@@ -85,7 +87,22 @@ export function installMenu(send: (command: MenuCommand) => void): void {
           : ([{ role: 'delete' }, { type: 'separator' }, { role: 'selectAll' }] as MenuItemConstructorOptions[])),
       ],
     },
-    { role: 'viewMenu' },
+    {
+      label: 'View',
+      submenu: [
+        { role: 'reload' },
+        { role: 'forceReload' },
+        { role: 'toggleDevTools' },
+        { type: 'separator' },
+        { label: 'Actual Size', accelerator: 'CmdOrCtrl+0', click: () => send('zoomReset') },
+        { label: 'Zoom In', accelerator: 'CmdOrCtrl+=', click: () => send('zoomIn') },
+        // ⌘+ is ⇧⌘= on most layouts; both have to work, one can be shown.
+        { label: 'Zoom In', accelerator: 'CmdOrCtrl+Plus', visible: false, click: () => send('zoomIn') },
+        { label: 'Zoom Out', accelerator: 'CmdOrCtrl+-', click: () => send('zoomOut') },
+        { type: 'separator' },
+        { role: 'togglefullscreen' },
+      ],
+    },
     { role: 'windowMenu' },
     {
       role: 'help',

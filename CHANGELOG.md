@@ -7,6 +7,23 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+- Interface size, in Settings → General: 85% to 150%, scaling all text and
+  controls. ⌘+ / ⌘− / ⌘0 (Ctrl on Windows and Linux) change it from
+  anywhere, and it is kept across restarts. Chromium on Linux does not
+  follow the desktop's text scaling, which left overdb small there.
+- The query header names the environment of every connection, in the
+  sidebar's colours: a tag for local, dev and sandbox, a thin amber edge as
+  well for staging, and for production a red edge and wash across the whole
+  strip with a solid PRODUCTION badge.
+
+### Fixed
+- Going to another connection and back emptied the results pane. Each
+  connection's last results now come back with it, and a statement still
+  running on a connection you left keeps filling its own results there.
+- A statement still streaming rows on a connection you had clicked away
+  from stopped after two chunks and its batch never finished.
+
 ## [0.2.0] - 2026-10-04
 
 ### Added

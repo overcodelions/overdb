@@ -41,6 +41,7 @@ import type {
 import { isRedshift, type Variant } from '../shared/engines';
 import { referencedSchemas } from '../shared/qualifiedRefs';
 import { filterTableNames } from '../shared/tableFilter';
+import { clampScale } from '../shared/uiScale';
 import { classify } from '../shared/sqlGuard';
 import { bindFor } from '../shared/params';
 import * as writeGate from './writeGate';
@@ -147,6 +148,12 @@ function applyTheme(theme: AppSettings['theme']): void {
   mainWindow?.setBackgroundColor(nativeTheme.shouldUseDarkColors ? WINDOW_BG.dark : WINDOW_BG.light);
 }
 
+/// Interface size. Applied again after every load, because a reload resets
+/// the zoom to Chromium's own idea of it.
+function applyScale(scale: number): void {
+  mainWindow?.webContents.setZoomFactor(clampScale(scale));
+}
+
 function createWindow(): void {
   nativeTheme.themeSource = Store.load().settings.theme;
   // On 'system', the OS can change under us; the window's own colour has
@@ -183,6 +190,8 @@ function createWindow(): void {
   } else {
     mainWindow.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
   }
+
+  mainWindow.webContents.on('did-finish-load', () => applyScale(Store.load().settings.uiScale));
 
   mainWindow.on('closed', () => {
     mainWindow = null;
@@ -236,6 +245,7 @@ function registerIpc(): void {
   ipcMain.handle('store:saveSettings', (_e, settings: AppSettings) => {
     Store.saveSettings(settings);
     applyTheme(settings.theme);
+    applyScale(settings.uiScale);
   });
   ipcMain.handle('store:saveBuffer', (_e, args: { key: string; text: string }) =>
     Store.saveBuffer(args.key, args.text),

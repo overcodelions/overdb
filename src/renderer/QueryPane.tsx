@@ -92,7 +92,28 @@ import {
 import { ConnectFailure } from './ConnectFailure';
 import { useStore } from './store';
 import { useFanout } from './fanoutStore';
-import type { AiTool, Connection, EnvSet } from '@shared/types';
+import type { AiTool, Connection, EnvKind, EnvSet } from '@shared/types';
+
+/// How the query header names the environment you are in. The sidebar's
+/// colours, getting louder towards production: a tag for the safe ones,
+/// a thin line as well for staging — the one most easily taken for prod —
+/// and only production fills the strip. Were every header tinted, the red
+/// one would stop being noticed. `other` says nothing, having nothing to say.
+const ENV_HEADER: Partial<Record<EnvKind, { label: string; tag: string; strip?: string }>> = {
+  local: { label: 'LOCAL', tag: 'bg-good/15 text-good' },
+  dev: { label: 'DEV', tag: 'bg-good/15 text-good' },
+  sandbox: { label: 'SANDBOX', tag: 'bg-accent/15 text-accent-strong' },
+  staging: {
+    label: 'STAGING',
+    tag: 'bg-warn/15 text-warn-strong',
+    strip: 'border-card shadow-[inset_0_2px_0_rgb(var(--c-warn))]',
+  },
+  prod: {
+    label: 'PRODUCTION',
+    tag: 'bg-bad text-white',
+    strip: 'border-bad/40 bg-bad/10 shadow-[inset_0_2px_0_rgb(var(--c-bad))]',
+  },
+};
 
 export function QueryPane(): JSX.Element {
   const selection = useStore((s) => s.selection);
@@ -1079,9 +1100,10 @@ export function QueryPane(): JSX.Element {
     return () => window.removeEventListener('keydown', onKey, true);
   }, []);
 
+  const selectionKey = selection && 'id' in selection ? `${selection.kind}:${selection.id}` : null;
   useEffect(() => {
-    useQuery.getState().reset();
-  }, [selection?.kind, selection && 'id' in selection ? selection.id : null]);
+    useQuery.getState().reset(selectionKey);
+  }, [selectionKey]);
 
   // The Plan tab disappears with its buffer; sitting on -1 afterwards would
   // show the empty-editor hint under a tab bar with nothing selected.
@@ -1147,8 +1169,15 @@ export function QueryPane(): JSX.Element {
           left, what you can do on the right, and one primary action. The
           actions that apply to ONE statement — plan, explain, refine, run
           on a set — live on the statement's own strip (SqlEditor), where
-          they cannot be misread as applying to the whole buffer. */}
-      <div className="flex items-center gap-1.5 pl-3.5 pr-3 h-11 border-b border-card shrink-0">
+          they cannot be misread as applying to the whole buffer.
+
+          Every environment is named here, in the sidebar's colours, and
+          each is louder than the one below it: see ENV_HEADER. */}
+      <div
+        className={`flex items-center gap-1.5 pl-3.5 pr-3 h-11 border-b shrink-0 ${
+          (conn.env && ENV_HEADER[conn.env]?.strip) || 'border-card'
+        }`}
+      >
         <span className={`shrink-0 text-[10px] font-semibold ${TAG_TEXT[conn.variant ?? conn.engine]}`}>
           {variantLabel(conn.variant, conn.engine)}
         </span>
@@ -1179,9 +1208,12 @@ export function QueryPane(): JSX.Element {
             </select>
           </>
         )}
-        {conn.env === 'prod' && (
-          <span className="text-[10px] px-1.5 py-0.5 rounded bg-warn/10 text-warn/90 border border-warn/25">
-            prod
+        {conn.env && ENV_HEADER[conn.env] && (
+          <span
+            className={`shrink-0 text-[10px] font-semibold tracking-wide px-1.5 py-0.5 rounded ${ENV_HEADER[conn.env]!.tag}`}
+            title={`This connection is marked ${ENV_HEADER[conn.env]!.label.toLowerCase()}.`}
+          >
+            {ENV_HEADER[conn.env]!.label}
           </span>
         )}
         <span className="w-px h-4 bg-rule mx-1.5 shrink-0" aria-hidden="true" />

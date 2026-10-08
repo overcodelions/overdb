@@ -3,6 +3,7 @@ import { useStore } from './store';
 import { FORMAT_STYLES, formatSql } from '@shared/formatSql';
 import type { FormatStyle } from '@shared/formatSql';
 import type { AiTool, AppSettings } from '@shared/types';
+import { UI_SCALES } from '@shared/uiScale';
 
 /// Short enough to read at 10px, long enough that the five layouts look
 /// different from each other — a SELECT list, a join and a condition.
@@ -144,8 +145,11 @@ function GeneralPane({ draft, patch }: { draft: AppSettings; patch: Patch }): JS
   return (
     <>
       <Group title="Appearance">
-        <Row label="Theme" help="System follows your Mac's appearance and switches with it.">
+        <Row label="Theme" help="System follows your computer's appearance and switches with it.">
           <ThemePicker value={draft.theme} onChange={(theme) => patch({ theme })} />
+        </Row>
+        <Row label="Interface size" help="Scales all text and controls. ⌘+ and ⌘− (Ctrl on Windows and Linux) change it from anywhere.">
+          <ScalePicker value={draft.uiScale} onChange={(uiScale) => patch({ uiScale })} />
         </Row>
       </Group>
 
@@ -529,6 +533,29 @@ function ThemePicker({
           <span className={`text-[10px] ${value === o.id ? 'text-ink' : 'text-ink-muted'}`}>{o.label}</span>
         </button>
       ))}
+    </div>
+  );
+}
+
+function ScalePicker({ value, onChange }: { value: number; onChange: (v: number) => void }): JSX.Element {
+  return (
+    <div role="radiogroup" className="flex rounded-md border border-card overflow-hidden">
+      {UI_SCALES.map((s) => {
+        const selected = Math.abs(value - s) < 1e-6;
+        return (
+          <button
+            key={s}
+            role="radio"
+            aria-checked={selected}
+            onClick={() => onChange(s)}
+            className={`px-2.5 py-1 text-[11px] border-l border-card first:border-l-0 transition-colors ${
+              selected ? 'bg-accent/10 text-ink' : 'text-ink-muted hover:bg-wash-strong'
+            }`}
+          >
+            {Math.round(s * 100)}%
+          </button>
+        );
+      })}
     </div>
   );
 }
