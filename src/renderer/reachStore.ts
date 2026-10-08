@@ -47,7 +47,8 @@ export const useReach = create<ReachState>((set, get) => ({
           settle({ status: 'up' });
           return;
         }
-        const res = await window.overdb.invoke('conn:open', id);
+        // Asking whether it is up must not bring a stopped branch up.
+        const res = await window.overdb.invoke('conn:open', id, { start: false });
         settle(res.ok ? { status: 'up' } : { status: 'down', error: res.error ?? 'Could not connect.' });
       } catch (err) {
         settle({ status: 'down', error: err instanceof Error ? err.message : String(err) });
@@ -72,5 +73,6 @@ export function whyDown(connection: Connection, error: string): string {
     error,
     host: connection.host,
     port: connection.port,
+    branch: !!connection.branchOf,
   }).cause;
 }

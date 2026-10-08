@@ -26,6 +26,13 @@ describe('reaching the server', () => {
     expect(d.fixes.some((f) => f.set?.port)).toBe(false);
   });
 
+  it('says a refused branch is a stopped branch, never a wrong port', () => {
+    const d = diagnose({ ...pg, host: '127.0.0.1', port: 59999, branch: true, error: 'connect ECONNREFUSED 127.0.0.1:59999' });
+    expect(d.cause).toMatch(/branch's server is not running/);
+    expect(d.fixes.some((f) => f.set)).toBe(false);
+    expect(labels(d)).toContain('Try again');
+  });
+
   it('separates a timeout from a refusal', () => {
     const d = diagnose({ ...pg, error: 'connect ETIMEDOUT 10.0.0.4:5432' });
     expect(d.cause).toMatch(/dropped, not refused/);

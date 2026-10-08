@@ -689,7 +689,9 @@ export interface IPCInvokeMap {
   /// SAVING them means a failed guess has already replaced a working
   /// connection.
   'conn:test': (draft: ConnectionDraft) => ConnectionTestResult;
-  'conn:open': (connectionId: string) => {
+  /// A branch that is stopped is started first, unless `start` is false —
+  /// a background check of what is up must not bring servers up.
+  'conn:open': (connectionId: string, opts?: { start?: boolean }) => {
     ok: boolean;
     serverVersion?: string;
     error?: string;
@@ -1057,6 +1059,10 @@ export type MainToRendererEvent =
   /// and asking it once a second for twenty connections to draw a dot
   /// would be worse in every way.
   | { kind: 'conn:state'; connectionId: string; state: 'open' | 'closed' | 'error' }
+  /// Opening a stopped branch's connection started it, maybe on a new port —
+  /// already saved in main; the window updates its copy so it does not save
+  /// the old one back.
+  | { kind: 'ticket:started'; ticketId: string; connectionId: string; port: number }
   /// An open transaction is state you must not have to remember, so it is
   /// pushed — including when the idle timeout rolls it back for you.
   | { kind: 'txn:state'; connectionId: string; open: boolean; statements: number; expiresAt: number | null }
