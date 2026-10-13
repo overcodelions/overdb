@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { create } from 'zustand';
 import { formatBytes } from '@shared/baseline';
-import { DEFAULT_PROXY, baseIsNewer, baseOf, spareProxyPort, devInstanceRefusal, isProxyConnectionId, type ProxyState, type ProxyTarget, type TicketState } from '@shared/instances';
+import { DEFAULT_PROXY, baseIsNewer, baseOf, heldByOverdb, spareProxyPort, devInstanceRefusal, isProxyConnectionId, type ProxyState, type ProxyTarget, type TicketState } from '@shared/instances';
 import { useStore } from './store';
 import { proxyFor, useTickets } from './ticketsStore';
 import { isRedshift } from '@shared/engines';
@@ -482,6 +482,15 @@ function Proxy({ source: sourceId }: { source: string }): JSX.Element {
                 ? `Pick a port nothing uses, like ${spare}.`
                 : 'To take it over, move your server first:'}
             </p>
+          ) : p.conflict && heldByOverdb(p.conflict.process) ? (
+            <div className="flex items-center gap-3">
+              <p className="flex-1">
+                <b>Port {p.conflict.port} is held by another overdb</b> — one still quitting, or a second copy that is open. Quit that one and this one takes the port.
+              </p>
+              <button className={SMALL} disabled={!!busy} onClick={() => void t.configure(sourceId, { enabled: true })}>
+                {busy ? <Spinner /> : null} Try again
+              </button>
+            </div>
           ) : p.conflict ? (
             <p><b>Port {p.conflict.port} is held by {p.conflict.process ?? 'another program'}.</b> Pick another port.</p>
           ) : (

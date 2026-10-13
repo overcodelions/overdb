@@ -82,6 +82,38 @@ describe('a proxy per base', () => {
     expect(b.running).toBe(false);
     expect(b.error).toMatch(/already another base's proxy/);
   });
+
+  it('waits on start for a port another process is still letting go of', async () => {
+    const port = await freePort();
+    const root = await rootWith({
+      baselines: [{ id: 'b', sourceConnectionId: 'A' }],
+      tickets: [],
+      proxies: { A: { port, socket: null, server: { host: '127.0.0.1', port: 1 }, target: { kind: 'server' }, enabled: true, configured: true } },
+    });
+    const holder = net.createServer().listen(port, '127.0.0.1');
+    setTimeout(() => holder.close(), 700);
+    const rt = new LocalRuntime(root);
+    cleanup.push(() => rt.shutdown());
+    await rt.resume();
+    const [a] = await rt.proxyStates();
+    expect(a.running).toBe(true);
+  });
+
+  it('turns off a proxy whose port stays held by something else', async () => {
+    const port = await freePort();
+    const root = await rootWith({
+      baselines: [{ id: 'b', sourceConnectionId: 'A' }],
+      tickets: [],
+      proxies: { A: { port, socket: null, server: { host: '127.0.0.1', port: 1 }, target: { kind: 'server' }, enabled: true, configured: true } },
+    });
+    const holder = net.createServer().listen(port, '127.0.0.1');
+    cleanup.push(() => new Promise((r) => holder.close(() => r())));
+    const rt = new LocalRuntime(root);
+    cleanup.push(() => rt.shutdown());
+    await rt.resume({ waitMs: 600 });
+    expect((await rt.proxyStates())[0].running).toBe(false);
+    expect((await readRecords(root)).proxies.A.enabled).toBe(false);
+  });
 });
 
 describe('warming logins', () => {
