@@ -16,6 +16,7 @@ import path from 'node:path';
 import {
   DEFAULT_PROXY,
   baseOf,
+  heldByOverdb,
   type BaselineRecord,
   type ProxyClient,
   type ProxyConfig,
@@ -129,6 +130,9 @@ export interface LoginPrimer {
 /// helper — so a first login that fails is not a mystery.
 export const UNPRIMED_NOTE =
   'Logins are not warmed while the background helper runs this proxy. After a branch or your server starts, a service that does not allow public key retrieval fails its first login until something logs in once — open the branch in overdb, or set allowPublicKeyRetrieval=true.';
+
+/// How long a proxy coming back waits for its port.
+const RESUME_WAIT_MS = 10_000;
 
 export class LocalRuntime implements Runtime {
   private readonly proxies = new Map<string, proxy.ByteProxy>();
@@ -302,7 +306,11 @@ export class LocalRuntime implements Runtime {
     return sources.map((s) => this.stateOf(r, s));
   }
 
-  async configureProxy(source: string, next: Partial<ProxyConfig> & { enabled?: boolean }): Promise<ProxyState> {
+  async configureProxy(
+    source: string,
+    next: Partial<ProxyConfig> & { enabled?: boolean },
+    opts: { keepOnConflict?: boolean } = {},
+  ): Promise<ProxyState> {
     checkProxyConfig(next);
     const all = await readRecords(this.root);
     const cfg = await updateRecords(this.root, (r) => {
@@ -332,9 +340,13 @@ export class LocalRuntime implements Runtime {
         }
         this.problems.set(source, { error, conflict });
         // Not listening is off: a conflict must not be retried at every start.
-        await updateRecords(this.root, (r) => {
-          r.proxies[source].enabled = false;
-        });
+        // Unless overdb itself holds it — the one quitting as this one opens,
+        // or a second copy — and it is back once that one lets go.
+        if (!opts.keepOnConflict && !heldByOverdb(conflict?.process)) {
+          await updateRecords(this.root, (r) => {
+            r.proxies[source].enabled = false;
+          });
+        }
       }
     } else {
       await p.stop();
@@ -379,10 +391,24 @@ export class LocalRuntime implements Runtime {
     };
   }
 
-  /// Bring back every proxy that was on.
-  async resume(): Promise<void> {
+  /// Bring back every proxy that was on. A port still in use is waited for a
+  /// moment: an overdb restarting opens before the old one has let go.
+  async resume(opts: { waitMs?: number } = {}): Promise<void> {
     const r = await readRecords(this.root);
-    for (const [source, e] of Object.entries(r.proxies)) if (e.enabled) await this.configureProxy(source, {});
+    for (const [source, e] of Object.entries(r.proxies)) {
+      if (!e.enabled) continue;
+      const deadline = Date.now() + (opts.waitMs ?? RESUME_WAIT_MS);
+      let s = await this.configureProxy(source, {}, { keepOnConflict: true });
+      while (!s.running && s.conflict && Date.now() < deadline) {
+        await new Promise((res) => setTimeout(res, 500));
+        s = await this.configureProxy(source, {}, { keepOnConflict: true });
+      }
+      if (!s.running && s.conflict && !heldByOverdb(s.conflict.process)) {
+        await updateRecords(this.root, (x) => {
+          x.proxies[source].enabled = false;
+        });
+      }
+    }
   }
 
   async shutdown(): Promise<void> {

@@ -106,6 +106,12 @@ export interface ProxyState {
   note?: string;
 }
 
+/// Whether the process holding a port is overdb itself — another copy, or
+/// one still quitting. `Electron` when run from source, `Overdb` packaged.
+export function heldByOverdb(process: string | null | undefined): boolean {
+  return /^(electron|overdb)\b/i.test(process?.trim().split('/').pop() ?? '');
+}
+
 /// The spare port suggested for the proxy when your own server keeps its
 /// own: services are pointed at it once, and nothing else moves.
 export const SPARE_PROXY_PORT = 3310;
