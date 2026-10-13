@@ -192,7 +192,20 @@ async function build(req: BuilderRequest, progress: (p: BuildProgress) => void):
     for (const [i, t] of plan.tables.entries()) {
       const [ddl] = await rows<Record<string, string>>(source, `SHOW CREATE TABLE ${qt(t.ref)}`);
       await target.query(`USE ${q(t.ref.schema)}`);
-      await target.query(ddl['Create Table']);
+      await target.query(ddl['Create Table']).catch(async (err) => {
+        // A table made while the server ran with strict mode off — older
+        // than the setting now on — is still there, and its rows fit; only
+        // its widest possible row does not. Made the way it was made then.
+        if ((err as { errno?: number }).errno !== 1118) throw err;
+        const [strict] = await rows<{ v: number }>(target, 'SELECT @@SESSION.innodb_strict_mode AS v');
+        await target.query('SET SESSION innodb_strict_mode = 0');
+        try {
+          await target.query(ddl['Create Table']);
+        } finally {
+          await target.query('SET SESSION innodb_strict_mode = ?', [strict?.v ?? 1]);
+        }
+        progress({ stage: 'tables', text: `${qt(t.ref)}: its widest row passes InnoDB's limit, so made with strict mode off, as the server once did` });
+      });
       report.tables++;
       if ((i + 1) % 50 === 0) progress({ stage: 'tables', text: `Created ${i + 1} tables`, done: i + 1, total: plan.tables.length });
     }
