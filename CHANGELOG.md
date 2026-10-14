@@ -7,6 +7,22 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-10-14
+
+### Fixed
+- Restarting overdb could turn the proxy off: the new overdb opened before
+  the old one let go of the proxy's port, resuming failed with "port in
+  use", and the proxy stayed off until turned on by hand. Resuming now
+  waits up to ten seconds for the port, and only turns the proxy off when
+  something other than overdb still holds it. When another overdb holds
+  it, the Branches window says so and offers to try again, rather than
+  asking for another port.
+- A MySQL base build failed with "Row size too large" on a table made while
+  the source server ran with innodb_strict_mode off, whose widest possible
+  row passes InnoDB's limit though its actual rows fit. The builder now
+  makes such a table with strict mode off for that one statement, as the
+  source server once did, and says which table needed it.
+
 ## [0.2.2] - 2026-10-08
 
 ### Fixed
@@ -657,7 +673,8 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - DynamoDB has no server-side read-only session. Use read-only IAM credentials
   for a durable production boundary.
 
-[Unreleased]: https://github.com/overcodelions/overdb/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/overcodelions/overdb/compare/v0.2.3...HEAD
+[0.2.3]: https://github.com/overcodelions/overdb/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/overcodelions/overdb/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/overcodelions/overdb/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/overcodelions/overdb/compare/v0.1.2...v0.2.0
