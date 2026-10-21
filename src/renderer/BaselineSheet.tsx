@@ -1191,16 +1191,35 @@ const MOVES: Array<{ action: TableAction; label: (who: string) => string }> = [
 
 const ROW_LIMIT = 200;
 
+type SortBy = 'name' | 'rows' | 'size';
+
+const SORTS: Record<SortBy, (x: TablePlan, y: TablePlan) => number> = {
+  name: (x, y) => (tableKey(x.ref) < tableKey(y.ref) ? -1 : 1),
+  rows: (x, y) => (y.rows ?? 0) - (x.rows ?? 0),
+  size: (x, y) => (y.bytes ?? 0) - (x.bytes ?? 0),
+};
+
 function TableList({ plans, who, showBucket = false }: { plans: TablePlan[]; who: string; showBucket?: boolean }): JSX.Element {
   const b = useBaseline();
-  const sorted = [...plans].sort((x, y) => (y.bytes ?? 0) - (x.bytes ?? 0));
-  const cols = 'grid grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)_150px_120px] gap-4 items-center';
+  const [sortBy, setSortBy] = useState<SortBy>('size');
+  const sorted = [...plans].sort(SORTS[sortBy]);
+  const cols = 'grid grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)_150px_130px_120px] gap-4 items-center';
+  const head = (by: SortBy, label: string, right = false) => (
+    <button
+      className={`${right ? 'text-right' : 'text-left'} hover:text-ink ${sortBy === by ? 'text-ink font-semibold' : ''}`}
+      aria-pressed={sortBy === by}
+      onClick={() => setSortBy(by)}
+    >
+      {label}{sortBy === by && (by === 'name' ? ' ↑' : ' ↓')}
+    </button>
+  );
   return (
     <div className="max-h-[420px] overflow-y-auto">
       <div className={`${cols} sticky top-0 z-10 bg-surface-elevated px-4 pt-2.5 pb-2 text-[11px] text-ink-muted`}>
-        <span>Table</span>
+        {head('name', 'Table')}
         <span>Why</span>
-        <span className="text-right">Rows copied</span>
+        {head('rows', 'Rows copied', true)}
+        {head('size', 'Size', true)}
         <span />
       </div>
       {sorted.slice(0, ROW_LIMIT).map((p) => {
@@ -1227,6 +1246,9 @@ function TableList({ plans, who, showBucket = false }: { plans: TablePlan[]; who
             <span className="text-right tabular-nums">
               <Copied plan={p} />
             </span>
+            <span className="text-right tabular-nums">
+              <Size plan={p} />
+            </span>
             <span className="text-right">
               {moved ? (
                 <button className="text-[11px] text-accent-strong hover:underline" onClick={() => b.overrideTable(key, null)}>Undo</button>
@@ -1248,7 +1270,7 @@ function TableList({ plans, who, showBucket = false }: { plans: TablePlan[]; who
         );
       })}
       {sorted.length > ROW_LIMIT && (
-        <div className="px-4 py-2 text-[11px] text-ink-muted">+ {sorted.length - ROW_LIMIT} smaller tables. Find a table to see one.</div>
+        <div className="px-4 py-2 text-[11px] text-ink-muted">+ {sorted.length - ROW_LIMIT} more tables. Find a table to see one.</div>
       )}
     </div>
   );
@@ -1262,6 +1284,22 @@ function Copied({ plan }: { plan: TablePlan }): JSX.Element {
     return (
       <>
         <span>{plan.keepRows === null ? 'some' : `~${count(plan.keepRows)}`}</span>
+        <span className="text-ink-muted"> of {today}</span>
+      </>
+    );
+  }
+  return <><span>none</span> <span className="text-ink-muted">of {today}</span></>;
+}
+
+/// "~12 MB of 95 MB": the same, on disk. A table the server never sized shows a dash.
+function Size({ plan }: { plan: TablePlan }): JSX.Element {
+  if (plan.bytes === null) return <span className="text-ink-muted">—</span>;
+  const today = formatBytes(plan.bytes);
+  if (plan.action === 'whole') return <><span>all</span> <span className="text-ink-muted">{today}</span></>;
+  if (plan.action === 'scoped') {
+    return (
+      <>
+        <span>{plan.keepBytes === null ? 'some' : `~${formatBytes(plan.keepBytes)}`}</span>
         <span className="text-ink-muted"> of {today}</span>
       </>
     );
