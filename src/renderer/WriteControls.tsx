@@ -3,14 +3,15 @@ import type { Connection } from '@shared/types';
 import { devInstanceRefusal } from '@shared/instances';
 import { useStore } from './store';
 import { Dropdown } from './Menu';
-import { Chevron, Clock, Lock, Sparkle } from './Icons';
+import { Agent, Chevron, Clock, Lock, Sparkle } from './Icons';
+import { agentReach } from '@shared/hostedConnection';
+import { PublishToOvergo } from './PublishToOvergo';
+import { AgentContextEditor } from './AgentContextEditor';
 
-/// The enable-writes gesture, shared by the header control and the panel
-/// that appears when the server has just refused a write. One place, because
-/// the prod confirmation is the part that must not be reimplemented slightly
-/// differently in the second one.
-export function useWriteToggle(conn: Connection): {
-  writes: boolean;
+/// A switch that asks for the connection's name before it turns on for
+/// prod. Writes and agent access both use it, because the prod confirmation
+/// is the part that must not be reimplemented slightly differently twice.
+interface ProdGate {
   confirming: boolean;
   typed: string;
   error: string | null;
@@ -19,8 +20,25 @@ export function useWriteToggle(conn: Connection): {
   begin(): void;
   enable(confirm?: string): Promise<void>;
   disable(): Promise<void>;
-} {
+}
+
+/// The enable-writes gesture, shared by the header control and the panel
+/// that appears when the server has just refused a write.
+export function useWriteToggle(conn: Connection): ProdGate & { writes: boolean } {
   const setWrites = useStore((s) => s.setWrites);
+  return { writes: Boolean(conn.writesEnabled), ...useProdGate(conn, setWrites) };
+}
+
+/// Whether `overdb serve --mcp` offers this connection to agents.
+function useAgentToggle(conn: Connection): ProdGate & { exposed: boolean } {
+  const setMcpExposed = useStore((s) => s.setMcpExposed);
+  return { exposed: Boolean(conn.mcpExposed), ...useProdGate(conn, setMcpExposed) };
+}
+
+function useProdGate(
+  conn: Connection,
+  set: (connectionId: string, on: boolean, confirm?: string) => Promise<string | null>,
+): ProdGate {
   const [confirming, setConfirming] = useState(false);
   const [typed, setTyped] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -34,7 +52,7 @@ export function useWriteToggle(conn: Connection): {
   }, [conn.id]);
 
   const enable = async (confirm?: string) => {
-    const problem = await setWrites(conn.id, true, confirm);
+    const problem = await set(conn.id, true, confirm);
     if (problem) {
       setError(problem);
       setConfirming(true);
@@ -46,7 +64,6 @@ export function useWriteToggle(conn: Connection): {
   };
 
   return {
-    writes: Boolean(conn.writesEnabled),
     confirming,
     typed,
     error,
@@ -59,7 +76,7 @@ export function useWriteToggle(conn: Connection): {
     begin: () => setConfirming(true),
     enable,
     disable: async () => {
-      await setWrites(conn.id, false);
+      await set(conn.id, false);
     },
   };
 }
@@ -71,7 +88,7 @@ export function ProdConfirm({
   gate,
 }: {
   conn: Connection;
-  gate: ReturnType<typeof useWriteToggle>;
+  gate: ProdGate;
 }): JSX.Element {
   return (
     <span className="flex items-center gap-1.5">
@@ -123,10 +140,12 @@ export function ConnectionState({
   const endTransaction = useStore((s) => s.endTransaction);
   const blockedAt = useStore((s) => s.writeBlockedAt[conn.id]);
   const gate = useWriteToggle(conn);
+  const agents = useAgentToggle(conn);
   const [panel, setPanel] = useState(false);
 
   const mode = conn.txnMode ?? 'auto';
   const open = Boolean(txn?.open);
+  const reach = agentReach(conn);
 
   // Pulse only for a few seconds after a refusal, and only while writes are
   // still off — once they are on, the chip has nothing left to say.
@@ -148,17 +167,26 @@ export function ConnectionState({
     await gate.enable();
   };
 
+  const toggleAgents = async () => {
+    if (agents.exposed) return void agents.disable();
+    if (conn.env === 'prod') return agents.begin();
+    await agents.enable();
+  };
+
   return (
     <div className="relative">
       <button
         onClick={() => setPanel((v) => !v)}
         aria-expanded={panel}
         aria-haspopup="dialog"
-        title={
+        title={[
           gate.writes
             ? `Writes are on; ${mode === 'auto' ? 'each write commits by itself' : 'writes wait in a transaction for you to commit'}.`
-            : 'Read-only — the server refuses writes.'
-        }
+            : 'Read-only — the server refuses writes.',
+          reach,
+        ]
+          .filter(Boolean)
+          .join(' ')}
         className={`h-[26px] px-2.5 rounded-md flex items-center gap-1.5 text-[12px] border ${
           gate.writes
             ? `text-ink border-warn/40 ${panel ? 'bg-warn/15' : 'bg-warn/5 hover:bg-warn/10'}`
@@ -173,6 +201,7 @@ export function ConnectionState({
         ) : (
           'Read-only'
         )}
+        {reach && <Agent className="w-3 h-3 text-accent" />}
         <Chevron up={panel} className="w-2.5 h-2.5 text-ink-muted" />
       </button>
 
@@ -181,6 +210,7 @@ export function ConnectionState({
         onClose={() => {
           setPanel(false);
           gate.cancel();
+          agents.cancel();
         }}
         label="Connection state"
         align="left"
@@ -240,6 +270,31 @@ export function ConnectionState({
               )}
             </div>
           )}
+
+          <div className="h-px bg-rule" />
+          <div className="flex items-start gap-3">
+            <div className="flex-1">
+              <div className="font-semibold">Agents</div>
+              <p className="text-[11px] text-ink-muted mt-0.5 leading-relaxed">
+                {agents.exposed
+                  ? `Agents using overdb serve --mcp can read ${conn.name}. Never write, whatever Writes says.`
+                  : 'Hidden from overdb serve --mcp. Agents can’t see this connection exists.'}
+                {conn.env === 'prod' && !agents.exposed ? ' Turning this on asks you to type the connection’s name.' : ''}
+              </p>
+            </div>
+            <button
+              role="switch"
+              aria-checked={agents.exposed}
+              aria-label="Agents"
+              onClick={() => void toggleAgents()}
+              className={`shrink-0 mt-0.5 w-9 h-5 rounded-full relative transition-colors ${agents.exposed ? 'bg-accent' : 'bg-wash-strong border border-card'}`}
+            >
+              <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all ${agents.exposed ? 'left-[18px]' : 'left-0.5'}`} />
+            </button>
+          </div>
+          {agents.confirming && <ProdConfirm conn={conn} gate={agents} />}
+          <AgentContextEditor conn={conn} />
+          <PublishToOvergo conn={conn} />
 
           <div className="h-px bg-rule" />
           <div className="flex items-center gap-2.5">

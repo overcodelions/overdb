@@ -116,6 +116,13 @@ process.once('exit', () => {
   }
 });
 
+/// For `overdb serve --mcp`, which runs beside the app rather than in it:
+/// the app may change a connection at any moment, so this reads the file on
+/// every call, and it never caches, and never writes.
+export function readConnectionsFromDisk(): Connection[] {
+  return loadFromDisk().connections;
+}
+
 export const Store = {
   load(): StoreSnapshot {
     return current();

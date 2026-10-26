@@ -101,3 +101,32 @@ describe('the connection-host import graph', () => {
     expect(leaked).toEqual([]);
   });
 });
+
+// `node dist/mcp/headless.js` is the MCP server for a machine with no
+// desktop — overgo's, a container's. It forks the host above, and its own
+// graph has to be just as free of electron.
+describe('the headless MCP server import graph', () => {
+  const graph = walk(path.join(ROOT, 'src', 'mcp', 'headless.ts'));
+
+  it('never imports electron', () => {
+    const offenders = graph.bare.get('electron') ?? [];
+    expect(
+      offenders,
+      'These files are reachable from src/mcp/headless.ts and import electron:\n  ' + offenders.join('\n  '),
+    ).toEqual([]);
+  });
+
+  it('reaches the tools and the spec builder, so the guard above is guarding something', () => {
+    const rel = [...graph.files].map(repoPath);
+    expect(rel).toContain('src/mcp/tools.ts');
+    expect(rel).toContain('src/mcp/wiring.ts');
+    expect(rel).toContain('src/main/connectSpec.ts');
+  });
+
+  it('cannot reach the keychain, the store or the renderer', () => {
+    const leaked = [...graph.files]
+      .map(repoPath)
+      .filter((f) => f.startsWith('src/renderer/') || ['src/main/secrets.ts', 'src/main/store.ts', 'src/main/credentials.ts'].includes(f));
+    expect(leaked).toEqual([]);
+  });
+});

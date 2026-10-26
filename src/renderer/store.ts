@@ -236,6 +236,10 @@ interface State {
   /// Returns the refusal, so the caller can show it where the user is
   /// looking rather than in a toast they may miss.
   setWrites(connectionId: string, enabled: boolean, confirm?: string): Promise<string | null>;
+  /// Same contract as setWrites, for `overdb serve --mcp`.
+  setMcpExposed(connectionId: string, exposed: boolean, confirm?: string): Promise<string | null>;
+  /// Main has recorded a publish to the org; mirror it for the agent mark.
+  markPublished(connectionId: string, at: string): void;
   setTxnMode(connectionId: string, mode: 'auto' | 'manual'): Promise<void>;
   endTransaction(connectionId: string, action: 'commit' | 'rollback'): Promise<void>;
   /// Pin either kind of thing — a connection or a set. Both land in the
@@ -440,6 +444,8 @@ export const useStore = create<State>((set, get) => ({
       // true on the row you copied.
       writesEnabled: _writesEnabled,
       mcpExposed: _mcpExposed,
+      // Sent to the org as the original; the copy never was.
+      orgPublishedAt: _orgPublishedAt,
       ...base
     } = { ...source, ...(draft ?? {}) } as Connection;
 
@@ -999,6 +1005,25 @@ export const useStore = create<State>((set, get) => ({
     const name = get().connections.find((c) => c.id === connectionId)?.name ?? 'connection';
     get().toast(enabled ? `Writes enabled on ${name}.` : `${name} is read-only again.`);
     return null;
+  },
+
+  async setMcpExposed(connectionId, exposed, confirm) {
+    const res = await window.overdb.invoke('conn:setMcpExposed', { connectionId, exposed, confirm });
+    if (!res.ok) return res.error ?? 'Could not change this.';
+    set((st) => ({
+      connections: st.connections.map((c) =>
+        c.id === connectionId ? { ...c, mcpExposed: exposed } : c,
+      ),
+    }));
+    const name = get().connections.find((c) => c.id === connectionId)?.name ?? 'connection';
+    get().toast(exposed ? `Agents can read ${name}.` : `${name} is hidden from agents.`);
+    return null;
+  },
+
+  markPublished(connectionId, at) {
+    set((st) => ({
+      connections: st.connections.map((c) => (c.id === connectionId ? { ...c, orgPublishedAt: at } : c)),
+    }));
   },
 
   async setTxnMode(connectionId, mode) {

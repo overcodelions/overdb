@@ -11,6 +11,8 @@ import { Branches } from './TicketSection';
 import { devInstanceRefusal, isProxyConnectionId } from '@shared/instances';
 import { Dropdown, MenuDivider, MenuItem } from './Menu';
 import { MAP_TAB, openPane } from './queryStore';
+import { Agent } from './Icons';
+import { agentReach } from '@shared/hostedConnection';
 
 /// Which sections the user has folded away. Per-viewer convenience, so it
 /// lives in the browser rather than the app store — and every access is
@@ -508,6 +510,18 @@ function detailFor(conn: Connection): string {
 
 /// Open, not connected, or the last attempt failed. Absent state is the
 /// common case and reads as the quietest mark.
+/// Shown only when something other than you can read the connection, so
+/// its presence is the news — see `agentReach`.
+function AgentMark({ connection }: { connection: Connection }): JSX.Element | null {
+  const reach = agentReach(connection);
+  if (!reach) return null;
+  return (
+    <span title={reach} aria-label={reach} role="img" className="shrink-0 text-accent">
+      <Agent className="w-[11px] h-[11px]" />
+    </span>
+  );
+}
+
 function StatusDot({ state }: { state?: 'open' | 'closed' | 'error' }): JSX.Element {
   const title =
     state === 'open' ? 'Connected' : state === 'error' ? 'Last attempt failed' : 'Not connected';
@@ -572,7 +586,12 @@ function ConnectionRow({
           )
         }
         badgeWidth={spelled ? BADGE_WIDTH : 6}
-        trailing={<StatusDot state={state} />}
+        trailing={
+          <>
+            <AgentMark connection={connection} />
+            <StatusDot state={state} />
+          </>
+        }
         onEdit={() => setSheet({ kind: 'editConnection', id: connection.id })}
         editTitle={`Edit ${connection.name}`}
         onDelete={requestDelete}
@@ -879,7 +898,7 @@ function Row({
             </span>
           </span>
         )}
-        {trailing && <span className="shrink-0 ml-2 flex items-center">{trailing}</span>}
+        {trailing && <span className="shrink-0 ml-2 flex items-center gap-1.5">{trailing}</span>}
       </div>
       {tone === 'warn' && !mark && <span className="sr-only">production</span>}
     </div>

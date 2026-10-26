@@ -7,6 +7,34 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+- `overdb serve --mcp`: the connections you have already set up, offered
+  to an agent over MCP — `list_connections`, `query`, `list_tables`,
+  `describe_table`, `show_sessions` and `list_slow_queries`. Read-only on
+  the server whatever Writes says, and only for connections you turn on
+  under **Agents** in the Read-only menu (a `prod` connection asks for its
+  name). Credentials and tunnels resolve inside overdb; the agent never
+  sees a secret. See "Using it from an agent" in the README.
+- `describe_database`, and what agents are told: each database's tenancy rule,
+  your notes and the database map's slice for the question, with the code
+  references, and a warning when the map is older than the schema. Worked
+  out from your base recipe, the map and the catalog; change any part under
+  **What agents are told**. Tenancy names the column queries filter on.
+- The same MCP server without the app, for hosted agents:
+  `node dist/mcp/headless.js --connections FILE`. Plain Node, no Electron,
+  reading a connections file that holds no secret — each credential is the
+  server's own AWS role (IAM auth) or an environment variable it is given.
+- A published connection carries what agents are told — the tenancy rule,
+  your notes and the database map, with repo paths reduced to names — and
+  the headless server gives it to hosted agents the way the app does.
+- `--query-log FILE` on the headless server: one line per call, with the
+  worker and run its runtime names, the SQL and row count, never rows or
+  bound values. Moved aside at 5 MB.
+- **Publish to your org's server…**, in a connection's Read-only menu:
+  shows the exact record that would leave the machine — no password, the
+  agents' login of your choosing — and hands it to overcli to publish.
+  Appears once overcli can take connections.
+
 ## [0.2.3] - 2026-10-14
 
 ### Fixed

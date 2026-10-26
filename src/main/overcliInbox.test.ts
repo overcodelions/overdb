@@ -4,7 +4,8 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import type { HandoffDraft } from '../shared/overcliHandoff';
-import { overcliAvailable, sendToOvercli } from './overcliInbox';
+import { overcliAvailable, overcliTakesConnections, sendConnectionToOvercli, sendToOvercli } from './overcliInbox';
+import type { HostedConnection } from '../shared/hostedConnection';
 
 let root: string;
 let inbox: string;
@@ -72,5 +73,33 @@ describe('sendToOvercli', () => {
     const r = sendToOvercli({ ...draft, repoHints: [] }, { dir: inbox });
     expect(r).toEqual({ ok: false, error: 'Link a repo first.' });
     expect(fs.readdirSync(inbox)).toEqual([]);
+  });
+});
+
+describe('sendConnectionToOvercli', () => {
+  const hosted: HostedConnection = {
+    id: 'c1', name: 'shop-staging', env: 'staging', engine: 'postgres', host: 'db.internal', user: 'agents_ro',
+    credential: { source: 'secret', env: 'OVERDB_SHOP_STAGING_PASSWORD' },
+  };
+
+  it('refuses an overcli that has an inbox but no connections folder, and writes nothing', () => {
+    fs.mkdirSync(inbox, { recursive: true });
+    const dir = path.join(inbox, 'connections');
+    expect(overcliTakesConnections(dir)).toBe(false);
+    expect(sendConnectionToOvercli(hosted, { dir }).ok).toBe(false);
+    expect(fs.readdirSync(inbox)).toEqual([]);
+  });
+
+  it('writes one whole envelope into the connections folder, never the inbox itself', () => {
+    const dir = path.join(inbox, 'connections');
+    fs.mkdirSync(dir, { recursive: true });
+    const res = sendConnectionToOvercli(hosted, { dir, id: 'p1', now: Date.UTC(2026, 0, 2, 3, 4, 5) });
+    expect(res).toEqual({ ok: true, id: 'p1' });
+    expect(fs.readdirSync(inbox)).toEqual(['connections']);
+    const files = fs.readdirSync(dir);
+    expect(files).toEqual(['2026-01-02T03-04-05-000Z-p1.json']);
+    expect(JSON.parse(fs.readFileSync(path.join(dir, files[0]), 'utf-8'))).toEqual({
+      version: 1, kind: 'overdb-connection', id: 'p1', createdAt: '2026-01-02T03:04:05.000Z', connection: hosted,
+    });
   });
 });
