@@ -95,8 +95,9 @@ import {
 import { gitBehind, gitChanged, gitHead, loadMap, mapPath, saveMap } from './mapper';
 import { linkedRepoLinks, mapFileFor, recipePath } from './connectionFiles';
 import { agentContextFor, agentSettingFor, saveAgentSetting } from './agentContext';
-import { tenantCandidates } from '../shared/baseline';
-import { tenantVia, type AgentContextSetting } from '../shared/agentContext';
+import { keyOf, tenantCandidates, tenantTables } from '../shared/baseline';
+import { caveatHints, describeText, serverInstructions, tenantVia, type AgentContextSetting, type TenantRef } from '../shared/agentContext';
+import { connectedClients, recentActivity, serveCommand } from './agentActivity';
 import type { MapRun } from '../shared/dbMap';
 import { mapPrompt } from './mapPrompts';
 import type { BaselineFindValue, BaselineStatsValue, SeedStatsValue } from '../dbhost/protocol';
@@ -1954,7 +1955,7 @@ function registerIpc(): void {
     },
   );
 
-  ipcMain.handle('agents:context', async (_e, args: { connectionId: string; detect: boolean }) => {
+  ipcMain.handle('agents:context', async (_e, args: { connectionId: string; detect: boolean; tenant?: TenantRef }) => {
     const { owner, setting } = agentSettingFor(args.connectionId);
     if (!owner) return { ok: false, error: 'No such connection.' };
     let snapshot: SchemaSnapshot | undefined;
@@ -1969,14 +1970,53 @@ function registerIpc(): void {
       }
     }
     const { ctx } = await agentContextFor(args.connectionId, snapshot);
-    const candidates = snapshot
-      ? tenantCandidates(snapshot, findLinks(snapshot), 5).map((c) => {
-          const ref = { ...c.ref, column: c.column };
-          return { ...ref, via: tenantVia(snapshot!, ref) };
-        })
+    const links = snapshot ? findLinks(snapshot) : [];
+    // The most referenced tables, each with its namesakes in other schemas
+    // (`acme.account` beside `acme_mart.account`): which of them is the
+    // tenant is the person's call, and the counts alone can pick the wrong
+    // one. Then the one the person named, if it is none of those.
+    const candidates: Array<TenantRef & { via: string[] }> = [];
+    if (snapshot) {
+      const seen = new Set<string>();
+      const offer = (ref: TenantRef) => {
+        const k = `${ref.schema}.${ref.table}.${ref.column}`;
+        if (seen.has(k)) return;
+        seen.add(k);
+        candidates.push({ ...ref, via: tenantVia(snapshot!, ref) });
+      };
+      for (const c of tenantCandidates(snapshot, links, 5)) {
+        const ref = { ...c.ref, column: c.column };
+        offer(ref);
+        for (const n of tenantTables(snapshot, ref)) offer({ ...n, column: c.column });
+      }
+      if (args.tenant) offer(args.tenant);
+    }
+    // Caveat suggestions for every tenant the editor could end up on, so
+    // picking another one in the form needs no second read.
+    const hints: Record<string, ReturnType<typeof caveatHints>> = {};
+    if (snapshot) {
+      const saved = setting?.tenant && setting.tenant !== 'none' ? [setting.tenant] : [];
+      const all: TenantRef[] = [...candidates, ...saved, ...(ctx.tenant ? [ctx.tenant] : []), ...(ctx.suggestion ? [ctx.suggestion] : [])];
+      for (const t of all) {
+        const k = `${t.schema}.${t.table}.${t.column}`;
+        if (!hints[k]) hints[k] = caveatHints(snapshot, links, t);
+      }
+    }
+    const tables = snapshot
+      ? snapshot.schemas.flatMap((s) => s.tables.filter((t) => t.kind === 'table').map((t) => `${s.name}.${t.name}`)).sort()
       : [];
+    const keys: Record<string, string> = {};
+    for (const s of snapshot?.schemas ?? []) {
+      for (const t of s.tables) {
+        const k = t.kind === 'table' ? keyOf(t) : null;
+        if (k) keys[`${s.name}.${t.name}`] = k;
+      }
+    }
     return {
       ok: true,
+      hints,
+      tables,
+      keys,
       context: ctx,
       setting: setting ?? null,
       owner: owner.kind,
@@ -1989,6 +2029,31 @@ function registerIpc(): void {
   ipcMain.handle('agents:setContext', (_e, args: { connectionId: string; setting: AgentContextSetting }) =>
     saveAgentSetting(args.connectionId, args.setting),
   );
+  ipcMain.handle('agents:activity', (_e, args: { limit: number }) => ({
+    clients: connectedClients(),
+    activity: recentActivity(Math.min(Math.max(args.limit, 1), 1000)),
+    command: serveCommand(),
+  }));
+  ipcMain.handle('agents:preview', async (_e, args: { connectionId: string; question?: string; draft?: AgentContextSetting }) => {
+    const conn = Store.load().connections.find((c) => c.id === args.connectionId);
+    if (!conn) return { ok: false, error: 'No such connection.' };
+    // Only a catalog already in hand: a preview is no reason to connect.
+    let snapshot: SchemaSnapshot | undefined;
+    if (db.isOpen(conn.id)) {
+      try {
+        const schemas = (await db.request(conn.id, { op: 'listSchemas' })) as string[];
+        snapshot = (await db.request(conn.id, { op: 'introspect', schemas })) as SchemaSnapshot;
+      } catch {
+        snapshot = undefined;
+      }
+    }
+    const { ctx, map } = await agentContextFor(conn.id, snapshot, args.draft);
+    return {
+      ok: true,
+      instructions: serverInstructions([{ name: conn.name, ctx }]),
+      describe: describeText(conn.name, ctx, map, args.question),
+    };
+  });
 
   /// The record plus what agents are told about it. The catalog is read
   /// when it can be, so the tenancy rule names the column queries filter

@@ -14,6 +14,7 @@ import { parseRecipe } from '../shared/baseline';
 import { repoLinkOwner } from '../shared/overcliHandoff';
 import {
   changedSince,
+  cleanCaveats,
   detectTenant,
   tenantVia,
   resolveAgentContext,
@@ -50,12 +51,14 @@ async function recipeTenant(connectionId: string): Promise<TenantRef | null | un
 
 /// `snapshot`, when there is one to hand, lets a tenant be detected and the
 /// map be checked against the live catalog. Without it, only what is on
-/// disk is used — no connection is opened here.
+/// disk is used — no connection is opened here. `draft` stands in for the
+/// saved setting, for a preview of what an edit would tell agents.
 export async function agentContextFor(
   connectionId: string,
   snapshot?: SchemaSnapshot,
+  draft?: AgentContextSetting,
 ): Promise<{ ctx: AgentContext; map: DbMap | null }> {
-  const { setting } = agentSettingFor(connectionId);
+  const setting = draft ? clean(draft) : agentSettingFor(connectionId).setting;
   const fromRecipe = await recipeTenant(connectionId);
   const where = await mapFileFor(connectionId);
   const map = where ? await loadMap(where.file) : null;
@@ -78,6 +81,8 @@ function clean(setting: AgentContextSetting): AgentContextSetting | undefined {
   else if (t && t.schema?.trim() && t.table?.trim() && t.column?.trim()) {
     out.tenant = { schema: t.schema.trim(), table: t.table.trim(), column: t.column.trim() };
   }
+  const caveats = cleanCaveats(setting.caveats);
+  if (caveats && t !== 'none') out.caveats = caveats;
   if (setting.notes?.trim()) out.notes = setting.notes.trim().slice(0, 4000);
   if (setting.map === false) out.map = false;
   return Object.keys(out).length ? out : undefined;

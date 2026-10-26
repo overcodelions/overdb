@@ -33,6 +33,8 @@ const NO_AI_NOTE = [
 ].join('\n');
 
 import { ConnectionState } from './WriteControls';
+import { AgentsChip } from './AgentsChip';
+import { useAgentActivity } from './agentActivity';
 import { Dropdown, MenuDivider, MenuItem } from './Menu';
 import { Chevron, Dots, Lines, Play, PlanIcon, SetIcon, Sparkle, Stop, TableGrid, Wand } from './Icons';
 import { TAG_TEXT } from './engineTags';
@@ -1222,6 +1224,7 @@ export function QueryPane(): JSX.Element {
           pinnedCount={pinnedCount}
           onPickTables={() => setSheet({ kind: 'pickTables', connectionId: conn.id })}
         />
+        <AgentsChip conn={conn} />
         {connectError ? null : schemaError ? (
           <button
             onClick={() => void loadSchema(conn.id, { force: true })}
@@ -2117,6 +2120,7 @@ export function QueryPane(): JSX.Element {
               <span className="ml-1 w-1.5 h-1.5 rounded-full bg-good animate-pulse" />
             )}
           </RailPane>
+          <RailAgents connectionId={conn.id} />
         </div>
       </RailSlot>
       </div>
@@ -2352,6 +2356,27 @@ function RailPane({
     >
       {children}
     </button>
+  );
+}
+
+/// Agents, at the end of the rail: not a pane of this connection but a
+/// place to go — the sheet that covers every connection — so it opens that
+/// instead of a tab. The dot says an agent is connected right now.
+function RailAgents({ connectionId }: { connectionId: string }): JSX.Element {
+  const setSheet = useStore((s) => s.setSheet);
+  const { clients } = useAgentActivity(30_000);
+  return (
+    <>
+      <span className="w-px h-3 bg-rule mx-1" aria-hidden="true" />
+      <RailPane
+        on={false}
+        onClick={() => setSheet({ kind: 'agents', connectionId })}
+        title={clients.length ? `${clients.length} agent${clients.length === 1 ? '' : 's'} connected — what they can read and what they did` : 'Connect an agent, choose what it can read, see what it did'}
+      >
+        {clients.length > 0 && <span className="mr-1 w-1.5 h-1.5 rounded-full bg-good" />}
+        Agents
+      </RailPane>
+    </>
   );
 }
 

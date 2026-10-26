@@ -558,6 +558,36 @@ export interface ConnectionTestResult {
   error?: string;
 }
 
+/// A running `overdb serve --mcp`, as it describes itself on disk
+/// (src/main/agentActivity.ts).
+export interface AgentClient {
+  pid: number;
+  /// The MCP client's own name — "claude-code", "cursor" — once it has said.
+  client?: string;
+  version?: string;
+  /// Where the client started it from: usually the project it works in.
+  cwd: string;
+  since: string;
+}
+
+/// One tool call an agent made. The connection is by name, as the agent
+/// named it; never rows, never bound values.
+export interface AgentActivity {
+  at: string;
+  tool: string;
+  connection: string;
+  ok: boolean;
+  ms: number;
+  sql?: string;
+  question?: string;
+  params?: number;
+  rowCount?: number;
+  truncated?: boolean;
+  error?: string;
+  pid?: number;
+  client?: string;
+}
+
 export interface IPCInvokeMap {
   'store:load': () => StoreSnapshot;
   'store:saveConnections': (connections: Connection[]) => void;
@@ -786,7 +816,9 @@ export interface IPCInvokeMap {
   /// and the setting behind it. `detect` reads the catalog (connecting if
   /// need be) to detect a tenant and list candidates; without it only files
   /// are read.
-  'agents:context': (args: { connectionId: string; detect: boolean }) =>
+  /// `tenant`: one more table to offer, with its hints — the person's own
+  /// pick from every table.
+  'agents:context': (args: { connectionId: string; detect: boolean; tenant?: TenantRef }) =>
     | {
         ok: true;
         context: AgentContext;
@@ -794,11 +826,30 @@ export interface IPCInvokeMap {
         owner: 'envSet' | 'connection';
         ownerName: string;
         candidates: Array<TenantRef & { via: string[] }>;
+        /// By tenant (`schema.table.column`): the levels inside it and
+        /// tables that look shared, for the caveats. Empty without a catalog.
+        hints: Record<string, { levels: Array<TenantRef & { via: string[] }>; shared: string[] }>;
+        /// Every table, `schema.table`, to pick shared ones from.
+        tables: string[];
+        /// Each table's single-column key, by `schema.table`: the column a
+        /// table picked as the tenant is keyed by.
+        keys: Record<string, string>;
         detected: boolean;
         detectError?: string;
       }
     | { ok: false; error: string };
   'agents:setContext': (args: { connectionId: string; setting: AgentContextSetting }) => { ok: boolean; error?: string };
+  /// Which agents are connected now, what they have done lately (newest
+  /// first), and the command that registers overdb with a client.
+  'agents:activity': (args: { limit: number }) => { clients: AgentClient[]; activity: AgentActivity[]; command: string[] };
+  /// Exactly what an agent is told about this connection: the server's
+  /// instructions as it connects, and describe_database's answer to
+  /// `question` (an overview without one). Files only, plus the catalog if
+  /// the app has the connection open already. `draft`, an unsaved setting,
+  /// stands in for the saved one.
+  'agents:preview': (args: { connectionId: string; question?: string; draft?: AgentContextSetting }) =>
+    | { ok: true; instructions: string; describe: string }
+    | { ok: false; error: string };
   'conn:setTxnMode': (args: { connectionId: string; mode: 'auto' | 'manual' }) => void;
   'txn:commit': (connectionId: string) => { ok: boolean; error?: string };
   'txn:rollback': (connectionId: string) => { ok: boolean; error?: string };

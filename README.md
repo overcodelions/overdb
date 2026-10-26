@@ -41,7 +41,7 @@ Beyond the editor, the virtualized grid and the fan-out:
 
 `overdb serve --mcp` is the Overdb app started without a window, speaking MCP over stdio. An agent gets seven read-only tools: `describe_database`, `list_connections`, `query`, `list_tables`, `describe_table`, `show_sessions` and `list_slow_queries`.
 
-Nothing is exposed until you say so. Open a connection, click its **Read-only** chip, and turn on **Agents**; on a `prod` connection that asks you to type its name. A connection that is not opted in is not listed, and naming it gets the same answer as naming one that does not exist. Changes take effect on the next tool call — no restart.
+Nothing is exposed until you say so. Open a connection, click its **Agents** chip (beside Writes), and turn it on; on a `prod` connection that asks you to type its name. **Agents** at the end of the bottom rail opens the Agents sheet: the command to register overdb with your client, ready to copy; which agents are connected now; every connection with its switch; and each call agents made — the tool, the connection, the statement and how it went, never the rows. A connection that is not opted in is not listed, and naming it gets the same answer as naming one that does not exist. Changes take effect on the next tool call — no restart.
 
 Register it once with your agent. With Claude Code:
 
@@ -55,9 +55,9 @@ Then ask in prose — *"on shop-staging, which customers placed more than ten or
 
 **What agents are told.** Column names are not enough to query a database well, so an agent also gets what overdb already knows about it. When it connects, the server's instructions give each database's tenancy rule and your notes, and tell it to call `describe_database` before writing SQL. That answers a question with the slice of the [database map](#whats-in-it) it touches — what each table is for, the values a status column takes, the links only the code makes, each with its `path:line` — and says when the map is older than the schema.
 
-All of it can be changed under **What agents are told** in the same menu:
+All of it can be changed under **What agents are told**, in the Agents sheet, beside a preview of exactly what an agent receives — as it connects, and from `describe_database` for a question you type:
 
-- **Tenants:** optional, and silent unless you say so — most databases have none. Agents hear a tenancy rule only from your setting or your base recipe. When one table is clearly the hub (and isn't the users table), the editor suggests it for you to confirm or dismiss; agents never hear a guess. The rule names the column queries filter on (`client_id`), not the tenant's own key.
+- **Tenants:** optional, and silent unless you say so — most databases have none. Agents hear a tenancy rule only from your setting or your base recipe. When one table is clearly the hub (and isn't the users table), the editor suggests it for you to confirm or dismiss; agents never hear a guess. The rule names the column queries filter on (`client_id`), not the tenant's own key. Caveats adjust the rule where it is wrong for your database: tables every tenant shares (agents don't filter them), tenants to leave out unless asked (test and internal accounts), levels inside a tenant (`partner` within `client`), and more columns that mean the tenant. overdb suggests the shared tables and levels from the catalog.
 - **Notes:** anything an agent should know — "amounts are in cents", "client 2 is a test account".
 - **Map:** included when there is one; it can be left out.
 
@@ -96,7 +96,7 @@ Same six tools, same read-only rules (the code is shared), plain Node 22.12+, no
 
 Give it a database user made for agents, read-only by grant as well as by session, rather than a person's login.
 
-You don't write that file by hand for a connection you already have. **Publish to your org's server…** in a connection's Read-only menu shows the exact record that would leave your machine, lets you name the agents' login, and hands it to overcli (into `~/.overcli/inbox/connections/`), which publishes it to your org's server. A `prod` connection asks for its name first. The option appears once your overcli can take connections.
+You don't write that file by hand for a connection you already have. **Publish to your org's server…** in a connection's Agents menu shows the exact record that would leave your machine, lets you name the agents' login, and hands it to overcli (into `~/.overcli/inbox/connections/`), which publishes it to your org's server. A `prod` connection asks for its name first. The option appears once your overcli can take connections.
 
 ## Engines
 

@@ -220,4 +220,14 @@ describe('the query log', () => {
     expect(text).not.toContain('secret-customer-42');
     expect(text).not.toContain('xxxx');
   });
+
+  it('records describe_database with its question, even though it skips the connection', async () => {
+    const entries: Array<Record<string, unknown>> = [];
+    const client = await connect(
+      deps({ record: (e) => entries.push(e as unknown as Record<string, unknown>), describe: async () => '"the map"' }),
+    );
+    await call(client, 'describe_database', { connection: 'shop-local', question: 'why do orders go stale?' });
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ tool: 'describe_database', connection: 'shop-local', ok: true, question: 'why do orders go stale?' });
+  });
 });

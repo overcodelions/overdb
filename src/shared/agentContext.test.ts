@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
+  caveatHints,
   changedSince,
+  cleanCaveats,
   describeText,
   detectTenant,
   resolveAgentContext,
@@ -10,6 +12,7 @@ import {
   tenantVia,
 } from './agentContext';
 import { schemaFingerprint, type DbMap } from './dbMap';
+import { findLinks } from './baseline';
 import type { SchemaSnapshot, TableInfo } from './types';
 
 function table(name: string, columns: string[], fks: Array<[string, string, string]> = []): TableInfo {
@@ -158,5 +161,72 @@ describe('what agents are told', () => {
     expect(describeText('shop', resolveAgentContext({}), null)).toContain('no map of shop');
     expect(describeText('shop', resolveAgentContext({ map, setting: { map: false } }), map)).toContain('turned off for agents');
     expect(changedSince({ ...map, schemas: { public: schemaFingerprint(multiTenant.schemas[0]) } }, multiTenant)).toEqual([]);
+  });
+});
+
+describe('tenancy caveats', () => {
+  const withCaveats = (caveats: Parameters<typeof cleanCaveats>[0]) =>
+    resolveAgentContext({ setting: { tenant, caveats: cleanCaveats(caveats) }, via: () => ['client_id'] });
+
+  it('keeps what checks out and drops the rest', () => {
+    expect(cleanCaveats({ shared: ['public.countries', 'public.countries', '', 7], excluded: [' 2 ', '9'], levels: [{ schema: 'public' }], alsoFilterOn: [] })).toEqual({
+      shared: ['public.countries'],
+      excluded: ['2', '9'],
+    });
+    expect(cleanCaveats({ shared: [] })).toBeUndefined();
+    expect(cleanCaveats('nope')).toBeUndefined();
+  });
+
+  it('turns each caveat into a sentence of the rule', () => {
+    const rule = tenancySentence(
+      'shop',
+      withCaveats({
+        shared: ['public.countries'],
+        excluded: ['2', '9'],
+        levels: [{ schema: 'public', table: 'partners', column: 'id', via: ['partner_id'] }],
+        alsoFilterOn: ['tenant_ref'],
+      }),
+    )!;
+    expect(rule).toContain('most rows belong to one tenant');
+    expect(rule).toContain('filter on client_id or tenant_ref');
+    expect(rule).toContain('Shared by every tenant, so not filtered by one: public.countries.');
+    expect(rule).toContain('rows also belong to a partners (public.partners, through partner_id)');
+    expect(rule).toContain('Leave out client_id 2, 9');
+  });
+
+  it('says nothing new without caveats, and cuts long lists in the instructions only', () => {
+    expect(tenancySentence('shop', withCaveats(undefined))).toContain('every row belongs');
+    const many = Array.from({ length: 20 }, (_, i) => `public.t${i}`);
+    const ctx = withCaveats({ shared: many });
+    expect(serverInstructions([{ name: 'shop', ctx }])).toContain('and 5 more (describe_database lists them)');
+    expect(tenancySentence('shop', ctx)).toContain('public.t19');
+  });
+
+  it('rides on a recipe tenant too, and not on "no tenants"', () => {
+    const caveats = { excluded: ['2'] };
+    expect(resolveAgentContext({ setting: { caveats }, recipeTenant: tenant }).tenant?.caveats.excluded).toEqual(['2']);
+    expect(resolveAgentContext({ setting: { tenant: 'none', caveats } }).tenant).toBeNull();
+  });
+
+  it('suggests levels inside the tenant and tables that look shared', () => {
+    const snapshot: SchemaSnapshot = {
+      ...multiTenant,
+      schemas: [
+        {
+          name: 'public',
+          tables: [
+            table('clients', ['id', 'name']),
+            table('countries', ['id', 'name']),
+            table('partners', ['id', 'client_id'], [['client_id', 'clients', 'id']]),
+            table('orders', ['id', 'client_id', 'partner_id', 'country_id'], [['client_id', 'clients', 'id'], ['partner_id', 'partners', 'id'], ['country_id', 'countries', 'id']]),
+            table('invoices', ['id', 'client_id', 'partner_id', 'country_id'], [['client_id', 'clients', 'id'], ['partner_id', 'partners', 'id'], ['country_id', 'countries', 'id']]),
+            table('shipments', ['id', 'partner_id'], [['partner_id', 'partners', 'id']]),
+          ],
+        },
+      ],
+    };
+    const hints = caveatHints(snapshot, findLinks(snapshot), tenant);
+    expect(hints.levels.map((l) => [l.table, l.via])).toEqual([['partners', ['partner_id']]]);
+    expect(hints.shared).toEqual(['public.countries']);
   });
 });

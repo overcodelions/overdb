@@ -13,6 +13,9 @@
 // It runs beside the app, not inside it, and shares only what is on disk:
 // the store and the secrets, read here and never written. A connection
 // exposed or hidden in the app takes effect on the next tool call.
+//
+// It also leaves the app a trail: that it is running, for which client, and
+// each call it answered (src/main/agentActivity.ts).
 
 import { app } from 'electron';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
@@ -25,6 +28,7 @@ import { createOverdbMcpServer, exposedConnections } from '../mcp/tools';
 import { catalogCache, wireMcp } from '../mcp/wiring';
 import { agentContextFor } from './agentContext';
 import { describeText, serverInstructions } from '../shared/agentContext';
+import { activityRecorder, startPresence } from './agentActivity';
 
 function err(line: string): void {
   process.stderr.write(`overdb mcp: ${line}\n`);
@@ -39,6 +43,7 @@ export async function serveMcp(): Promise<void> {
     closed: closeTunnel,
     log: err,
   });
+  const presence = startPresence();
   const catalog = catalogCache(db);
   // Read once by the client as it connects: what is on disk now, without
   // opening a database. describe_database is the live, fuller answer.
@@ -49,6 +54,7 @@ export async function serveMcp(): Promise<void> {
   const server = createOverdbMcpServer(
     {
       ...deps,
+      record: activityRecorder(presence.who, err),
       describe: async (conn, question) => {
         // Unreachable is no reason to say nothing: the setting, the recipe
         // and the map are on disk. Only detection and the staleness check
@@ -65,6 +71,7 @@ export async function serveMcp(): Promise<void> {
   const stop = async () => {
     if (stopping) return;
     stopping = true;
+    presence.end();
     await server.close().catch(() => undefined);
     closeAllTunnels();
     await db.closeAll().catch(() => undefined);
@@ -79,6 +86,7 @@ export async function serveMcp(): Promise<void> {
 
   const transport = new StdioServerTransport();
   transport.onclose = () => void stop();
+  server.server.oninitialized = () => presence.identify(server.server.getClientVersion());
   await server.connect(transport);
 
   const exposed = exposedConnections(readConnectionsFromDisk());

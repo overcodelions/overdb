@@ -53,6 +53,8 @@ export interface QueryLogEntry {
   ok: boolean;
   ms: number;
   sql?: string;
+  /// describe_database's question, in the agent's words.
+  question?: string;
   params?: number;
   rowCount?: number;
   truncated?: boolean;
@@ -249,11 +251,22 @@ export function createOverdbMcpServer(deps: McpDeps, opts: { instructions?: stri
       if (!conn) return on(connection, 'describe_database', async () => fail('unreachable'));
       if (!deps.describe) return json(`overdb has nothing on ${conn.name} beyond its catalog: list_tables and describe_table show it.`);
       // Not through on(): it must answer even when the database is down.
+      const started = Date.now();
+      let result: CallToolResult;
       try {
-        return { content: [{ type: 'text', text: await deps.describe(conn, question) }] };
+        result = { content: [{ type: 'text', text: await deps.describe(conn, question) }] };
       } catch (err) {
-        return fail(err instanceof Error ? err.message : String(err));
+        result = fail(err instanceof Error ? err.message : String(err));
       }
+      deps.record?.({
+        at: new Date(started).toISOString(),
+        tool: 'describe_database',
+        connection: conn.name,
+        ok: !result.isError,
+        ms: Date.now() - started,
+        ...(question?.trim() ? { question: question.slice(0, 500) } : {}),
+      });
+      return result;
     },
   );
 

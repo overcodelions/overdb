@@ -27,11 +27,10 @@ import { awsIamToken } from '../main/credentialImport/awsIam';
 import { createOverdbMcpServer } from './tools';
 import { catalogCache, wireMcp } from './wiring';
 import type { QueryLogEntry } from './tools';
+import { appendLogLine } from './queryLog';
 import { createNodeSupervisor } from './nodeSupervisor';
 
 const USAGE = 'usage: node dist/mcp/headless.js --connections FILE [--query-log FILE]   (or set OVERDB_CONNECTIONS)';
-/// A query log past this is moved to FILE.1 and started again.
-const QUERY_LOG_MAX_BYTES = 5 * 1024 * 1024;
 
 function err(line: string): void {
   process.stderr.write(`overdb mcp: ${line}\n`);
@@ -52,25 +51,7 @@ export function queryLogger(file: string, env: NodeJS.ProcessEnv): (entry: Query
   };
   return (entry) => {
     try {
-      fs.mkdirSync(path.dirname(file), { recursive: true });
-      // Everything after the open goes through the open file, never back to
-      // the path: a path checked and then used may name another file by the
-      // time it is used. So a full log is copied aside and emptied in place
-      // rather than renamed. A line another run appends between the copy and
-      // the truncate is lost — once per QUERY_LOG_MAX_BYTES, at worst.
-      const fd = fs.openSync(file, 'a+', 0o600);
-      try {
-        const size = fs.fstatSync(fd).size;
-        if (size > QUERY_LOG_MAX_BYTES) {
-          const full = Buffer.alloc(size);
-          fs.readSync(fd, full, 0, size, 0);
-          fs.writeFileSync(`${file}.1`, full, { mode: 0o600 });
-          fs.ftruncateSync(fd, 0);
-        }
-        fs.writeSync(fd, `${JSON.stringify({ ...who, ...entry })}\n`);
-      } finally {
-        fs.closeSync(fd);
-      }
+      appendLogLine(file, { ...who, ...entry });
     } catch (e) {
       err(`can't write the query log: ${e instanceof Error ? e.message : String(e)}`);
     }
