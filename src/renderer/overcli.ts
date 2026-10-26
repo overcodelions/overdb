@@ -24,7 +24,10 @@ export const OVERCLI_SITE = 'https://overcli.app';
 /// One answer shared by every button — a slow-query list is many rows — and
 /// re-asked whenever the window comes back into focus: that is when overcli
 /// is most likely to have just been installed.
-const useStatus = create<{ available: boolean | null }>(() => ({ available: null }));
+const useStatus = create<{ available: boolean | null; takesConnections: boolean }>(() => ({
+  available: null,
+  takesConnections: false,
+}));
 
 let watching = false;
 function watchStatus(): void {
@@ -33,10 +36,17 @@ function watchStatus(): void {
   const check = () =>
     void window.overdb
       .invoke('overcli:status')
-      .then((s) => useStatus.setState({ available: s.available }))
+      .then((s) => useStatus.setState({ available: s.available, takesConnections: s.takesConnections }))
       .catch(() => {});
   check();
   window.addEventListener('focus', check);
+}
+
+/// Whether overcli can publish a connection to its org's server. False
+/// until known: an option that appears late is better than one that fails.
+export function useOvercliTakesConnections(): boolean {
+  watchStatus();
+  return useStatus((s) => s.takesConnections);
 }
 
 export function useOvercliAvailable(): boolean | null {

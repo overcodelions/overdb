@@ -8,6 +8,8 @@
 
 // First, before anything can read the userData path. See devProfile.ts.
 import './devProfile';
+// Second: `overdb serve --mcp` has to claim stdout before anything logs.
+import { SERVE_MCP } from './serveMode';
 import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeTheme, shell } from 'electron';
 import path from 'node:path';
 import os from 'node:os';
@@ -46,9 +48,11 @@ import { classify } from '../shared/sqlGuard';
 import { bindFor } from '../shared/params';
 import * as writeGate from './writeGate';
 import { discoverLocal } from './discoverLocal';
-import { overcliAvailable, sendToOvercli } from './overcliInbox';
+import { overcliAvailable, overcliTakesConnections, sendConnectionToOvercli, sendToOvercli } from './overcliInbox';
+import { hostedContext, toHosted } from '../shared/hostedConnection';
 import type { HandoffDraft } from '../shared/overcliHandoff';
 import { installMenu } from './menu';
+import { serveMcp } from './mcpServe';
 import { createSample } from './sample';
 import { initAutoUpdater, quitAndInstall } from './updater';
 import { detectTools, extractSql, runInvestigation, runOneShot, type AiTool } from './ai';
@@ -89,6 +93,10 @@ import {
   type DbMap,
 } from '../shared/dbMap';
 import { gitBehind, gitChanged, gitHead, loadMap, mapPath, saveMap } from './mapper';
+import { linkedRepoLinks, mapFileFor, recipePath } from './connectionFiles';
+import { agentContextFor, agentSettingFor, saveAgentSetting } from './agentContext';
+import { tenantCandidates } from '../shared/baseline';
+import { tenantVia, type AgentContextSetting } from '../shared/agentContext';
 import type { MapRun } from '../shared/dbMap';
 import { mapPrompt } from './mapPrompts';
 import type { BaselineFindValue, BaselineStatsValue, SeedStatsValue } from '../dbhost/protocol';
@@ -308,7 +316,7 @@ function registerIpc(): void {
     clipboard.writeText(text);
   });
 
-  ipcMain.handle('overcli:status', () => ({ available: overcliAvailable() }));
+  ipcMain.handle('overcli:status', () => ({ available: overcliAvailable(), takesConnections: overcliTakesConnections() }));
   ipcMain.handle('overcli:send', (_e, draft: HandoffDraft) => sendToOvercli(draft));
   ipcMain.handle('overcli:pickRepo', async (_e, args: { name: string }) => {
     const res = await dialog.showOpenDialog({
@@ -799,16 +807,6 @@ function registerIpc(): void {
     };
   }
 
-  /// Every repo linked for this connection that is still on disk, with the
-  /// schemas each one's code uses.
-  async function linkedRepoLinks(connectionId: string): Promise<RepoLink[]> {
-    const st = Store.load();
-    const owner = repoLinkOwner(connectionId, st.connections, st.envSets);
-    if (!owner) return [];
-    const links = repoLinks(owner, st.connections, st.envSets);
-    const here = await Promise.all(links.map((l) => fs.stat(l.path).then((s) => s.isDirectory()).catch(() => false)));
-    return links.filter((_, i) => here[i]);
-  }
 
   /// The repos to read for work on `schemas`, the first as claude's working
   /// directory, and a note telling it which repo owns which schema.
@@ -844,17 +842,6 @@ function registerIpc(): void {
     return conn?.branchOf && Store.load().connections.some((c) => c.id === conn.branchOf) ? conn.branchOf : connectionId;
   }
 
-  async function mapFileFor(connectionId: string): Promise<{ owner: DbMap['owner']; file: string } | null> {
-    const st = Store.load();
-    const owner = repoLinkOwner(connectionId, st.connections, st.envSets);
-    if (!owner) return null;
-    const file = mapPath(owner, {
-      location: st.settings.mapLocation ?? 'overdb',
-      userData: app.getPath('userData'),
-      repo: recipeHome(await linkedRepoLinks(connectionId)),
-    });
-    return { owner, file };
-  }
 
   async function mapCatalog(connectionId: string, schemas: string[]): Promise<SchemaSnapshot> {
     const probe = mapProbe(connectionId);
@@ -1349,24 +1336,6 @@ function registerIpc(): void {
     return conn;
   }
 
-  /// In the linked repo, so it is reviewed with the code and a teammate
-  /// builds the same baseline; otherwise in overdb's own data.
-  async function recipePath(connectionId: string): Promise<string> {
-    const repo = recipeHome(await linkedRepoLinks(connectionId));
-    if (repo) {
-      // MySQL keeps the one recipe a repo always had: a local server and a
-      // shared sandbox of the same app database share it, which is the
-      // point. A Postgres or Redshift database in the same repo — a data
-      // mart, say — is a different database and gets a file of its own.
-      const conn = Store.load().connections.find((c) => c.id === connectionId);
-      if (conn?.engine === 'postgres') {
-        const slug = (x: string) => x.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'default';
-        return path.join(repo, '.overdb', `baseline-${isRedshift(conn.variant) ? 'redshift' : 'postgres'}-${slug(conn.database || 'default')}.json`);
-      }
-      return path.join(repo, '.overdb', 'baseline.json');
-    }
-    return path.join(app.getPath('userData'), 'baselines', `${connectionId.replace(/[^A-Za-z0-9_-]/g, '_')}.json`);
-  }
 
   /// Every schema's catalog and the server's table sizes: what discovery
   /// reads, and what a build re-reads so it works from the catalog as it is.
@@ -1966,6 +1935,110 @@ function registerIpc(): void {
   );
 
   ipcMain.handle(
+    'conn:setMcpExposed',
+    (_e, args: { connectionId: string; exposed: boolean; confirm?: string }) => {
+      const connections = Store.load().connections;
+      const conn = connections.find((c) => c.id === args.connectionId);
+      if (!conn) return { ok: false, error: 'No such connection.' };
+      // The same gate as writes, for the same reason: handing an agent the
+      // wrong server is the accident, and it is no less one for being a read.
+      if (args.exposed && conn.env === 'prod' && args.confirm !== conn.name) {
+        return { ok: false, error: `Type ${conn.name} to open a production connection to agents.` };
+      }
+      Store.saveConnections(
+        connections.map((c) =>
+          c.id === args.connectionId ? { ...c, mcpExposed: args.exposed } : c,
+        ),
+      );
+      return { ok: true };
+    },
+  );
+
+  ipcMain.handle('agents:context', async (_e, args: { connectionId: string; detect: boolean }) => {
+    const { owner, setting } = agentSettingFor(args.connectionId);
+    if (!owner) return { ok: false, error: 'No such connection.' };
+    let snapshot: SchemaSnapshot | undefined;
+    let detectError: string | undefined;
+    if (args.detect) {
+      try {
+        await ensureOpen(args.connectionId);
+        const schemas = (await db.request(args.connectionId, { op: 'listSchemas' })) as string[];
+        snapshot = (await db.request(args.connectionId, { op: 'introspect', schemas })) as SchemaSnapshot;
+      } catch (err) {
+        detectError = err instanceof Error ? err.message : String(err);
+      }
+    }
+    const { ctx } = await agentContextFor(args.connectionId, snapshot);
+    const candidates = snapshot
+      ? tenantCandidates(snapshot, findLinks(snapshot), 5).map((c) => {
+          const ref = { ...c.ref, column: c.column };
+          return { ...ref, via: tenantVia(snapshot!, ref) };
+        })
+      : [];
+    return {
+      ok: true,
+      context: ctx,
+      setting: setting ?? null,
+      owner: owner.kind,
+      ownerName: owner.name,
+      candidates,
+      detected: Boolean(snapshot),
+      ...(detectError ? { detectError } : {}),
+    };
+  });
+  ipcMain.handle('agents:setContext', (_e, args: { connectionId: string; setting: AgentContextSetting }) =>
+    saveAgentSetting(args.connectionId, args.setting),
+  );
+
+  /// The record plus what agents are told about it. The catalog is read
+  /// when it can be, so the tenancy rule names the column queries filter
+  /// on; unreachable, the rest still goes.
+  async function hostedWithContext(conn: Connection, user?: string, host?: string) {
+    const hosted = toHosted(conn, { user, host });
+    if (!hosted.ok) return hosted;
+    let snapshot: SchemaSnapshot | undefined;
+    try {
+      await ensureOpen(conn.id);
+      const schemas = (await db.request(conn.id, { op: 'listSchemas' })) as string[];
+      snapshot = (await db.request(conn.id, { op: 'introspect', schemas })) as SchemaSnapshot;
+    } catch {
+      snapshot = undefined;
+    }
+    const { ctx, map } = await agentContextFor(conn.id, snapshot);
+    const context = hostedContext(ctx, map);
+    return { ok: true as const, value: context ? { ...hosted.value, context } : hosted.value };
+  }
+
+  ipcMain.handle('conn:hostedPreview', async (_e, args: { connectionId: string; user?: string; host?: string }) => {
+    const conn = Store.load().connections.find((c) => c.id === args.connectionId);
+    if (!conn) return { ok: false, error: 'No such connection.' };
+    return hostedWithContext(conn, args.user, args.host);
+  });
+
+  ipcMain.handle(
+    'conn:publishHosted',
+    async (_e, args: { connectionId: string; user?: string; host?: string; confirm?: string }) => {
+      const conn = Store.load().connections.find((c) => c.id === args.connectionId);
+      if (!conn) return { ok: false, error: 'No such connection.' };
+      // Built again here from the store, never taken from the window: what
+      // leaves the machine is what toHosted makes of the saved connection.
+      if (conn.env === 'prod' && args.confirm !== conn.name) {
+        return { ok: false, error: `Type ${conn.name} to publish a production connection.` };
+      }
+      const hosted = await hostedWithContext(conn, args.user, args.host);
+      if (!hosted.ok) return hosted;
+      const sent = sendConnectionToOvercli(hosted.value);
+      if (!sent.ok) return sent;
+      // Remembered only once it is really with overcli, for the agent mark.
+      const at = new Date().toISOString();
+      Store.saveConnections(
+        Store.load().connections.map((c) => (c.id === conn.id ? { ...c, orgPublishedAt: at } : c)),
+      );
+      return { ...hosted, publishedAt: at };
+    },
+  );
+
+  ipcMain.handle(
     'conn:setTxnMode',
     (_e, args: { connectionId: string; mode: 'auto' | 'manual' }) => {
       Store.saveConnections(
@@ -2192,6 +2265,14 @@ function registerIpc(): void {
 }
 
 app.whenReady().then(() => {
+  // Headless: no window, menu, updater or proxy — see mcpServe.ts.
+  if (SERVE_MCP) {
+    void serveMcp().catch((err) => {
+      console.error('overdb mcp:', err);
+      app.exit(1);
+    });
+    return;
+  }
   // Packaged macOS builds get the dock icon from the .app bundle's
   // .icns, but unpackaged runs show the default Electron mark unless we
   // set it explicitly.
@@ -2257,6 +2338,9 @@ let instancesStopped = false;
 app.on('before-quit', (event) => {
   closeAllTunnels();
   void db.closeAll();
+  // The proxy and the branches belong to the app; a serve process started
+  // none of them and must not stop them on its way out.
+  if (SERVE_MCP) return;
   // A mysqld left running would hold its port and its data directory past
   // overdb's lifetime. Stopping one is a clean InnoDB shutdown, so quitting
   // waits for it.

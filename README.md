@@ -35,6 +35,68 @@ Beyond the editor, the virtualized grid and the fan-out:
 - **Bases and branches.** Copy a database to this machine — your local one, or a sandbox or staging MySQL, MariaDB, Postgres or Redshift — as a *base*: a small copy that keeps only the tenants and logins you pick, still enough to log in and use the app. Then branch it, one writable clone per ticket or experiment, made in seconds whatever its size, and reset to the base when you are done. Each base has a proxy your services point at once; which branch they reach is a click in the title bar.
 - **Database maps.** claude reads your linked repos — read-only tools, no shell — and records which tables the code uses together and how they join, including the links a schema never declares. Bases and seeds read the map instead of the code, so they are quick after the first time.
 - **Slow queries.** What the *server* spends its time on across every client, from `pg_stat_statements` / `performance_schema` — with a since-you-opened-this-pane window, so you can watch a deploy land.
+- **Agents, over MCP.** `overdb serve --mcp` hands an agent the connections you have already set up and tested — read-only, and only the ones you opted in. See below.
+
+## Using it from an agent
+
+`overdb serve --mcp` is the Overdb app started without a window, speaking MCP over stdio. An agent gets seven read-only tools: `describe_database`, `list_connections`, `query`, `list_tables`, `describe_table`, `show_sessions` and `list_slow_queries`.
+
+Nothing is exposed until you say so. Open a connection, click its **Read-only** chip, and turn on **Agents**; on a `prod` connection that asks you to type its name. A connection that is not opted in is not listed, and naming it gets the same answer as naming one that does not exist. Changes take effect on the next tool call — no restart.
+
+Register it once with your agent. With Claude Code:
+
+```bash
+claude mcp add --scope user overdb -- /Applications/Overdb.app/Contents/MacOS/Overdb serve --mcp
+```
+
+On Windows and Linux, point at the installed `Overdb` executable the same way. From a checkout, `npm run build` and use `node_modules/.bin/electron /path/to/overdb serve --mcp`.
+
+Then ask in prose — *"on shop-staging, which customers placed more than ten orders last week?"*, *"why is shop-prod slow right now?"* — and the agent lists the connections, reads the schema, and runs the reads it needs. An overcli worker gets the same thing by listing `overdb` among its MCP servers; every tool name reads as a read to overcli, so an unattended worker is not stopped for approval.
+
+**What agents are told.** Column names are not enough to query a database well, so an agent also gets what overdb already knows about it. When it connects, the server's instructions give each database's tenancy rule and your notes, and tell it to call `describe_database` before writing SQL. That answers a question with the slice of the [database map](#whats-in-it) it touches — what each table is for, the values a status column takes, the links only the code makes, each with its `path:line` — and says when the map is older than the schema.
+
+All of it can be changed under **What agents are told** in the same menu:
+
+- **Tenants:** optional, and silent unless you say so — most databases have none. Agents hear a tenancy rule only from your setting or your base recipe. When one table is clearly the hub (and isn't the users table), the editor suggests it for you to confirm or dismiss; agents never hear a guess. The rule names the column queries filter on (`client_id`), not the tenant's own key.
+- **Notes:** anything an agent should know — "amounts are in cents", "client 2 is a test account".
+- **Map:** included when there is one; it can be left out.
+
+On a connection in an environment set, the setting covers every environment in it. It is guidance, not a boundary: to keep tenants apart, give the agent a login that can only see one.
+
+What an agent gets is what the app gets, minus everything that writes:
+
+- **Read-only on the server.** Every session opens in the engine's read-only mode whatever *Writes* says for the connection, and a write, DDL or multi-statement batch is refused before it is sent. There is no transaction, cancel, kill or reset.
+- **Your credentials, never theirs.** Passwords, 1Password, IAM tokens and SSH tunnels resolve inside overdb, exactly as when you connect; the agent sees a name, never a secret.
+- **Bounded.** 100 rows by default, at most 1,000, with long cells cut; a 30-second statement timeout even on a local connection.
+
+Read-only is not harmless. A read can still be expensive, and on Postgres a superuser's `SELECT pg_terminate_backend(…)` is a read. Expose a connection whose database user has only the rights you would give the agent.
+
+### On a server
+
+A hosted agent — an overgo worker, anything in a container — has no Overdb app, no keychain and no VPN of yours. For that there is the same server without the app:
+
+```bash
+node dist/mcp/headless.js --connections /etc/overdb/connections.json
+```
+
+Same six tools, same read-only rules (the code is shared), plain Node 22.12+, no Electron. It reads a connections file that holds **no secret** — each credential is a reference the server resolves from what it has itself:
+
+```json
+{ "version": 1, "connections": [
+  { "id": "c1", "name": "shop-staging", "env": "staging", "engine": "postgres",
+    "host": "shop-staging.xxxx.rds.amazonaws.com", "database": "shop", "user": "agents_ro", "ssl": "verify-full",
+    "credential": { "source": "aws-iam" } },
+  { "id": "c2", "name": "orders-prod", "env": "prod", "engine": "mysql",
+    "host": "orders.internal", "database": "orders", "user": "agents_ro",
+    "credential": { "source": "secret", "env": "OVERDB_ORDERS_PROD_PASSWORD" } }
+] }
+```
+
+`aws-iam` signs an RDS or Redshift token with the server's own AWS role; `secret` reads the named environment variable, set on this process by whoever runs it; `none` is for DynamoDB, which uses the role directly. Saved credential commands, 1Password paths, SSH tunnels and certificate paths have no hosted form, on purpose — on a shared server a saved command would run as the server. A bad entry is skipped and logged; the rest are served. The file is re-read on every call.
+
+Give it a database user made for agents, read-only by grant as well as by session, rather than a person's login.
+
+You don't write that file by hand for a connection you already have. **Publish to your org's server…** in a connection's Read-only menu shows the exact record that would leave your machine, lets you name the agents' login, and hands it to overcli (into `~/.overcli/inbox/connections/`), which publishes it to your org's server. A `prod` connection asks for its name first. The option appears once your overcli can take connections.
 
 ## Engines
 

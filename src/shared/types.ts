@@ -14,6 +14,8 @@ export type AiTool = 'claude' | 'codex' | 'gemini';
 
 export type { Engine, Variant } from './engines';
 import type { HandoffDraft } from './overcliHandoff';
+import type { HostedConnection } from './hostedConnection';
+import type { AgentContext, AgentContextSetting, TenantRef } from './agentContext';
 import type { Engine, Variant } from './engines';
 import type { FormatStyle } from './formatSql';
 // Type-only, and slowQueries.ts imports `Cell` back from here. The cycle
@@ -182,6 +184,14 @@ export interface Connection {
   /// Opt-in exposure to `overdb serve --mcp` (v0.3). Off by default:
   /// handing an agent a prod connection should be a deliberate act.
   mcpExposed?: boolean;
+  /// When this connection was last handed to overcli for the org's server
+  /// (src/shared/hostedConnection.ts). What happens there is the server's
+  /// business; this only remembers that it was sent, so the sidebar can say.
+  orgPublishedAt?: string;
+  /// What agents are told about this database, where it differs from what
+  /// overdb works out (src/shared/agentContext.ts). Only used when the
+  /// connection is in no env set — a set's setting covers its members.
+  agentContext?: AgentContextSetting;
   /// The repo(s) holding the code that talks to this database, for handing
   /// a finding to overcli. Only used when the connection is in no env set —
   /// a set's link covers all its members. See src/shared/overcliHandoff.ts.
@@ -216,6 +226,8 @@ export interface EnvSet {
   pinned?: boolean;
   memberIds: string[];
   baselineId: string;
+  /// What agents are told about this database — see Connection.agentContext.
+  agentContext?: AgentContextSetting;
   /// Which schema each member runs against, by connection id.
   ///
   /// Per member and not one value for the set, because the whole premise is
@@ -585,7 +597,9 @@ export interface IPCInvokeMap {
   /// Whether overcli can take a handoff: its inbox folder exists, which only
   /// an overcli that reads it creates. Checked, never cached for long —
   /// installing overcli mid-session should light the button up.
-  'overcli:status': () => { available: boolean };
+  /// `takesConnections`: its inbox has a connections folder, so it can
+  /// publish a connection to the org's server — see hostedConnection.ts.
+  'overcli:status': () => { available: boolean; takesConnections: boolean };
   /// Write one handoff into overcli's inbox. Main stamps it and rebuilds it
   /// from the known fields; see src/shared/overcliHandoff.ts.
   'overcli:send': (draft: HandoffDraft) => { ok: true; id: string } | { ok: false; error: string };
@@ -750,6 +764,41 @@ export interface IPCInvokeMap {
     ok: boolean;
     error?: string;
   };
+  /// Whether `overdb serve --mcp` offers this connection to agents. The
+  /// same prod rule as `conn:setWrites`: `confirm` must be the name.
+  'conn:setMcpExposed': (args: { connectionId: string; exposed: boolean; confirm?: string }) => {
+    ok: boolean;
+    error?: string;
+  };
+  /// The connection as it would be published to an org's server, for the
+  /// person to read before it leaves. A HostedConnection holds no secret by
+  /// construction — its credential is a source, or the NAME of a variable
+  /// the server sets — see src/shared/hostedConnection.ts.
+  'conn:hostedPreview': (args: { connectionId: string; user?: string; host?: string }) =>
+    | { ok: true; value: HostedConnection }
+    | { ok: false; error: string };
+  /// Publish it through overcli. A prod connection needs `confirm` to be
+  /// its name, as for writes and agents.
+  'conn:publishHosted': (args: { connectionId: string; user?: string; host?: string; confirm?: string }) =>
+    | { ok: true; value: HostedConnection; publishedAt: string }
+    | { ok: false; error: string };
+  /// What agents are told about this connection's database, worked out,
+  /// and the setting behind it. `detect` reads the catalog (connecting if
+  /// need be) to detect a tenant and list candidates; without it only files
+  /// are read.
+  'agents:context': (args: { connectionId: string; detect: boolean }) =>
+    | {
+        ok: true;
+        context: AgentContext;
+        setting: AgentContextSetting | null;
+        owner: 'envSet' | 'connection';
+        ownerName: string;
+        candidates: Array<TenantRef & { via: string[] }>;
+        detected: boolean;
+        detectError?: string;
+      }
+    | { ok: false; error: string };
+  'agents:setContext': (args: { connectionId: string; setting: AgentContextSetting }) => { ok: boolean; error?: string };
   'conn:setTxnMode': (args: { connectionId: string; mode: 'auto' | 'manual' }) => void;
   'txn:commit': (connectionId: string) => { ok: boolean; error?: string };
   'txn:rollback': (connectionId: string) => { ok: boolean; error?: string };

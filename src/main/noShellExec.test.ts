@@ -56,14 +56,16 @@ describe('external programs', () => {
 
   it('are spawned, never exec’d', () => {
     // `exec` and `execSync` ARE the shell — they run their argument through
-    // /bin/sh by definition, with no option to say otherwise.
+    // /bin/sh by definition, with no option to say otherwise. `fork` is
+    // allowed: it runs a node module by path with an argv and no shell, and
+    // it is how the headless MCP server starts its connection hosts.
     const offenders: string[] = [];
     for (const s of sources()) {
       const imports = [...s.text.matchAll(/import\s*\{([^}]*)\}\s*from\s*'node:child_process'/g)];
       for (const m of imports) {
         const named = m[1].split(',').map((x) => x.trim().split(/\s+as\s+/)[0].trim());
         for (const name of named) {
-          if (name && !['spawn', 'spawnSync', 'ChildProcess', 'type ChildProcess'].includes(name)) {
+          if (name && !['spawn', 'spawnSync', 'fork', 'ChildProcess', 'type ChildProcess'].includes(name)) {
             offenders.push(`${s.file}: ${name}`);
           }
         }

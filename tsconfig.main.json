@@ -14,6 +14,6 @@
     "lib": ["ES2022"],
     "types": ["node"]
   },
-  "include": ["src/types/**/*", "src/main/**/*", "src/preload/**/*", "src/shared/**/*", "src/db/**/*", "src/dbhost/**/*", "src/builder/**/*", "src/helper/**/*"],
+  "include": ["src/types/**/*", "src/main/**/*", "src/preload/**/*", "src/shared/**/*", "src/db/**/*", "src/dbhost/**/*", "src/builder/**/*", "src/helper/**/*", "src/mcp/**/*"],
   "exclude": ["src/**/*.test.ts", "src/**/*.test.tsx"]
 }

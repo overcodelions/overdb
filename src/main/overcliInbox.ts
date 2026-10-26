@@ -16,6 +16,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 
 import { buildHandoff, handoffFileName, type HandoffDraft } from '../shared/overcliHandoff';
+import { buildConnectionPush, connectionPushFileName, type HostedConnection } from '../shared/hostedConnection';
 
 export function overcliInboxDir(): string {
   return path.join(os.homedir(), '.overcli', 'inbox');
@@ -58,4 +59,42 @@ export function sendToOvercli(
     return { ok: false, error: `Could not write to overcli’s inbox: ${(e as Error).message}` };
   }
   return { ok: true, id: built.handoff.id };
+}
+
+/// Where overcli picks up a connection to push to its org's server. See
+/// `ConnectionPush` in src/shared/hostedConnection.ts for why it is not the
+/// inbox itself.
+export function overcliConnectionsDir(): string {
+  return path.join(overcliInboxDir(), 'connections');
+}
+
+/// The same rule as `overcliAvailable`: the folder is made by an overcli
+/// that reads it, so its existence is the whole answer.
+export function overcliTakesConnections(dir: string = overcliConnectionsDir()): boolean {
+  return overcliAvailable(dir);
+}
+
+export function sendConnectionToOvercli(
+  connection: HostedConnection,
+  opts: { dir?: string; now?: number; id?: string } = {},
+): { ok: true; id: string } | { ok: false; error: string } {
+  const dir = opts.dir ?? overcliConnectionsDir();
+  if (!overcliTakesConnections(dir)) {
+    return { ok: false, error: 'This overcli can’t publish connections yet. Update it, then try again.' };
+  }
+  const push = buildConnectionPush(connection, { id: opts.id ?? randomUUID(), now: opts.now ?? Date.now() });
+  const final = path.join(dir, connectionPushFileName(push));
+  const tmp = `${final}.tmp`;
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(push, null, 2), { encoding: 'utf-8', mode: 0o600 });
+    fs.renameSync(tmp, final);
+  } catch (e) {
+    try {
+      fs.rmSync(tmp, { force: true });
+    } catch {
+      // Nothing to clean up.
+    }
+    return { ok: false, error: `Could not write to overcli’s inbox: ${(e as Error).message}` };
+  }
+  return { ok: true, id: push.id };
 }
