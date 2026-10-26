@@ -53,8 +53,20 @@ export function queryLogger(file: string, env: NodeJS.ProcessEnv): (entry: Query
   return (entry) => {
     try {
       fs.mkdirSync(path.dirname(file), { recursive: true });
-      if (fs.existsSync(file) && fs.statSync(file).size > QUERY_LOG_MAX_BYTES) fs.renameSync(file, `${file}.1`);
-      fs.appendFileSync(file, `${JSON.stringify({ ...who, ...entry })}\n`, { mode: 0o600 });
+      // Sized through the open file, never by checking the path and then
+      // using it: whatever the path names by the time of the write is what
+      // was checked.
+      let fd = fs.openSync(file, 'a', 0o600);
+      try {
+        if (fs.fstatSync(fd).size > QUERY_LOG_MAX_BYTES) {
+          fs.closeSync(fd);
+          fs.renameSync(file, `${file}.1`);
+          fd = fs.openSync(file, 'a', 0o600);
+        }
+        fs.writeSync(fd, `${JSON.stringify({ ...who, ...entry })}\n`);
+      } finally {
+        fs.closeSync(fd);
+      }
     } catch (e) {
       err(`can't write the query log: ${e instanceof Error ? e.message : String(e)}`);
     }
