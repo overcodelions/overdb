@@ -19,7 +19,7 @@
 import type { Connection, EnvKind, SslMode } from './types';
 import type { Engine, Variant } from './engines';
 import { isLoopback } from './seedGate';
-import { resolveAgentContext, type AgentContext, type TenantRef } from './agentContext';
+import { cleanCaveats, resolveAgentContext, type AgentContext, type TenancyCaveats, type TenantRef } from './agentContext';
 import type { DbMap, MapLink, MapTable } from './dbMap';
 
 export const HOSTED_FILE_VERSION = 1;
@@ -71,7 +71,7 @@ export interface HostedMap {
 
 export interface HostedContext {
   /// `via`: the columns queries filter on, worked out where the catalog was.
-  tenant?: TenantRef & { via: string[] };
+  tenant?: TenantRef & { via: string[]; caveats?: TenancyCaveats };
   noTenant?: true;
   notes?: string;
   map?: HostedMap;
@@ -106,7 +106,10 @@ export function agentReach(conn: { mcpExposed?: boolean; orgPublishedAt?: string
 /// when it is included.
 export function hostedContext(ctx: AgentContext, map: DbMap | null): HostedContext | undefined {
   const out: HostedContext = {};
-  if (ctx.tenant) out.tenant = { schema: ctx.tenant.schema, table: ctx.tenant.table, column: ctx.tenant.column, via: ctx.tenant.via };
+  if (ctx.tenant) {
+    const caveats = cleanCaveats(ctx.tenant.caveats);
+    out.tenant = { schema: ctx.tenant.schema, table: ctx.tenant.table, column: ctx.tenant.column, via: ctx.tenant.via, ...(caveats ? { caveats } : {}) };
+  }
   else if (ctx.noTenant) out.noTenant = true;
   if (ctx.notes) out.notes = ctx.notes;
   if (map && ctx.map.included) {
@@ -140,6 +143,7 @@ export function hostedAgentContext(hc: HostedContext | undefined, changed: strin
   const ctx = resolveAgentContext({
     setting: {
       ...(hc?.tenant ? { tenant: { schema: hc.tenant.schema, table: hc.tenant.table, column: hc.tenant.column } } : hc?.noTenant ? { tenant: 'none' as const } : {}),
+      ...(hc?.tenant?.caveats ? { caveats: hc.tenant.caveats } : {}),
       ...(hc?.notes ? { notes: hc.notes } : {}),
     },
     map,
@@ -163,7 +167,8 @@ export function parseHostedContext(raw: unknown): HostedContext | undefined {
   const t = r.tenant as Record<string, unknown> | undefined;
   if (t && text(t.schema, 200) && text(t.table, 200) && text(t.column, 200)) {
     const via = Array.isArray(t.via) ? t.via.filter((v): v is string => text(v, 200)).slice(0, 5) : [];
-    out.tenant = { schema: t.schema, table: t.table, column: t.column, via };
+    const caveats = cleanCaveats(t.caveats);
+    out.tenant = { schema: t.schema, table: t.table, column: t.column, via, ...(caveats ? { caveats } : {}) };
   } else if (r.noTenant === true) out.noTenant = true;
   if (text(r.notes, 4000) && r.notes.trim()) out.notes = r.notes;
   const m = r.map as Record<string, unknown> | undefined;

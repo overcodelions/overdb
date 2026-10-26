@@ -58,7 +58,11 @@ export type Sheet =
   /// Seed for a ticket. See seedStore.ts.
   | { kind: 'seed'; connectionId: string }
   | { kind: 'baseline'; connectionId: string }
-  | { kind: 'tickets' };
+  | { kind: 'tickets' }
+  /// Everything about agents: connecting one, who is connected, which
+  /// connections they read and what they did; `briefing` opens on what
+  /// they are told about `connectionId`.
+  | { kind: 'agents'; connectionId?: string; tab?: 'overview' | 'briefing' };
 
 export interface ConfirmRequest {
   title: string;

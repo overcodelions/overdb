@@ -12,7 +12,7 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   to an agent over MCP — `list_connections`, `query`, `list_tables`,
   `describe_table`, `show_sessions` and `list_slow_queries`. Read-only on
   the server whatever Writes says, and only for connections you turn on
-  under **Agents** in the Read-only menu (a `prod` connection asks for its
+  in the connection's **Agents** chip (a `prod` connection asks for its
   name). Credentials and tunnels resolve inside overdb; the agent never
   sees a secret. See "Using it from an agent" in the README.
 - `describe_database`, and what agents are told: each database's tenancy rule,
@@ -30,7 +30,20 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - `--query-log FILE` on the headless server: one line per call, with the
   worker and run its runtime names, the SQL and row count, never rows or
   bound values. Moved aside at 5 MB.
-- **Publish to your org's server…**, in a connection's Read-only menu:
+- The **Agents** sheet, from the end of the bottom rail: the command that
+  registers overdb with Claude Code or any MCP client, ready to copy; which
+  agents are connected now and from where; every connection with its switch;
+  and each call agents made, with refused and slow ones a click away. Its
+  **What agents are told** tab edits the briefing beside the exact text an
+  agent receives.
+- Tenancy caveats, under the tenant in **What agents are told**: tables
+  every tenant shares, tenants to leave out unless asked, levels inside a
+  tenant and more columns that mean it. Shared tables and levels are
+  suggested from the catalog; all four are published with the connection.
+- An **Agents** chip beside Writes, rather than a switch under it: today's
+  calls on the connection, a dot while an agent is connected, and the last
+  few calls in its menu.
+- **Publish to your org's server…**, in a connection's Agents menu:
   shows the exact record that would leave the machine — no password, the
   agents' login of your choosing — and hands it to overcli to publish.
   Appears once overcli can take connections.

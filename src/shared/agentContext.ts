@@ -9,6 +9,9 @@
 //            whose users table every other table points at would otherwise
 //            be announced as multi-tenant. A tenant detected from the
 //            catalog is only a SUGGESTION, shown to the person to confirm.
+//            Its caveats — tables every tenant shares, tenants to leave
+//            out, levels inside a tenant, more columns that mean it — are
+//            the person's alone, and ride on whichever tenant wins.
 //   notes    the person's setting, or none
 //   map      the database map when there is one, unless turned off
 //
@@ -21,14 +24,32 @@
 // is the database's job — a view, row-level security, a narrower login.
 
 import type { SchemaSnapshot } from './types';
-import { findLinks, loginTables, tableKey, tenantCandidates, type TableRef } from './baseline';
+import { findLinks, loginTables, tableKey, tenancyLevels, tenantCandidates, type Link, type TableRef } from './baseline';
 import { mapSlice, schemaFingerprint, type DbMap } from './dbMap';
 
 export type TenantRef = TableRef & { column: string };
 
+/// A level inside a tenant — `partner` within `client` — and the columns
+/// rows point at it through.
+export type TenancyLevelRef = TenantRef & { via: string[] };
+
+/// What the plain rule gets wrong about a particular database.
+export interface TenancyCaveats {
+  /// Tables every tenant shares, as `schema.table`: lookups, config. They
+  /// have no tenant to filter on.
+  shared?: string[];
+  /// Tenants to leave out unless asked for, by the value queries filter on:
+  /// test and internal accounts.
+  excluded?: string[];
+  levels?: TenancyLevelRef[];
+  /// More columns that mean the tenant, where the catalog did not say.
+  alsoFilterOn?: string[];
+}
+
 export interface AgentContextSetting {
   /// Unset: worked out. 'none': this database has no tenants.
   tenant?: TenantRef | 'none';
+  caveats?: TenancyCaveats;
   notes?: string;
   /// false leaves the map out. Unset: included when there is one.
   map?: boolean;
@@ -41,7 +62,7 @@ export interface AgentContext {
   /// first (`client_id`) — what a query actually filters on. The tenant's
   /// own `column` is its key (`id`), which filters nothing but itself.
   /// Empty when the catalog has not been read.
-  tenant: (TenantRef & { source: TenantSource; via: string[] }) | null;
+  tenant: (TenantRef & { source: TenantSource; via: string[]; caveats: Required<TenancyCaveats> }) | null;
   /// Detected from the catalog while nothing is known: for the person to
   /// confirm or dismiss. Never told to an agent.
   suggestion: (TenantRef & { via: string[] }) | null;
@@ -63,6 +84,68 @@ export interface AgentContext {
 /// be announced as the tenant.
 export const DETECT_MIN_SHARE = 0.25;
 export const DETECT_MIN_TABLES = 3;
+
+const NO_CAVEATS: Required<TenancyCaveats> = { shared: [], excluded: [], levels: [], alsoFilterOn: [] };
+
+const word = (v: unknown, max = 200): v is string => typeof v === 'string' && v.trim().length > 0 && v.length <= max;
+const words = (v: unknown, cap: number): string[] =>
+  Array.isArray(v) ? [...new Set(v.filter((x) => word(x)).map((x) => (x as string).trim()))].slice(0, cap) : [];
+
+/// Caveats as they may be kept: from the app's IPC, a saved store or a
+/// published file alike. What doesn't check out is dropped, not refused.
+export function cleanCaveats(raw: unknown): TenancyCaveats | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const r = raw as Record<string, unknown>;
+  const levels = (Array.isArray(r.levels) ? r.levels : [])
+    .filter((l): l is Record<string, unknown> => !!l && typeof l === 'object')
+    .filter((l) => word(l.schema) && word(l.table) && word(l.column))
+    .slice(0, 5)
+    .map((l) => ({ schema: (l.schema as string).trim(), table: (l.table as string).trim(), column: (l.column as string).trim(), via: words(l.via, 5) }));
+  const out: TenancyCaveats = {
+    ...(words(r.shared, 500).length ? { shared: words(r.shared, 500) } : {}),
+    ...(words(r.excluded, 50).length ? { excluded: words(r.excluded, 50) } : {}),
+    ...(levels.length ? { levels } : {}),
+    ...(words(r.alsoFilterOn, 5).length ? { alsoFilterOn: words(r.alsoFilterOn, 5) } : {}),
+  };
+  return Object.keys(out).length ? out : undefined;
+}
+
+/// For the person setting caveats on `tenant`: the levels inside it, and
+/// tables that look shared — referenced by others, but neither pointing at
+/// the tenant (or a level) nor carrying a column that means it.
+export function caveatHints(
+  snapshot: SchemaSnapshot,
+  links: Link[],
+  tenant: TenantRef,
+  limit = 8,
+): { levels: TenancyLevelRef[]; shared: string[] } {
+  const levels = tenancyLevels(snapshot, links, tenant).map((l) => {
+    const ref = { ...l.ref, column: l.column };
+    return { ...ref, via: tenantVia(snapshot, ref) };
+  });
+  const chain = new Set([tableKey(tenant), ...levels.map((l) => tableKey(l))]);
+  const scoped = new Set(links.filter((l) => !l.audit && chain.has(tableKey(l.to))).map((l) => tableKey(l.from)));
+  const means = new Set([...tenantVia(snapshot, tenant), tenant.column].map((c) => c.toLowerCase()));
+  const pointedAt = new Map<string, Set<string>>();
+  for (const l of links) {
+    if (l.audit || tableKey(l.from) === tableKey(l.to)) continue;
+    const to = tableKey(l.to);
+    pointedAt.set(to, (pointedAt.get(to) ?? new Set()).add(tableKey(l.from)));
+  }
+  const shared: Array<[string, number]> = [];
+  for (const s of snapshot.schemas) {
+    for (const t of s.tables) {
+      if (t.kind !== 'table') continue;
+      const k = tableKey({ schema: s.name, table: t.name });
+      const n = pointedAt.get(k)?.size ?? 0;
+      if (n < 2 || chain.has(k) || scoped.has(k)) continue;
+      if (t.columns.some((c) => means.has(c.name.toLowerCase()) && c.name.toLowerCase() !== 'id')) continue;
+      shared.push([k, n]);
+    }
+  }
+  shared.sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  return { levels, shared: shared.slice(0, limit).map(([k]) => k) };
+}
 
 export function detectTenant(snapshot: SchemaSnapshot): TenantRef | null {
   // People are not tenants: a users table every row is stamped with is the
@@ -104,10 +187,19 @@ export function resolveAgentContext(input: {
   let tenant: AgentContext['tenant'] = null;
   let noTenant: AgentContext['noTenant'] = null;
   const via = (t: TenantRef) => input.via?.(t) ?? [];
+  const c = setting?.caveats;
+  const caveats: Required<TenancyCaveats> = {
+    shared: c?.shared ?? [],
+    excluded: c?.excluded ?? [],
+    // A level saved without its columns gets them from the catalog when
+    // there is one.
+    levels: (c?.levels ?? []).map((l) => ({ ...l, via: l.via.length ? l.via : via(l) })),
+    alsoFilterOn: c?.alsoFilterOn ?? [],
+  };
   if (setting?.tenant === 'none') noTenant = { source: 'set' };
-  else if (setting?.tenant) tenant = { ...setting.tenant, source: 'set', via: via(setting.tenant) };
+  else if (setting?.tenant) tenant = { ...setting.tenant, source: 'set', via: via(setting.tenant), caveats };
   else if (recipeTenant === null) noTenant = { source: 'recipe' };
-  else if (recipeTenant) tenant = { ...recipeTenant, source: 'recipe', via: via(recipeTenant) };
+  else if (recipeTenant) tenant = { ...recipeTenant, source: 'recipe', via: via(recipeTenant), caveats };
   return {
     tenant,
     noTenant,
@@ -124,16 +216,37 @@ export function resolveAgentContext(input: {
 
 const qualified = (t: TenantRef) => `${t.schema}.${t.table}`;
 
-/// The tenancy rule in a sentence, or null when there is nothing to say.
-export function tenancySentence(name: string, ctx: AgentContext): string | null {
+/// `brief` cuts long lists, for the server's instructions; describe_database
+/// gives them whole.
+function listed(items: string[], brief: boolean): string {
+  const cap = brief ? 15 : items.length;
+  const shown = items.slice(0, cap).join(', ');
+  return items.length > cap ? `${shown} and ${items.length - cap} more (describe_database lists them)` : shown;
+}
+
+/// The tenancy rule, then its caveats; null when there is nothing to say.
+export function tenancySentence(name: string, ctx: AgentContext, opts: { brief?: boolean } = {}): string | null {
   if (ctx.noTenant) return `${name} is not multi-tenant.`;
   const t = ctx.tenant;
   if (!t) return null;
+  const brief = Boolean(opts.brief);
   const key = `${qualified(t)}.${t.column}`;
-  const filter = t.via.length
-    ? `filter on ${t.via.join(' or ')}`
-    : `filter on the column that points at ${key}`;
-  return `${name} is multi-tenant: every row belongs to one tenant in ${qualified(t)}${t.via.length ? `, through ${t.via.join(' / ')}` : ` (${key})`}. Scope every query to one tenant — ${filter}, or join through a table that has it — unless the question is explicitly about all tenants.`;
+  const { shared, excluded, levels, alsoFilterOn } = t.caveats ?? NO_CAVEATS;
+  const columns = [...new Set([...t.via, ...alsoFilterOn])];
+  const filter = columns.length ? `filter on ${columns.join(' or ')}` : `filter on the column that points at ${key}`;
+  const out = [
+    `${name} is multi-tenant: ${shared.length ? 'most rows belong' : 'every row belongs'} to one tenant in ${qualified(t)}${columns.length ? `, through ${columns.join(' / ')}` : ` (${key})`}. Scope every query to one tenant — ${filter}, or join through a table that has it — unless the question is explicitly about all tenants.`,
+  ];
+  if (shared.length) out.push(`Shared by every tenant, so not filtered by one: ${listed(shared, brief)}.`);
+  for (const l of levels) {
+    out.push(
+      `Within a tenant, rows also belong to a ${l.table} (${qualified(l)}${l.via.length ? `, through ${l.via.join(' / ')}` : ''}): a question about one ${l.table} filters on that as well.`,
+    );
+  }
+  if (excluded.length) {
+    out.push(`Leave out ${columns[0] ?? key} ${listed(excluded, brief)} — test or internal tenants — unless the question asks for them.`);
+  }
+  return out.join(' ');
 }
 
 /// Where each part came from, for the person reading the setting.
@@ -155,7 +268,7 @@ export function serverInstructions(list: Array<{ name: string; ctx: AgentContext
     "links the schema doesn't declare) and the rules to follow. Prefer it over guessing from column names.",
   ];
   for (const { name, ctx } of list) {
-    const parts = [tenancySentence(name, ctx), ctx.notes ? `Notes on ${name}: ${ctx.notes.slice(0, NOTES_IN_INSTRUCTIONS)}` : null].filter(Boolean);
+    const parts = [tenancySentence(name, ctx, { brief: true }), ctx.notes ? `Notes on ${name}: ${ctx.notes.slice(0, NOTES_IN_INSTRUCTIONS)}` : null].filter(Boolean);
     if (parts.length) lines.push('', ...parts as string[]);
   }
   return lines.join('\n');

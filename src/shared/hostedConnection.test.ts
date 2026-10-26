@@ -189,6 +189,12 @@ describe('what agents are told, carried to a server', () => {
   it('reads back what it wrote, and drops what does not check out', () => {
     const hc = hostedContext(resolveAgentContext({ recipeTenant: tenant, map, via: () => ['client_id'] }), map)!;
     expect(parseHostedContext(JSON.parse(JSON.stringify(hc)))).toEqual(hc);
+    const withCaveats = hostedContext(
+      resolveAgentContext({ recipeTenant: tenant, setting: { caveats: { shared: ['public.countries'], excluded: ['2'] } }, via: () => ['client_id'] }),
+      null,
+    )!;
+    expect(withCaveats.tenant?.caveats).toEqual({ shared: ['public.countries'], excluded: ['2'] });
+    expect(parseHostedContext(JSON.parse(JSON.stringify(withCaveats)))).toEqual(withCaveats);
     expect(parseHostedContext({ tenant: { schema: 1 }, notes: 42, map: { builtAt: 'x', tables: { a: { purpose: 7 } } }, extra: 'y' })).toEqual({
       map: { builtAt: 'x', schemas: {}, tables: {}, links: [] },
     });

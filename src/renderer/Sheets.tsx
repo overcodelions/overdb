@@ -9,6 +9,7 @@ import { TicketsSheet } from './TicketsSheet';
 import { TablePicker } from './TablePicker';
 import { useStore } from './store';
 import { SettingsSheet } from './SettingsSheet';
+import { AgentsSheet } from './AgentsSheet';
 
 /// Backdrop + escape-to-close wrapper shared by every sheet, so no
 /// individual sheet has to remember the dismissal rules.
@@ -34,6 +35,8 @@ export function SheetHost(): JSX.Element | null {
   // Settings is a rail of sections beside one pane. A fixed frame, so
   // moving between sections does not resize the sheet under the pointer.
   const settings = sheet.kind === 'settings';
+  // A table, a log and a preview beside an editor: the big frame.
+  const big = sheet.kind === 'seed' || sheet.kind === 'baseline' || sheet.kind === 'tickets' || sheet.kind === 'agents';
 
   return (
     <div
@@ -42,7 +45,7 @@ export function SheetHost(): JSX.Element | null {
       // height — it cannot jump — so it sits in the middle, where a tall
       // dialog belongs.
       className={`fixed inset-0 z-40 flex justify-center bg-black/40 ${
-        settings || sheet.kind === 'seed' || sheet.kind === 'baseline' || sheet.kind === 'tickets' ? 'items-center py-6' : `items-start ${help ? 'pt-14' : 'pt-24'}`
+        settings || big ? 'items-center py-6' : `items-start ${help ? 'pt-14' : 'pt-24'}`
       }`}
       onClick={() => setSheet(null)}
     >
@@ -52,7 +55,7 @@ export function SheetHost(): JSX.Element | null {
             ? 'w-[min(880px,calc(100vw-48px))] h-[min(620px,calc(100vh-96px))] flex flex-col overflow-hidden'
             : help
             ? 'w-[760px] max-w-[calc(100vw-48px)] max-h-[80vh] overflow-hidden'
-            : sheet.kind === 'seed' || sheet.kind === 'baseline' || sheet.kind === 'tickets'
+            : big
               // A five-step flow with a plan and a script side by side: it
               // needs a fixed frame, or every step resizes under the pointer.
               // Grows with the window up to a comfortable reading size: a
@@ -81,6 +84,7 @@ export function SheetHost(): JSX.Element | null {
         {sheet.kind === 'seed' && <SeedSheet connectionId={sheet.connectionId} />}
         {sheet.kind === 'baseline' && <BaselineSheet connectionId={sheet.connectionId} />}
         {sheet.kind === 'tickets' && <TicketsSheet />}
+        {sheet.kind === 'agents' && <AgentsSheet connectionId={sheet.connectionId} tab={sheet.tab ?? 'overview'} />}
         {sheet.kind === 'pickTables' && (
           <TablePicker connectionId={sheet.connectionId} onClose={() => setSheet(null)} />
         )}
