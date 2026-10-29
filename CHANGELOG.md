@@ -7,6 +7,8 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-28
+
 ### Added
 - `overdb serve --mcp`: the connections you have already set up, offered
   to an agent over MCP — `list_connections`, `query`, `list_tables`,
@@ -47,6 +49,20 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   shows the exact record that would leave the machine — no password, the
   agents' login of your choosing — and hands it to overcli to publish.
   Appears once overcli can take connections.
+- A **Size** column in a base's **Sort tables** step: what the base keeps
+  of each table against what is there today. The Table, Rows copied and
+  Size headers sort the list.
+
+### Changed
+- The sidebar: each engine is a small tile with two letters in its colour,
+  with a pip on its corner for connected or failed. A row ends in a star or
+  the agent mark, and on hover or focus in a star and a ⋯ menu, where edit
+  and delete now live. Second lines, headings, counts and empty states are
+  easier to read on both themes. Search has a ⌘F hint, the selected tab is
+  raised (red only for prod), and set rows show Compare on hover.
+
+### Fixed
+- Enter on a button inside a sidebar row opened the row as well.
 
 ## [0.2.3] - 2026-10-14
 
@@ -714,7 +730,8 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - DynamoDB has no server-side read-only session. Use read-only IAM credentials
   for a durable production boundary.
 
-[Unreleased]: https://github.com/overcodelions/overdb/compare/v0.2.3...HEAD
+[Unreleased]: https://github.com/overcodelions/overdb/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/overcodelions/overdb/compare/v0.2.3...v0.3.0
 [0.2.3]: https://github.com/overcodelions/overdb/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/overcodelions/overdb/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/overcodelions/overdb/compare/v0.2.0...v0.2.1
