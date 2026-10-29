@@ -109,7 +109,7 @@ export function Branches({
       <button
         onClick={onToggle}
         aria-expanded={false}
-        className="ml-9 mr-2 mb-1 w-[calc(100%-44px)] flex items-center gap-1.5 px-2 py-1 rounded-[6px] bg-accent/10 hover:bg-accent/15 text-left text-[11px]"
+        className="ml-[42px] mr-1.5 mb-1 w-[calc(100%-48px)] flex items-center gap-1.5 px-2 py-1 rounded-[6px] bg-accent/10 hover:bg-accent/15 text-left text-[11px]"
       >
         <svg width="7" height="7" viewBox="0 0 8 8" aria-hidden="true" className="text-ink-faint"><path d="M2 1l4 3-4 3z" fill="currentColor" /></svg>
         <span className="flex-1 truncate text-ink">{all.length === 1 ? '1 branch' : `${all.length} branches`}{remoteSource && <span className="text-ink-muted"> · local</span>}</span>
@@ -119,7 +119,7 @@ export function Branches({
   }
 
   return (
-    <div className="ml-[34px] mr-2 mb-1.5 pl-2 border-l border-accent/35 flex flex-col gap-px">
+    <div className="ml-[23px] mr-1.5 mb-1.5 pl-[18px] border-l border-accent/35 flex flex-col gap-px">
       <div className="flex items-center gap-1.5 pt-1 pb-0.5 pr-0.5">
         <button
           onClick={onToggle}

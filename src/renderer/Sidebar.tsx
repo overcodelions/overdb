@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Connection, EnvKind, EnvSet } from '@shared/types';
-import { variantLabel, variantTag } from '@shared/engines';
+import { variantLabel } from '@shared/engines';
 import type { Variant } from '@shared/engines';
 import { useStore } from './store';
 import { EnvSetSuggestion } from './Welcome';
-import { TAG_DOT, TAG_TEXT } from './engineTags';
+import { TAG_MONO, TAG_TEXT } from './engineTags';
 import { middleTruncate, nameBudget } from '@shared/truncate';
 import { useTickets } from './ticketsStore';
 import { Branches } from './TicketSection';
@@ -51,14 +51,6 @@ function loadEnv(): EnvKind | 'all' {
 // and it puts prod last, where it is hardest to click by accident.
 const ENV_ORDER: EnvKind[] = ['local', 'dev', 'sandbox', 'staging', 'prod', 'other'];
 const ENV_NAME: Record<EnvKind, string> = { local: 'Local', dev: 'Dev', sandbox: 'Sandbox', staging: 'Staging', prod: 'Prod', other: 'Other' };
-const ENV_ON: Record<EnvKind, string> = {
-  local: 'bg-good/15 text-good',
-  dev: 'bg-good/15 text-good',
-  sandbox: 'bg-accent/15 text-accent-strong',
-  staging: 'bg-warn/15 text-warn-strong',
-  prod: 'bg-bad/15 text-bad-strong',
-  other: 'bg-wash-strong text-ink',
-};
 
 /// The sidebar is two questions: which environment you are in, then which
 /// database. The switch at the top answers the first — you work in one at a
@@ -182,38 +174,49 @@ export function Sidebar(): JSX.Element {
 
   return (
     <div className="h-full flex flex-col bg-surface-muted border-r border-card">
-      <div className="px-3 pt-2.5 pb-2 shrink-0 flex gap-1.5">
-        <input
-          ref={searchRef}
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Escape') {
-              e.preventDefault();
-              setQuery('');
-              return;
-            }
-            // Enter opens the first match, so finding and selecting is one
-            // gesture rather than type-then-reach-for-the-mouse.
-            if (e.key === 'Enter' && matches.length > 0) {
-              e.preventDefault();
-              select({ kind: 'connection', id: matches[0].id });
-            }
-          }}
-          placeholder="Find a connection or set"
-          aria-label="Find a connection or set"
-          className="field flex-1 min-w-0 px-2 py-1 text-[11px]"
-        />
+      <div className="px-2.5 pt-2.5 pb-2 shrink-0 flex gap-1.5">
+        <label className="group field flex-1 min-w-0 h-[26px] flex items-center gap-1.5 pl-2 pr-1.5 rounded-md cursor-text">
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true" className="shrink-0 text-ink-muted">
+            <circle cx="5.2" cy="5.2" r="3.6" stroke="currentColor" strokeWidth="1.3" />
+            <path d="M8 8l2.6 2.6" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+          </svg>
+          <input
+            ref={searchRef}
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') {
+                e.preventDefault();
+                setQuery('');
+                return;
+              }
+              // Enter opens the first match, so finding and selecting is one
+              // gesture rather than type-then-reach-for-the-mouse.
+              if (e.key === 'Enter' && matches.length > 0) {
+                e.preventDefault();
+                select({ kind: 'connection', id: matches[0].id });
+              }
+            }}
+            placeholder="Find a connection"
+            aria-label="Find a connection or set"
+            className="flex-1 min-w-0 h-full bg-transparent outline-none text-[11.5px] text-ink placeholder:text-ink-faint"
+          />
+          {/* The shortcut is the hint; once you are in the field it has done
+              its job. */}
+          {!query && (
+            <kbd aria-hidden="true" className="shrink-0 px-1 rounded border border-card text-[9.5px] leading-[13px] font-sans text-ink-muted group-focus-within:hidden">
+              ⌘F
+            </kbd>
+          )}
+        </label>
         <button
           onClick={() => setStarred(!starred)}
           aria-pressed={starred}
           title={starred ? 'Show everything' : 'Only starred'}
           aria-label="Only starred"
-          className={`shrink-0 w-[26px] rounded-md border flex items-center justify-center ${starred ? 'border-accent/60 bg-accent/15 text-accent' : 'border-card text-ink-faint hover:text-ink'}`}
+          className={`shrink-0 w-[26px] h-[26px] rounded-md border flex items-center justify-center ${starred ? 'border-accent/60 bg-accent/15 text-accent' : 'border-transparent bg-card text-ink-muted hover:text-ink'}`}
         >
-          <svg width="11" height="11" viewBox="0 0 12 12" fill={starred ? 'currentColor' : 'none'} aria-hidden="true">
-            <path d="M6 1.2 7.4 4.3l3.4.4-2.5 2.3.7 3.3L6 8.7l-3 1.6.7-3.3L1.2 4.7l3.4-.4L6 1.2Z" stroke="currentColor" strokeWidth="1.1" strokeLinejoin="round" />
-          </svg>
+          <StarIcon filled={starred} size={12} />
         </button>
       </div>
 
@@ -221,7 +224,7 @@ export function Sidebar(): JSX.Element {
         <div
           role="tablist"
           aria-label="Environment"
-          className={`mx-3 mb-2 shrink-0 flex gap-px p-[2px] rounded-md bg-surface border border-card ${q ? 'opacity-50' : ''}`}
+          className={`mx-2.5 mb-2 shrink-0 flex gap-0.5 p-[2px] rounded-[7px] bg-card ${q ? 'opacity-50' : ''}`}
           title={q ? 'Searching every environment' : undefined}
         >
           {(['all', ...envs] as const).map((e) => {
@@ -232,10 +235,18 @@ export function Sidebar(): JSX.Element {
                 role="tab"
                 aria-selected={on}
                 onClick={() => setEnv(e)}
-                className={`flex-auto min-w-0 h-[22px] px-1.5 rounded-[4px] text-[10.5px] whitespace-nowrap ${
-                  on ? `font-semibold ${e === 'all' ? 'bg-wash-strong text-ink' : ENV_ON[e]}` : 'text-ink-muted hover:text-ink'
+                // Raised rather than tinted, so the on state is one look
+                // whatever the environment — except prod, which is the one
+                // tab that should look different when you are in it.
+                className={`flex-auto min-w-0 h-[22px] px-1.5 rounded-[5px] flex items-center justify-center gap-[5px] text-[11px] whitespace-nowrap transition-colors ${
+                  on
+                    ? e === 'prod'
+                      ? 'font-semibold bg-bad/10 text-bad-strong'
+                      : 'font-semibold bg-surface-elevated text-ink shadow-[0_1px_2px_rgba(0,0,0,0.12)]'
+                    : 'font-medium text-ink-muted hover:text-ink'
                 }`}
               >
+                {e !== 'all' && <span aria-hidden="true" className={`shrink-0 w-1.5 h-1.5 rounded-full ${ENV_DOT[e]}`} />}
                 {e === 'all' ? 'All' : ENV_NAME[e]}
               </button>
             );
@@ -244,7 +255,10 @@ export function Sidebar(): JSX.Element {
       )}
 
       {current === 'prod' && !q && (
-        <div className="mx-3 mb-2 shrink-0 px-2 py-1 rounded-md border border-bad/25 bg-bad/10 text-[10.5px] text-bad-strong">
+        <div className="mx-2.5 mb-1.5 shrink-0 flex items-center gap-1.5 px-2 py-[5px] rounded-md bg-bad/10 text-[10.5px] leading-[13px] text-bad-strong">
+          <svg width="11" height="11" viewBox="0 0 12 12" fill="none" aria-hidden="true" className="shrink-0">
+            <path d="M6 1.2 10 2.8v3c0 2.4-1.7 4.2-4 5-2.3-.8-4-2.6-4-5v-3L6 1.2Z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
+          </svg>
           Production — take care what you run.
         </div>
       )}
@@ -253,7 +267,7 @@ export function Sidebar(): JSX.Element {
         {/* Only while something is open: with nothing selected the main
             pane shows the same suggestion, and twice on one screen is
             nagging. */}
-        {!q && selection && <EnvSetSuggestion compact className="mx-3 mb-2" />}
+        {!q && selection && <EnvSetSuggestion compact className="mx-2.5 mb-2" />}
 
         {nothingMatched && (
           <Empty>
@@ -292,6 +306,9 @@ export function Sidebar(): JSX.Element {
           looseByEnv.map(({ env: e, items }) => (
             <Section
               key={e}
+              // Under one environment's tab the tab already says which, and
+              // a heading repeating it is the third time on the screen.
+              bare={!q && current !== 'all'}
               label={ENV_NAME[e]}
               lead={<span aria-hidden="true" className={`w-1.5 h-1.5 rounded-full ${ENV_DOT[e]}`} />}
               count={items.length}
@@ -343,26 +360,28 @@ function SetDock({
   const selection = useStore((s) => s.selection);
   const setSheet = useStore((s) => s.setSheet);
   return (
-    <div className="shrink-0 max-h-[40%] flex flex-col border-t border-card bg-surface/40">
-      <div className="flex items-center px-3 pt-2 pb-1">
+    <div className="shrink-0 max-h-[40%] flex flex-col border-t border-card pb-1.5">
+      <div className="flex items-center gap-1.5 pl-3.5 pr-2 pt-1.5 pb-1">
         <button
           onClick={onToggle}
           aria-expanded={!folded}
-          className="flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider text-ink-faint hover:text-ink-muted"
+          className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.06em] text-ink-muted hover:text-ink"
         >
           <svg width="8" height="8" viewBox="0 0 8 8" aria-hidden="true" className={`transition-transform ${folded ? '' : 'rotate-90'}`}>
             <path d="M2 1l4 3-4 3z" fill="currentColor" />
           </svg>
-          Sets · compare
+          Compare
         </button>
-        {sets.length > 0 && <span className="ml-1.5 text-[10px] tabular-nums text-ink-faint/70">{sets.length}</span>}
+        {sets.length > 0 && <span className="text-[10px] tabular-nums text-ink-muted">{sets.length}</span>}
         <div className="flex-1" />
-        <button onClick={() => setSheet({ kind: 'newEnvSet' })} className="text-[10.5px] text-accent hover:underline">
-          New set
-        </button>
+        <IconButton label="New set" onClick={() => setSheet({ kind: 'newEnvSet' })}>
+          <svg width="11" height="11" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+            <path d="M6 2v8M2 6h8" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+          </svg>
+        </IconButton>
       </div>
       {!folded && (
-        <div className="min-h-0 overflow-y-auto pb-1.5">
+        <div className="min-h-0 overflow-y-auto flex flex-col gap-px">
           {sets.length === 0 ? (
             <Empty>Make a set to compare the same database across local, staging and prod.</Empty>
           ) : (
@@ -398,100 +417,50 @@ function SetRow({ envSet, env, selected }: { envSet: EnvSet; env: EnvKind | 'all
     });
 
   return (
-    <div
-      role="button"
-      tabIndex={0}
-      onClick={open}
-      onContextMenu={(e) => {
-        e.preventDefault();
-        setMenu({ x: e.clientX, y: e.clientY });
-      }}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter' || e.key === ' ') {
-          e.preventDefault();
-          open();
+    <>
+      <Row
+        label={envSet.name}
+        title={members.length ? `${envSet.name}: ${members.map((c) => c.name).join(', ')}` : `${envSet.name} has no connections yet`}
+        detail={envs.length ? envs.map((e) => ENV_NAME[e].toLowerCase()).join(' · ') : 'empty'}
+        // Where a connection's tile names its engine, a set's shows the
+        // environments it spans — the thing that makes it a set.
+        lead={
+          <span aria-hidden="true" className="shrink-0 w-5 h-5 rounded-[5px] bg-card flex items-center justify-center gap-0.5">
+            {envs.map((e) => (
+              <span key={e} className={`w-1 h-1 rounded-full ${ENV_DOT[e]}`} />
+            ))}
+          </span>
         }
-      }}
-      title={members.length ? `${envSet.name}: ${members.map((c) => c.name).join(', ')}` : `${envSet.name} has no connections yet`}
-      className={`group sidebar-row h-[26px] px-3 flex items-center gap-2 cursor-default ${selected ? 'sidebar-row-selected' : 'hover:bg-card'} ${
-        away && !selected ? 'opacity-40 hover:opacity-100' : ''
-      }`}
-    >
-      <span className="shrink-0 max-w-[55%] text-[11.5px] font-semibold text-ink truncate">{envSet.name}</span>
-      <span className="shrink-0 flex gap-[3px]" aria-hidden="true">
-        {envs.map((e) => (
-          <span key={e} className={`w-1.5 h-1.5 rounded-full ${ENV_DOT[e]}`} />
-        ))}
-      </span>
-      <span className="flex-1 min-w-0 text-[10px] text-ink-faint truncate">
-        {envs.length ? envs.map((e) => ENV_NAME[e].toLowerCase()).join(' · ') : 'empty'}
-      </span>
-      {envSet.pinned && <span className="shrink-0 text-accent text-[10px] group-hover:hidden" aria-label="Starred">★</span>}
-      <span className="shrink-0 hidden group-hover:flex group-focus-within:flex items-center" onClick={(e) => e.stopPropagation()}>
-          <button
-            onClick={() => void togglePin('envSet', envSet.id)}
-            title={envSet.pinned ? `Unstar ${envSet.name}` : `Star ${envSet.name}`}
-            aria-label={envSet.pinned ? `Unstar ${envSet.name}` : `Star ${envSet.name}`}
-            className="w-5 h-5 flex items-center justify-center rounded text-ink-faint hover:text-ink hover:bg-card"
+        chip={
+          <span
+            title={`Open ${envSet.name} across every environment: drift, and queries on all of them`}
+            className="px-1.5 py-0.5 rounded bg-accent/15 text-[10.5px] font-medium text-accent-strong"
           >
-            <svg width="11" height="11" viewBox="0 0 12 12" fill={envSet.pinned ? 'currentColor' : 'none'} aria-hidden="true">
-              <path d="M6 1.2 7.4 4.3l3.4.4-2.5 2.3.7 3.3L6 8.7l-3 1.6.7-3.3L1.2 4.7l3.4-.4L6 1.2Z" stroke="currentColor" strokeWidth="1.1" strokeLinejoin="round" />
-            </svg>
-          </button>
-          <button
-            onClick={() => setSheet({ kind: 'editEnvSet', id: envSet.id })}
-            title={`Edit ${envSet.name}`}
-            aria-label={`Edit ${envSet.name}`}
-            className="w-5 h-5 flex items-center justify-center rounded text-ink-faint hover:text-ink hover:bg-card"
-          >
-            <svg width="11" height="11" viewBox="0 0 12 12" fill="none" aria-hidden="true">
-              <path d="M8.2 1.8a1.1 1.1 0 0 1 1.6 1.6L4.4 8.8l-2.2.6.6-2.2 5.4-5.4Z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
-            </svg>
-          </button>
-          <button
-            onClick={() =>
-              askConfirm({
-                title: `Delete ${envSet.name}?`,
-                body: 'This removes the set only. The connections in it are untouched.',
-                confirmLabel: 'Delete set',
-                destructive: true,
-                onConfirm: () => void removeEnvSet(envSet.id),
-              })
-            }
-            title={`Delete ${envSet.name}`}
-            aria-label={`Delete ${envSet.name}`}
-            className="w-5 h-5 flex items-center justify-center rounded text-ink-faint hover:text-bad hover:bg-card"
-          >
-            <svg width="11" height="11" viewBox="0 0 12 12" fill="none" aria-hidden="true">
-              <path d="M3 3l6 6M9 3l-6 6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-            </svg>
-          </button>
-      </span>
-      <span
-        title={`Open ${envSet.name} across every environment: drift, and queries on all of them`}
-        className="shrink-0 text-[10.5px] text-accent"
-      >
-        Compare
-      </span>
-      <span onClick={(e) => e.stopPropagation()}>
-        <Dropdown open={!!menu} at={menu ?? undefined} onClose={() => setMenu(null)} label={envSet.name} width={230}>
-          <MenuItem label="Compare" detail="Drift, and queries on every member" onSelect={() => { setMenu(null); open(); }} />
-          <MenuDivider />
-          <MenuItem label={envSet.pinned ? 'Unstar' : 'Star'} onSelect={() => { setMenu(null); void togglePin('envSet', envSet.id); }} />
-          <MenuItem label="Edit…" onSelect={() => { setMenu(null); setSheet({ kind: 'editEnvSet', id: envSet.id }); }} />
-          <MenuDivider />
-          <MenuItem label="Delete…" onSelect={() => { setMenu(null); remove(); }} />
-        </Dropdown>
-      </span>
-    </div>
+            Compare
+          </span>
+        }
+        rest={envSet.pinned ? <StarMark /> : null}
+        moreLabel={`More for ${envSet.name}`}
+        onMore={setMenu}
+        dimmed={away && !selected}
+        selected={selected}
+        onClick={open}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          setMenu({ x: e.clientX, y: e.clientY });
+        }}
+      />
+      <Dropdown open={!!menu} at={menu ?? undefined} onClose={() => setMenu(null)} label={envSet.name} width={230}>
+        <MenuItem label="Compare" detail="Drift, and queries on every member" onSelect={() => { setMenu(null); open(); }} />
+        <MenuDivider />
+        <MenuItem label={envSet.pinned ? 'Unstar' : 'Star'} onSelect={() => { setMenu(null); void togglePin('envSet', envSet.id); }} />
+        <MenuItem label="Edit…" onSelect={() => { setMenu(null); setSheet({ kind: 'editEnvSet', id: envSet.id }); }} />
+        <MenuDivider />
+        <MenuItem label="Delete…" onSelect={() => { setMenu(null); remove(); }} />
+      </Dropdown>
+    </>
   );
 }
-
-/// Below this the badge drops its word and keeps its colour. Spelling
-/// "DynamoDB" in a 180px row leaves nothing for the name, which is the
-/// thing you were actually reading.
-const NAME_BADGE_MIN_WIDTH = 220;
-const BADGE_WIDTH = 54;
 
 /// What the second line says. The env is deliberately absent — the section
 /// heading above already carries it — and this is empty when the name
@@ -508,28 +477,75 @@ function detailFor(conn: Connection): string {
   return parts.join(' · ');
 }
 
-/// Open, not connected, or the last attempt failed. Absent state is the
-/// common case and reads as the quietest mark.
 /// Shown only when something other than you can read the connection, so
 /// its presence is the news — see `agentReach`.
 function AgentMark({ connection }: { connection: Connection }): JSX.Element | null {
   const reach = agentReach(connection);
   if (!reach) return null;
   return (
-    <span title={reach} aria-label={reach} role="img" className="shrink-0 text-accent">
-      <Agent className="w-[11px] h-[11px]" />
+    <span title={reach} aria-label={reach} role="img" className="shrink-0 w-[18px] flex justify-center text-accent">
+      <Agent className="w-3 h-3" />
     </span>
   );
 }
 
-function StatusDot({ state }: { state?: 'open' | 'closed' | 'error' }): JSX.Element {
-  const title =
-    state === 'open' ? 'Connected' : state === 'error' ? 'Last attempt failed' : 'Not connected';
-  const look =
-    state === 'open' ? 'bg-good'
-    : state === 'error' ? 'bg-bad'
-    : 'border border-card-border';
-  return <span title={title} className={`shrink-0 w-[5px] h-[5px] rounded-full ${look}`} />;
+/// Connected, or the last attempt failed, as a pip on the engine tile's
+/// corner — status reads with the thing it is the status of, and the row's
+/// end is left to the row's actions. Not connected is the common case and
+/// gets no mark at all.
+function StatusPip({ state }: { state?: 'open' | 'closed' | 'error' }): JSX.Element | null {
+  if (state !== 'open' && state !== 'error') return null;
+  const title = state === 'open' ? 'Connected' : 'Last attempt failed';
+  return <span role="img" aria-label={title} title={title} className={`status-pip ${state === 'open' ? 'bg-good' : 'bg-bad'}`} />;
+}
+
+function EngineTile({ connection, state }: { connection: Connection; state?: 'open' | 'closed' | 'error' }): JSX.Element {
+  const variant: Variant = connection.variant ?? connection.engine;
+  return (
+    <span title={variantLabel(connection.variant, connection.engine)} className={`engine-tile ${TAG_TEXT[variant]}`}>
+      {TAG_MONO[variant]}
+      <StatusPip state={state} />
+    </span>
+  );
+}
+
+function StarIcon({ filled, size = 11 }: { filled: boolean; size?: number }): JSX.Element {
+  return (
+    <svg width={size} height={size} viewBox="0 0 12 12" fill={filled ? 'currentColor' : 'none'} aria-hidden="true">
+      <path d="M6 1.2 7.4 4.3l3.4.4-2.5 2.3.7 3.3L6 8.7l-3 1.6.7-3.3L1.2 4.7l3.4-.4L6 1.2Z" stroke="currentColor" strokeWidth="1.1" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function StarMark(): JSX.Element {
+  return (
+    <span role="img" aria-label="Starred" className="shrink-0 w-[22px] flex justify-center text-accent">
+      <StarIcon filled />
+    </span>
+  );
+}
+
+function IconButton({
+  label,
+  onClick,
+  on,
+  children,
+}: {
+  label: string;
+  onClick(e: React.MouseEvent<HTMLButtonElement>): void;
+  on?: boolean;
+  children: React.ReactNode;
+}): JSX.Element {
+  return (
+    <button
+      onClick={onClick}
+      title={label}
+      aria-label={label}
+      className={`shrink-0 w-[22px] h-[22px] flex items-center justify-center rounded-[5px] hover:bg-card ${on ? 'text-accent' : 'text-ink-muted hover:text-ink'}`}
+    >
+      {children}
+    </button>
+  );
 }
 
 function ConnectionRow({
@@ -543,11 +559,9 @@ function ConnectionRow({
   const selection = useStore((s) => s.selection);
   const select = useStore((s) => s.select);
   const askConfirm = useStore((s) => s.askConfirm);
-  const setSheet = useStore((s) => s.setSheet);
   const removeConnection = useStore((s) => s.removeConnection);
   const togglePin = useStore((s) => s.togglePin);
   const state = useStore((s) => s.connState[connection.id]);
-  const width = useStore((s) => s.settings.sidebarWidth);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
 
   const requestDelete = () =>
@@ -561,43 +575,26 @@ function ConnectionRow({
       onConfirm: () => removeConnection(connection.id),
     });
 
-  const variant: Variant = connection.variant ?? connection.engine;
-  const spelled = width >= NAME_BADGE_MIN_WIDTH;
+  const reach = agentReach(connection);
 
   return (
     <>
       <Row
         label={connection.name}
         detail={showEnv ? [ENV_NAME[connection.env], detailFor(connection)].filter(Boolean).join(' · ') : detailFor(connection)}
-        badge={
-          spelled ? (
-            <span
-              title={variantLabel(connection.variant, connection.engine)}
-              style={{ width: BADGE_WIDTH }}
-              className={`shrink-0 truncate text-[9.5px] font-semibold leading-none ${TAG_TEXT[variant]}`}
-            >
-              {variantTag(connection.variant, connection.engine)}
-            </span>
-          ) : (
-            <span
-              title={variantLabel(connection.variant, connection.engine)}
-              className={`shrink-0 w-1.5 h-1.5 rounded-full ${TAG_DOT[variant]}`}
-            />
-          )
+        lead={<EngineTile connection={connection} state={state} />}
+        rest={
+          connection.pinned || reach ? (
+            <>
+              <AgentMark connection={connection} />
+              {connection.pinned && <StarMark />}
+            </>
+          ) : null
         }
-        badgeWidth={spelled ? BADGE_WIDTH : 6}
-        trailing={
-          <>
-            <AgentMark connection={connection} />
-            <StatusDot state={state} />
-          </>
-        }
-        onEdit={() => setSheet({ kind: 'editConnection', id: connection.id })}
-        editTitle={`Edit ${connection.name}`}
-        onDelete={requestDelete}
-        deleteTitle={`Delete ${connection.name}`}
         pinned={connection.pinned}
         onPin={() => void togglePin('connection', connection.id)}
+        moreLabel={`More for ${connection.name}`}
+        onMore={setMenu}
         // No PROD chip: the second line names the environment wherever the
         // tab does not, and a chip on every row under the Prod tab teaches you
         // to stop seeing it.
@@ -691,9 +688,12 @@ function Section({
   count,
   collapsed,
   onToggle,
+  bare,
   children,
 }: {
   label: string;
+  /// The rows with no heading above them.
+  bare?: boolean;
   /// A mark before the label: an environment's colour.
   lead?: React.ReactNode;
   action?: { title: string; onClick: () => void };
@@ -705,14 +705,15 @@ function Section({
   children: React.ReactNode;
 }): JSX.Element {
   const foldable = Boolean(onToggle);
+  if (bare) return <div className="pt-0.5 pb-1 flex flex-col gap-px">{children}</div>;
   return (
-    <div className="py-2">
-      <div className="flex items-center px-3 pb-1">
+    <div className="pb-1">
+      <div className="flex items-center gap-1.5 pl-3.5 pr-2 pt-2.5 pb-1">
         {foldable ? (
           <button
             onClick={onToggle}
             aria-expanded={!collapsed}
-            className="flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider text-ink-faint hover:text-ink-muted"
+            className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.06em] text-ink-muted hover:text-ink"
           >
             <svg
               width="8" height="8" viewBox="0 0 8 8" aria-hidden="true"
@@ -724,13 +725,13 @@ function Section({
             {label}
           </button>
         ) : (
-          <span className="flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider text-ink-faint">
+          <span className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.06em] text-ink-muted">
             {lead}
             {label}
           </span>
         )}
         {foldable && count !== undefined && (
-          <span className="ml-1.5 text-[10px] tabular-nums text-ink-faint/70">{count}</span>
+          <span className="text-[10px] tabular-nums text-ink-muted">{count}</span>
         )}
         <div className="flex-1" />
         {action && (
@@ -744,168 +745,124 @@ function Section({
           </button>
         )}
       </div>
-      {!collapsed && children}
+      {!collapsed && <div className="flex flex-col gap-px">{children}</div>}
     </div>
   );
 }
 
 function Row({
   label,
+  title,
   detail,
-  badge,
-  badgeWidth = 0,
-  trailing,
-  below,
+  lead,
+  chip,
+  rest,
   selected,
+  dimmed,
   tone = 'normal',
   onClick,
-  onEdit,
-  editTitle,
-  onDelete,
-  deleteTitle,
   pinned,
   onPin,
-  mark,
+  moreLabel = 'More',
+  onMore,
   onContextMenu,
 }: {
   label: string;
+  /// The tooltip, when it should say more than the full name.
+  title?: string;
   /// Second line: host and database, the thing that actually tells five
   /// connections called "localhost" apart. Omitted when there is nothing
   /// to add.
   detail?: string;
-  badge?: React.ReactNode;
-  badgeWidth?: number;
-  trailing?: React.ReactNode;
-  below?: React.ReactNode;
+  /// The 20px tile the row starts with.
+  lead: React.ReactNode;
+  /// Shown on hover, before the actions: what clicking the row will do.
+  chip?: React.ReactNode;
+  /// The row's end at rest — a star, an agent — swapped for the actions on
+  /// hover.
+  rest?: React.ReactNode;
   selected: boolean;
+  /// Present but not here: a set with nothing under the current tab.
+  dimmed?: boolean;
   tone?: 'normal' | 'warn';
-  mark?: string;
   pinned?: boolean;
   onPin?: () => void;
+  moreLabel?: string;
+  /// Opens the row's menu under the ⋯ button.
+  onMore?: (at: { x: number; y: number }) => void;
   onClick: () => void;
-  onEdit?: () => void;
-  editTitle?: string;
-  onDelete?: () => void;
-  deleteTitle?: string;
   onContextMenu?: (e: React.MouseEvent) => void;
 }): JSX.Element {
   const width = useStore((s) => s.settings.sidebarWidth);
   // Cut out of the MIDDLE. `Redshift - @PROD [EU]` and
   // `Redshift - @PROD [RW]` are different servers that a tail ellipsis
   // renders as the same row.
-  const shown = middleTruncate(label, nameBudget(width, badgeWidth));
+  const shown = middleTruncate(label, nameBudget(width, 20, rest ? 22 : 0));
 
   return (
-    // A div rather than a button: a delete control nested inside a button is
+    // A div rather than a button: a button nested inside a button is
     // invalid HTML and behaves unpredictably when activated by keyboard.
     <div
       role="button"
       tabIndex={0}
-      title={shown === label ? undefined : label}
+      title={title ?? (shown === label ? undefined : label)}
       onClick={onClick}
       onContextMenu={onContextMenu}
       onKeyDown={(e) => {
+        // Only the row's own keys: Enter on the ⋯ inside it is that
+        // button's, and taking it here would open the row instead.
+        if (e.target !== e.currentTarget) return;
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault();
           onClick();
         }
       }}
-      className={`group sidebar-row w-full text-left px-3 py-[5px] flex items-center gap-2 cursor-default ${
-        selected ? 'sidebar-row-selected' : 'hover:bg-card'
-      }`}
+      className={`group sidebar-row mx-1.5 rounded-md pl-[7px] pr-1 py-1.5 flex items-center gap-[9px] cursor-default outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60 ${
+        selected ? 'sidebar-row-selected' : ''
+      } ${dimmed ? 'opacity-40 hover:opacity-100 focus-within:opacity-100' : ''}`}
     >
-      {badge}
+      {lead}
       <div className="flex-1 min-w-0 flex flex-col gap-px">
-        <span className="text-xs leading-[15px] text-ink truncate">{shown}</span>
-        {detail && (
-          <span className="text-[10px] leading-[13px] text-ink-faint truncate">{detail}</span>
-        )}
-        {below}
+        <span className={`text-xs leading-[15px] text-ink truncate ${selected ? 'font-semibold' : ''}`}>{shown}</span>
+        {detail && <span className="text-[10.5px] leading-[13px] text-ink-muted truncate">{detail}</span>}
       </div>
-      {mark && (
-        <span className="shrink-0 text-[9px] uppercase tracking-wider px-1 py-0.5 rounded bg-warn/10 text-warn/90 border border-warn/25">
-          {mark}
+      {chip && <span className="shrink-0 hidden group-hover:flex group-focus-within:flex">{chip}</span>}
+      {/* At rest the row ends in one slot, and pointing at the row or tabbing
+        * into it swaps that slot for its actions, so the end of the row never
+        * shifts under the name. Edit and delete are not among them: they are
+        * in the menu, a deliberate reach away, rather than a hover's width
+        * from wherever the pointer happens to cross a prod row. */}
+      {rest && <span className="shrink-0 flex items-center group-hover:hidden group-focus-within:hidden">{rest}</span>}
+      {(onPin || onMore) && (
+        <span className="shrink-0 hidden group-hover:flex group-focus-within:flex items-center" onClick={(e) => e.stopPropagation()}>
+          {onPin && (
+            <IconButton label={pinned ? `Unstar ${label}` : `Star ${label}`} on={pinned} onClick={onPin}>
+              <StarIcon filled={!!pinned} />
+            </IconButton>
+          )}
+          {onMore && (
+            <IconButton
+              label={moreLabel}
+              onClick={(e) => {
+                const r = e.currentTarget.getBoundingClientRect();
+                onMore({ x: r.left, y: r.bottom + 2 });
+              }}
+            >
+              <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true">
+                <circle cx="2.5" cy="6" r="1.1" />
+                <circle cx="6" cy="6" r="1.1" />
+                <circle cx="9.5" cy="6" r="1.1" />
+              </svg>
+            </IconButton>
+          )}
         </span>
       )}
-      {/* The trailing cluster carries its own spacing rather than riding the
-        * row's `gap-2`. A flex gap applies between every pair of siblings
-        * whatever their width, so a drawer that collapses to nothing would
-        * still leave two 8px gaps behind it — the star would end up hovering
-        * short of the row's edge, anchored to nothing. Here the gaps belong
-        * to the items inside the drawer, so they collapse with it. */}
-      <div className="shrink-0 flex items-center">
-        {onPin && (
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              onPin();
-            }}
-            title={pinned ? `Unpin ${label}` : `Pin ${label}`}
-            aria-label={pinned ? `Unpin ${label}` : `Pin ${label}`}
-            className={`shrink-0 w-5 h-5 flex items-center justify-center rounded transition-opacity hover:text-ink hover:bg-card ${
-              pinned ? 'text-accent' : 'text-ink-faint opacity-0 group-hover:opacity-100 focus:opacity-100'
-            }`}
-          >
-            <svg width="11" height="11" viewBox="0 0 12 12" fill={pinned ? 'currentColor' : 'none'} aria-hidden="true">
-              <path
-                d="M6 1.2 7.4 4.3l3.4.4-2.5 2.3.7 3.3L6 8.7l-3 1.6.7-3.3L1.2 4.7l3.4-.4L6 1.2Z"
-                stroke="currentColor"
-                strokeWidth="1.1"
-                strokeLinejoin="round"
-              />
-            </svg>
-          </button>
-        )}
-        {(onEdit || onDelete) && (
-          // Closed until you point at the row or tab into it. Hidden by WIDTH
-          // and not only by opacity: buttons that keep their 20px while
-          // invisible push everything before them out of the row's edge.
-          <span className="row-actions">
-            <span>
-              {onEdit && (
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onEdit();
-                  }}
-                  title={editTitle}
-                  aria-label={editTitle}
-                  className="shrink-0 ml-2 w-5 h-5 flex items-center justify-center rounded text-ink-faint hover:text-ink hover:bg-card"
-                >
-                  <svg width="11" height="11" viewBox="0 0 12 12" fill="none" aria-hidden="true">
-                    <path d="M8.2 1.8a1.1 1.1 0 0 1 1.6 1.6L4.4 8.8l-2.2.6.6-2.2 5.4-5.4Z"
-                          stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
-                  </svg>
-                </button>
-              )}
-              {onDelete && (
-                <button
-                  // Never hidden from assistive tech — the drawer opens on
-                  // `:focus-within`, so tabbing here reveals it.
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onDelete();
-                  }}
-                  title={deleteTitle}
-                  aria-label={deleteTitle}
-                  className="shrink-0 ml-2 w-5 h-5 flex items-center justify-center rounded text-ink-faint hover:text-bad hover:bg-card"
-                >
-                  <svg width="11" height="11" viewBox="0 0 12 12" fill="none" aria-hidden="true">
-                    <path d="M3 3l6 6M9 3l-6 6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-                  </svg>
-                </button>
-              )}
-            </span>
-          </span>
-        )}
-        {trailing && <span className="shrink-0 ml-2 flex items-center gap-1.5">{trailing}</span>}
-      </div>
-      {tone === 'warn' && !mark && <span className="sr-only">production</span>}
+      {tone === 'warn' && <span className="sr-only">production</span>}
     </div>
   );
 }
 
 function Empty({ children }: { children: React.ReactNode }): JSX.Element {
-  return <p className="px-3 py-1 text-[11px] leading-snug text-ink-faint">{children}</p>;
+  return <p className="px-3.5 py-1 text-[11px] leading-snug text-ink-muted">{children}</p>;
 }
 

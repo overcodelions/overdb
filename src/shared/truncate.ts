@@ -29,11 +29,11 @@ export function middleTruncate(text: string, maxChars: number): string {
 
 /// How many characters of a connection name fit, given the sidebar width.
 ///
-/// The row is: 12px padding, the engine badge, an 8px gap, the name, then
-/// the status dot and 12px padding. 6.15px is the average advance of the
-/// system UI stack at 12px — measured rather than assumed, and only ever
-/// used to decide when to cut.
-export function nameBudget(sidebarWidth: number, badgeWidth: number): number {
-  const available = sidebarWidth - 12 - badgeWidth - 8 - 5 - 8 - 12;
+/// The row is: a 6px inset and 7px padding, the engine tile, a 9px gap, the
+/// name, whatever sits at the row's end at rest, then 4px padding and the
+/// 6px inset. 6.15px is the average advance of the system UI stack at 12px
+/// — measured rather than assumed, and only ever used to decide when to cut.
+export function nameBudget(sidebarWidth: number, leadWidth: number, trailingWidth = 0): number {
+  const available = sidebarWidth - 6 - 7 - leadWidth - 9 - trailingWidth - 4 - 6;
   return Math.max(4, Math.floor(available / 6.15));
 }
