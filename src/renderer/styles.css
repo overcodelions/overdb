@@ -206,65 +206,57 @@ body,
   border-color: rgb(var(--c-accent));
 }
 
+/* Sidebar rows are inset pills on the sidebar's own ground. The fills are
+ * mixed to SOLID colours rather than laid on as tints, because the status
+ * pip on the engine tile is ringed in the row's colour to cut it out of the
+ * tile's corner — and a translucent ring shows the tile through it. The
+ * row publishes its colour as --row-bg and the pip reads it. */
 .sidebar-row {
-  border: 1px solid transparent;
-  transition: background 120ms, border-color 120ms, color 120ms;
+  --row-bg: rgb(var(--c-surface-muted));
+  transition: background 120ms, opacity 120ms;
 }
-.sidebar-row-selected {
-  /* A quiet tint plus a leading marker, rather than a saturated block.
-   * The marker carries the "this one" signal; the fill only needs to
-   * separate it from its neighbours. */
-  background: rgb(var(--c-accent) / 0.12);
-  border-color: transparent;
-  box-shadow: inset 2px 0 0 rgb(var(--c-accent));
+.sidebar-row:hover {
+  --row-bg: color-mix(in srgb, rgb(var(--c-ink)) 6%, rgb(var(--c-surface-muted)));
+  background: var(--row-bg);
+}
+.sidebar-row-selected,
+.sidebar-row-selected:hover {
+  /* A fill alone, no leading bar: in an inset, rounded row the bar reads as
+   * a second shape stuck to the first. */
+  --row-bg: color-mix(in srgb, rgb(var(--c-accent)) 14%, rgb(var(--c-surface-muted)));
+  background: var(--row-bg);
+}
+.dark .sidebar-row-selected,
+.dark .sidebar-row-selected:hover {
+  --row-bg: color-mix(in srgb, rgb(var(--c-accent)) 22%, rgb(var(--c-surface-muted)));
 }
 
-/* The edit/delete drawer at the end of a sidebar row. Closed, it takes no
- * width at all, so the pin star finishes the row 8px off the status dot
- * rather than 56px short of it, hanging in space it is not responsible for.
- *
- * `0fr -> 1fr` rather than a width: a fr track animates to whatever the
- * drawer actually holds, so a row with only a delete button opens exactly
- * 28px and one with both opens 56px, with no number written down anywhere
- * that a fourth control would quietly falsify. The inner element is what
- * clips — a grid ITEM can be hidden, a track cannot — and it needs
- * `min-width: 0` or the 0fr track resolves to min-content and never
- * closes. */
-.row-actions {
-  display: grid;
-  grid-template-columns: 0fr;
-  transition: grid-template-columns 150ms cubic-bezier(0.4, 0, 0.2, 1);
-}
-.row-actions > * {
+/* The engine as a tile: two letters in the engine's colour on a wash of
+ * the same colour. The wash comes from currentColor so the one TAG_TEXT
+ * class sets both, on both grounds. */
+.engine-tile {
+  position: relative;
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  border-radius: 5px;
   display: flex;
   align-items: center;
-  min-width: 0;
-  overflow: hidden;
+  justify-content: center;
+  font-size: 8.5px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  line-height: 1;
+  background: color-mix(in srgb, currentColor 13%, transparent);
 }
-.sidebar-row:hover .row-actions,
-.row-actions:focus-within {
-  grid-template-columns: 1fr;
-}
-
-/* The drawer slides and the icons fade — same 150ms, same curve, so it
- * reads as one gesture rather than two. The fade lives here rather than in
- * a `group-hover:` class because the trigger is the DRAWER's state: tab to
- * the delete button and its neighbour has to come with it, or the open
- * drawer holds one button and one hole. */
-.row-actions button {
-  opacity: 0;
-  transition: opacity 150ms cubic-bezier(0.4, 0, 0.2, 1);
-}
-.sidebar-row:hover .row-actions button,
-.row-actions:focus-within button {
-  opacity: 1;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .row-actions,
-  .row-actions button {
-    transition: none;
-  }
+.status-pip {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  width: 7px;
+  height: 7px;
+  border-radius: 9999px;
+  box-shadow: 0 0 0 2px var(--row-bg, rgb(var(--c-surface-muted)));
 }
 
 /* Zebra striping. Across 20 columns of hex ids, the eye loses the row it

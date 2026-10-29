@@ -21,6 +21,23 @@ export const TAG_TEXT: Record<Variant, string> = {
   dynamodb: 'text-tag-blue',
 };
 
+/// The two letters on a sidebar row's engine tile. Two letters rather than
+/// the tag, which spelled "DynamoDB" across a third of a narrow row, and
+/// the two Auroras get letters of their own: both tags say "Aurora" in the
+/// same cyan, so the word could never tell them apart.
+export const TAG_MONO: Record<Variant, string> = {
+  postgres: 'PG',
+  redshift: 'RS',
+  'aurora-postgres': 'AP',
+  cockroach: 'CR',
+  timescale: 'TS',
+  mysql: 'MY',
+  mariadb: 'MA',
+  'aurora-mysql': 'AM',
+  sqlite: 'SQ',
+  dynamodb: 'DY',
+};
+
 /// The same colours as a dot, for widths too narrow to spell the name.
 export const TAG_DOT: Record<Variant, string> = {
   postgres: 'bg-tag-sky',
