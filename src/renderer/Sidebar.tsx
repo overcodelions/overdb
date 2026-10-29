@@ -541,7 +541,9 @@ function IconButton({
       onClick={onClick}
       title={label}
       aria-label={label}
-      className={`shrink-0 w-[22px] h-[22px] flex items-center justify-center rounded-[5px] hover:bg-card ${on ? 'text-accent' : 'text-ink-muted hover:text-ink'}`}
+      // 20px tall, the engine tile's height: any taller and a one-line row
+      // grows when its actions appear, and the whole list below it jumps.
+      className={`shrink-0 w-[22px] h-5 flex items-center justify-center rounded-[5px] hover:bg-card ${on ? 'text-accent' : 'text-ink-muted hover:text-ink'}`}
     >
       {children}
     </button>
@@ -796,8 +798,10 @@ function Row({
   const width = useStore((s) => s.settings.sidebarWidth);
   // Cut out of the MIDDLE. `Redshift - @PROD [EU]` and
   // `Redshift - @PROD [RW]` are different servers that a tail ellipsis
-  // renders as the same row.
-  const shown = middleTruncate(label, nameBudget(width, 20, rest ? 22 : 0));
+  // renders as the same row. Budgeted for the hover actions, not the resting
+  // slot: a name that is cut again the moment you point at it moves.
+  const actionsWidth = (onPin ? 22 : 0) + (onMore ? 22 : 0);
+  const shown = middleTruncate(label, nameBudget(width, 20, Math.max(actionsWidth, rest ? 22 : 0)));
 
   return (
     // A div rather than a button: a button nested inside a button is
