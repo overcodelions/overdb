@@ -13,7 +13,7 @@ afterEach(() => fs.rmSync(dir, { recursive: true, force: true }));
 describe('the headless query log', () => {
   it('is off unless asked for', () => {
     expect(queryLogPath(['--connections', 'c.json'])).toBeNull();
-    expect(queryLogPath(['--connections', 'c.json', '--query-log', '/data/q.jsonl'])).toBe('/data/q.jsonl');
+    expect(queryLogPath(['--connections', 'c.json', '--query-log', '/data/q.jsonl'])).toBe(path.resolve('/data/q.jsonl'));
   });
 
   it('writes one line per call, with the worker its runtime named', () => {
