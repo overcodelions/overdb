@@ -4,13 +4,17 @@ A database client built around one idea every other client misses: **you don't h
 
 Sibling project of [overcli](https://github.com/overcodelions/overcli) and [overgit](https://github.com/overcodelions/overgit).
 
+<p align="center">
+  <img alt="overdb: the sidebar grouped by environment with an engine tile on every connection, and a query on a production connection with its results" src="docs/screenshots/hero.png" width="100%" />
+</p>
+
 ## Why overdb
 
 TablePlus, DataGrip, Postico, and DBeaver are all one connection at a time. If your work spans local + staging + prod, or a dozen service databases, you end up running the same query four times in four tabs and eyeballing the difference. overdb makes that comparison the primary gesture.
 
 ### Environment sets
 
-An **environment set** is the same logical database across environments, pinned to a baseline: "orders-db across local, staging, and prod, where prod is the truth." Run one query against all members, compare each result with the baseline, and see what's drifted. The sidebar lists every connection by its environment tag — local, staging, prod — so the set and the servers in it are always one glance apart.
+An **environment set** is the same logical database across environments, pinned to a baseline: "orders-db across local, staging, and prod, where prod is the truth." Run one query against all members, compare each result with the baseline, and see what's drifted. The sidebar groups every connection under its environment — local, dev, sandbox, staging, prod, with prod last, where it is hardest to click by accident — and tabs along the top narrow it to one. Each row starts with a two-letter tile in its engine's colour (`PG`, `MY`, `SQ`, `RS`, `AP`/`AM` for the two Auroras…) with a pip on its corner while it is connected or has failed, and ends in a star or the agent mark; on hover, a ⋯ menu holds edit and delete. Sets sit together under **Compare**, so the set and the servers in it are always one glance apart.
 
 *Connection groups* ("these are Payments") exist in the data model but can't be created from the UI yet, and there are no bulk actions on them.
 
@@ -20,6 +24,51 @@ An **environment set** is the same logical database across environments, pinned 
 2. **Overlay, not ownership.** Read-only by default. Enabling writes is per connection and persists, because "this is my local scratch database" is a durable fact rather than a mood — and turning it on for a `prod` connection asks you to type that connection's name, because the accident worth preventing is doing the right thing to the wrong server. Separately, a transaction is auto-commit or manual; manual holds one open across statements so a `DELETE` is reviewable before you commit, and rolls itself back after 90 seconds idle rather than leaving locks on a busy server. Postgres, MySQL, and SQLite enforce read-only mode in the database or driver. DynamoDB has no equivalent session mode, so overdb fails closed using its local PartiQL classifier; use a read-only IAM policy as the durable boundary there.
 3. **AI in the loop, on your own auth.** Ask questions in prose. NL→SQL, schema Q&A, explain-this-plan, performance advice — piped to whichever of `claude` / `codex` / `gemini` you already have installed, using your existing login. No separate API key is required by overdb. Prompts can contain your question, recent AI conversation, schema metadata, query text, server error text, and query-plan statistics. Result rows and bound parameter values are not intentionally included, but literals already written in SQL or echoed by an error are sent verbatim. Review sensitive SQL before invoking AI. AI-proposed SQL is never executed; it lands in the editor for you to read and run.
 4. **Performance you can act on.** Not a prettier plan tree. The plan drawn as the work each step does — the planner's estimated rows with loops multiplied out, so the expensive step is a shape rather than a number to find. Cross-environment plan divergence ("prod reads all of orders, where staging narrows it with an index"), and what the server itself says it spends its time on. overdb runs a plain `EXPLAIN`: the counts are the planner's estimates, not measurements, and it never executes your query to profile it.
+
+## A quick tour
+
+### One statement, every environment
+
+Open an environment set and **Run on 3** (one per member): the statement goes to every member at once, and what comes back is lined up against the baseline — columns one side does not return, row counts, whether the rows match, and how long each took. Each member's own rows are a tab away.
+
+<p align="center">
+  <img alt="An environment set across local, staging and prod: one query run on all three, with a column only local returns and different row counts flagged against the prod baseline" src="docs/screenshots/env-set.png" width="100%" />
+</p>
+
+### What drifted, ranked
+
+**Schema drift** compares every member's catalog with the baseline's without running a statement: an index staging never got, a table and a column local has that prod does not yet. The SQL that would close a gap is text to read, never a button.
+
+<p align="center">
+  <img alt="Schema drift for an environment set: no breaking changes, a missing index on staging as a performance finding, and a table and a column only local has" src="docs/screenshots/schema-drift.png" width="100%" />
+</p>
+
+### Tables at hand
+
+The table list opens beside the editor, filters as you type, and shows a table's columns inline; click one and its rows land in the grid. The sidebar folds away when you want the room.
+
+<p align="center">
+  <img alt="The table list beside the editor with the orders table's columns expanded, and its rows in the result grid" src="docs/screenshots/tables.png" width="100%" />
+</p>
+
+### A place of their own for agents
+
+Agents get the connections you choose, read-only, over MCP. The **Agents** sheet has the command to register overdb with your client, who is connected now, every connection with its switch, and every call agents made — the statement and how it went, never the rows.
+
+<p align="center">
+  <img alt="The Agents sheet: the command that registers overdb with an MCP client, a connected agent, the connections agents can read, and the log of their calls including a refused write" src="docs/screenshots/agents.png" width="100%" />
+</p>
+
+<table>
+  <tr>
+    <td width="50%"><img alt="The Agents chip on a production connection, open: the switch, the agent connected now, its last calls and what agents are told" src="docs/screenshots/agents-chip.png" /></td>
+    <td width="50%"><img alt="What agents are told: notes and a tenancy rule with caveats on the left, the exact text an agent receives on the right" src="docs/screenshots/agents-told.png" /></td>
+  </tr>
+  <tr>
+    <td><sub><b>The Agents chip.</b> Beside Read-only on every connection: today's calls, a dot while an agent is connected, and the last few calls.</sub></td>
+    <td><sub><b>What agents are told.</b> The tenancy rule, its caveats and your notes, edited beside exactly what an agent receives.</sub></td>
+  </tr>
+</table>
 
 ## What's in it
 
@@ -41,7 +90,7 @@ Beyond the editor, the virtualized grid and the fan-out:
 
 `overdb serve --mcp` is the Overdb app started without a window, speaking MCP over stdio. An agent gets seven read-only tools: `describe_database`, `list_connections`, `query`, `list_tables`, `describe_table`, `show_sessions` and `list_slow_queries`.
 
-Nothing is exposed until you say so. Open a connection, click its **Agents** chip (beside Writes), and turn it on; on a `prod` connection that asks you to type its name. **Agents** at the end of the bottom rail opens the Agents sheet: the command to register overdb with your client, ready to copy; which agents are connected now; every connection with its switch; and each call agents made — the tool, the connection, the statement and how it went, never the rows. A connection that is not opted in is not listed, and naming it gets the same answer as naming one that does not exist. Changes take effect on the next tool call — no restart.
+Nothing is exposed until you say so. Open a connection, click its **Agents** chip (beside the Read-only / Writes control), and turn it on; on a `prod` connection that asks you to type its name. The chip counts today's calls on that connection and shows a dot while an agent is connected. **Agents** at the end of the bottom rail opens the Agents sheet: the command to register overdb with your client, ready to copy; which agents are connected now; every connection with its switch; and each call agents made — the tool, the connection, the statement and how it went, never the rows. A connection that is not opted in is not listed, and naming it gets the same answer as naming one that does not exist. Changes take effect on the next tool call — no restart.
 
 Register it once with your agent. With Claude Code:
 
@@ -79,7 +128,7 @@ A hosted agent — an overgo worker, anything in a container — has no Overdb a
 node dist/mcp/headless.js --connections /etc/overdb/connections.json
 ```
 
-Same six tools, same read-only rules (the code is shared), plain Node 22.12+, no Electron. It reads a connections file that holds **no secret** — each credential is a reference the server resolves from what it has itself:
+Same seven tools, same read-only rules (the code is shared), plain Node 22.12+, no Electron. It reads a connections file that holds **no secret** — each credential is a reference the server resolves from what it has itself:
 
 ```json
 { "version": 1, "connections": [
@@ -104,7 +153,7 @@ Postgres, MySQL, SQLite, and DynamoDB. Deliberately not warehouses or document s
 
 ## Status
 
-Pre-1.0, building in the open. See the CHANGELOG for what is built and what is not.
+Pre-1.0 (currently 0.3.0), building in the open. See the [CHANGELOG](CHANGELOG.md) for what is built and what is not.
 
 ## Stack
 
@@ -113,11 +162,14 @@ Electron + React + Tailwind + Vite + Zustand + TypeScript. Mirrors overgit's `sr
 ## First run
 
 Open overdb with no connections and it offers four ways in: a server it found
-answering on this machine, an import from DataGrip / IntelliJ / DBeaver / `~/.pgpass`,
-a blank connection form (paste a URL and it fills itself), or **the sample** —
+answering on this machine, an import (from DataGrip, DataSpell, IntelliJ or DBeaver,
+a project's `.idea` folder, `~/.pgpass`, or `DATABASE_URL`-style variables —
+nothing is created until you pick), a blank connection form (paste a URL and it
+fills itself), or **the sample** —
 one small shop database in local, staging and prod, drifted apart on purpose,
 as SQLite files that never leave your machine. The sample is the fastest way
-to see what an environment set does.
+to see what an environment set does. Help → Try the Sample Database brings it
+back later.
 
 Help → How overdb Works explains the vocabulary (connection, environment set,
 baseline, group) and what keeps a connection safe; ⌘/ lists the keyboard
@@ -142,3 +194,6 @@ the dev build a data folder of its own:
 ```bash
 OVERDB_PROFILE=fresh npm run dev
 ```
+
+The README screenshots are generated from fictional data; see
+[docs/screenshots/README.md](docs/screenshots/README.md) to regenerate them.
