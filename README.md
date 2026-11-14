@@ -29,7 +29,7 @@ An **environment set** is the same logical database across environments, pinned 
 
 ### One statement, every environment
 
-Open an environment set and **Run on 3** (one per member): the statement goes to every member at once, and what comes back is lined up against the baseline — columns one side does not return, row counts, whether the rows match, and how long each took. Each member's own rows are a tab away.
+Open an environment set and **Run on 3** (one per member): the statement goes to every member at once, and what comes back is lined up against the baseline — columns one side does not return, row counts, whether the rows match, and how long each took. Where rows differ, the comparison says which: matched on the table's own key, the rows only one side has and the values that changed. Each member's own rows are a tab away.
 
 <p align="center">
   <img alt="An environment set across local, staging and prod: one query run on all three, with a column only local returns and different row counts flagged against the prod baseline" src="docs/screenshots/env-set.png" width="100%" />

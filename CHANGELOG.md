@@ -7,6 +7,20 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+- **Row differences** in an environment set's comparison: which rows differ,
+  not just whether they do. Rows are matched on the primary key or a unique
+  index of the table the server says they came from — checked to be unique in
+  both results, never guessed from a column name — and sorted into only in the
+  baseline, only in the member, and changed, with each changed cell's two
+  values side by side. Without a key, whole rows are compared. The key can be
+  changed to any returned column.
+
+### Changed
+- The same rows returned in a different order are now the same rows. Without
+  an `ORDER BY` two servers owe you no particular order, and the comparison
+  used to call that "same number of rows, different values".
+
 ## [0.3.0] - 2026-10-28
 
 ### Added

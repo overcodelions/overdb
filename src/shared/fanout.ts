@@ -15,6 +15,7 @@
 import type { Cell, ColumnMeta } from './types';
 import type { Engine, Variant } from './engines';
 import { equivalentSpelling, sameType } from './typeEquiv';
+import { sameRowSet } from './rowDiff';
 
 export type MemberStatus =
   | 'pending'
@@ -89,7 +90,7 @@ export interface Drift {
   reordered: string[];
   /// This member's row count minus the baseline's, when both are known.
   rowDelta: number | null;
-  /// Whether the two returned the same rows, cell for cell, in order.
+  /// Whether the two returned the same rows, cell for cell, in any order.
   /// Null when either side did not finish, or when what came back was
   /// truncated — a comparison of two capped grids says nothing about the
   /// tables underneath them.
@@ -106,31 +107,6 @@ export interface Comparison {
 
 function names(columns: ColumnMeta[]): string[] {
   return columns.map((c) => c.name);
-}
-
-/// Cell-for-cell equality, which is deliberately strict about nothing but
-/// the values: a number from one driver and the same number as a string from
-/// another are NOT the same answer to report as identical, because the
-/// difference is real and someone downstream will trip over it.
-function sameCells(a: Cell[][], b: Cell[][]): boolean {
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) {
-    const rowA = a[i];
-    const rowB = b[i];
-    if (rowA.length !== rowB.length) return false;
-    for (let j = 0; j < rowA.length; j++) {
-      const x = rowA[j];
-      const y = rowB[j];
-      if (x === y) continue;
-      // Binary cells arrive as objects; compare what they carry rather than
-      // the reference, which is never equal across two connections.
-      if (x && y && typeof x === 'object' && typeof y === 'object') {
-        if (JSON.stringify(x) === JSON.stringify(y)) continue;
-      }
-      return false;
-    }
-  }
-  return true;
 }
 
 export function compare(member: MemberRun, baseline: MemberRun | null): Comparison {
@@ -187,7 +163,11 @@ export function compare(member: MemberRun, baseline: MemberRun | null): Comparis
       ? null
       : missingColumns.length || extraColumns.length
         ? false
-        : sameCells(member.rows, baseline.rows);
+        : // The same rows in any order. Without an ORDER BY two servers
+          // owe you no particular order, and calling that "different
+          // values" sent people looking for a difference that was not there.
+          // Strictness about the values themselves is kept — see cellToken.
+          sameRowSet(baseline, member);
 
   const drift: Drift = {
     missingColumns,

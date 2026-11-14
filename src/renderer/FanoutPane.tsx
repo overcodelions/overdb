@@ -23,6 +23,7 @@ import { ResultGrid } from './ResultGrid';
 import { Resizer } from './Resizer';
 import { MemberHealth } from './EnvSetPane';
 import { SchemaDriftView } from './SchemaDriftView';
+import { RowDiffView } from './RowDiffView';
 import { SchemaBar } from './SchemaBar';
 import { useReach, whyDown } from './reachStore';
 import { ago } from '@shared/history';
@@ -933,6 +934,8 @@ function DriftTable({
         <Swatch className="bg-bad/35" label="absent" />
         <Swatch className="bg-wash-strong" label="same type, different engines" />
       </div>
+
+      {verdict.compared && <RowDiffView runs={runs} baseline={baseline} byId={byId} />}
 
       {failed.map((run) => (
         <div key={run.connectionId} className="flex items-baseline gap-2.5">
