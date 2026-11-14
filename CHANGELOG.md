@@ -7,6 +7,16 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Security
+- Electron 41 → 44. Electron 41 is out of support, and nine advisories
+  (certificate pinning for compromised eMudhra intermediates, permission
+  checks attributed to the wrong origin, SameSite cookies on windows opened
+  from links, and others) were fixed only on newer lines.
+- Updated the transitive dependencies Dependabot flagged — among them
+  `hono` and `@hono/node-server` (under the MCP server), `fast-uri`,
+  `undici`, `shell-quote`, `follow-redirects` and `vite` — and vitest to
+  4.1.12.
+
 ## [0.3.0] - 2026-10-28
 
 ### Added

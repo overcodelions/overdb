@@ -144,14 +144,14 @@
     "autoprefixer": "^10.4.20",
     "concurrently": "^9.1.0",
     "cross-env": "^7.0.3",
-    "electron": "^41.7.0",
+    "electron": "^44.11.3",
     "electron-builder": "^26.8.1",
     "jsdom": "^29.1.1",
     "postcss": "^8.5.15",
     "tailwindcss": "^3.4.16",
     "typescript": "^6.0.3",
     "vite": "^6.0.3",
-    "vitest": "4.1.11",
+    "vitest": "4.1.12",
     "wait-on": "^9.0.10"
   },
   "dependencies": {
