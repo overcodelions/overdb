@@ -83,6 +83,14 @@ describe('compare', () => {
     expect(c.summary).toBe('same number of rows, different values');
   });
 
+  // Without an ORDER BY two servers owe you no particular order.
+  it('calls the same rows in a different order identical', () => {
+    const reversed = done('other', [col('id'), col('name', 'text')], [[2, 'b'], [1, 'a']]);
+    const c = compare(reversed, base);
+    expect(c.drift?.sameRows).toBe(true);
+    expect(c.kind).toBe('match');
+  });
+
   it('leads with the schema difference, not the row count', () => {
     const both = done('other', [col('id')], [[1]]);
     expect(compare(both, base).summary.startsWith('missing column name')).toBe(true);
