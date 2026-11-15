@@ -230,6 +230,15 @@ body,
 .dark .sidebar-row-selected:hover {
   --row-bg: color-mix(in srgb, rgb(var(--c-accent)) 22%, rgb(var(--c-surface-muted)));
 }
+/* The connection whose branch is open: a lighter wash of the same accent,
+ * so the open branch and where it came from read as one place. */
+.sidebar-row-ancestor {
+  --row-bg: color-mix(in srgb, rgb(var(--c-accent)) 6%, rgb(var(--c-surface-muted)));
+  background: var(--row-bg);
+}
+.dark .sidebar-row-ancestor {
+  --row-bg: color-mix(in srgb, rgb(var(--c-accent)) 9%, rgb(var(--c-surface-muted)));
+}
 
 /* The engine as a tile: two letters in the engine's colour on a wash of
  * the same colour. The wash comes from currentColor so the one TAG_TEXT
