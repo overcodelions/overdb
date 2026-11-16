@@ -3,6 +3,7 @@ import { useStore } from './store';
 import { Dropdown, MenuDivider, MenuItem } from './Menu';
 import { isTarget, routeTo, targetItems, useTickets } from './ticketsStore';
 import type { ProxyState } from '@shared/instances';
+import { servicesView, since } from './TicketSection';
 
 // "Services → PROJ-123": which database your running services reach through
 // overdb, and the place to change it. In the title bar, the same spot always. See docs/design/baselines.md.
@@ -28,6 +29,52 @@ function PowerIcon(): JSX.Element {
     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <path d="M12 3v9" /><path d="M6.3 6.8a8 8 0 1 0 11.4 0" />
     </svg>
+  );
+}
+
+/// Under one base's proxy: the base its branches come from, and a way to
+/// look at what services see — the two things that used to sit in the
+/// sidebar under every branch list.
+function ProxyLinks({ source, onDone }: { source: string; onDone(): void }): JSX.Element | null {
+  const t = useTickets();
+  const connections = useStore((s) => s.connections);
+  const select = useStore((s) => s.select);
+  const setSheet = useStore((s) => s.setSheet);
+  const base = t.baselines.find((b) => b.sourceConnectionId === source);
+  const see = servicesView(t, connections, source);
+  if (!base && !see) return null;
+  return (
+    <div className="px-2.5 pb-1.5 flex items-center gap-3 text-[11px] text-ink-muted">
+      {base && (
+        <span className="min-w-0 truncate" title={`The base every branch starts from: a small copy of ${base.sourceName}`}>
+          Base <span className="text-ink">{base.label}</span> · built {since(base.builtAt)}
+        </span>
+      )}
+      <span className="flex-1" />
+      {see && (
+        <button
+          className="shrink-0 text-accent-strong hover:underline"
+          title="A read-only connection through the proxy: it queries whatever services reach"
+          onClick={() => {
+            onDone();
+            select({ kind: 'connection', id: see });
+          }}
+        >
+          What services see
+        </button>
+      )}
+      {base && (
+        <button
+          className="shrink-0 text-accent-strong hover:underline"
+          onClick={() => {
+            onDone();
+            setSheet({ kind: 'baseline', connectionId: source });
+          }}
+        >
+          Rebuild…
+        </button>
+      )}
+    </div>
   );
 }
 
@@ -137,6 +184,7 @@ export function ServicesChip(): JSX.Element | null {
                     {p.config.socket ? <> and <span className="font-mono">{p.config.socket}</span></> : null} · {p.connections} open
                   </div>
                 </div>
+                <ProxyLinks source={p.source} onDone={() => setOpen(false)} />
                 {targetItems(t, p.source).map((x) => {
                   const local = connections.find((c) => c.id === p.source)?.env === 'local';
                   const i = x.target.kind === 'server' ? { ...x, label: local ? 'Your own server' : nameOf(p.source) } : x;

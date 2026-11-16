@@ -7,12 +7,12 @@ import { EnvSetSuggestion } from './Welcome';
 import { TAG_MONO, TAG_TEXT } from './engineTags';
 import { middleTruncate, nameBudget } from '@shared/truncate';
 import { useTickets } from './ticketsStore';
-import { Branches } from './TicketSection';
+import { Branches, RoutedIcon, servicesView } from './TicketSection';
 import { devInstanceRefusal, isProxyConnectionId } from '@shared/instances';
 import { Dropdown, MenuDivider, MenuItem } from './Menu';
 import { MAP_TAB, openPane } from './queryStore';
-import { Agent } from './Icons';
 import { agentReach } from '@shared/hostedConnection';
+import { AgentMark, AgentWatch } from './AgentMark';
 
 /// Which sections the user has folded away. Per-viewer convenience, so it
 /// lives in the browser rather than the app store — and every access is
@@ -29,7 +29,8 @@ function loadCollapsed(): Record<string, boolean> {
 }
 
 /// Everything about a connection someone might type to find it: not just
-/// the name, because half of these are called "localhost".
+/// the name, because half of these are called "localhost". The environment
+/// is in it, so typing "prod" is the quickest way to one environment.
 function haystack(c: Connection): string {
   return [c.name, c.host, c.database, c.env, c.engine, c.variant, c.user]
     .filter(Boolean)
@@ -37,28 +38,18 @@ function haystack(c: Connection): string {
     .toLowerCase();
 }
 
-const ENV_KEY = 'overdb.sidebar.env';
-
-function loadEnv(): EnvKind | 'all' {
-  try {
-    return (localStorage.getItem(ENV_KEY) as EnvKind | 'all' | null) ?? 'all';
-  } catch {
-    return 'all';
-  }
-}
-
 // Environment order is deliberate and fixed: it reads the way work flows,
 // and it puts prod last, where it is hardest to click by accident.
 const ENV_ORDER: EnvKind[] = ['local', 'dev', 'sandbox', 'staging', 'prod', 'other'];
 const ENV_NAME: Record<EnvKind, string> = { local: 'Local', dev: 'Dev', sandbox: 'Sandbox', staging: 'Staging', prod: 'Prod', other: 'Other' };
 
-/// The sidebar is two questions: which environment you are in, then which
-/// database. The switch at the top answers the first — you work in one at a
-/// time, and a team with five connections per environment cannot see them
-/// all at once anyway. Every connection is listed under its environment,
-/// whether or not a set holds it; environment sets (one database, in each
-/// place) are how you compare, so they sit in a dock below the list.
-/// Branches nest under the connection they came from.
+const envKey = (e: EnvKind) => `env:${e}`;
+
+/// Every connection, listed under its environment, one line each; branches
+/// as rows under the connection they came from; environment sets (one
+/// database, in each place) in a dock below. There is no environment
+/// switch: each environment folds, and ⌥-click or a right click on its
+/// heading shows only that one. Making things is the + beside the search.
 export function Sidebar(): JSX.Element {
   const allConnections = useStore((s) => s.connections);
   const ticketState = useTickets();
@@ -77,8 +68,8 @@ export function Sidebar(): JSX.Element {
 
   const [query, setQuery] = useState('');
   const [starred, setStarred] = useState(false);
-  const [env, setEnv] = useState<EnvKind | 'all'>(loadEnv);
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>(loadCollapsed);
+  const [plusAt, setPlusAt] = useState<{ x: number; y: number } | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -88,13 +79,6 @@ export function Sidebar(): JSX.Element {
       // Losing fold state costs nothing; failing to render the nav does not.
     }
   }, [collapsed]);
-  useEffect(() => {
-    try {
-      localStorage.setItem(ENV_KEY, env);
-    } catch {
-      // As above.
-    }
-  }, [env]);
 
   // ⌘F puts the cursor in the filter from anywhere. Finding one connection
   // among twenty by scrolling is the thing this replaces.
@@ -110,32 +94,45 @@ export function Sidebar(): JSX.Element {
   }, []);
 
   const envs = ENV_ORDER.filter((e) => connections.some((c) => c.env === e));
-  const showTabs = envs.length > 1;
-  const current: EnvKind | 'all' = showTabs && env !== 'all' && envs.includes(env) ? env : 'all';
 
   // Opening a connection from elsewhere (the palette, a shortcut, a branch)
-  // that this tab hides moves to its environment, so the row you are on is
+  // that sits in a folded environment unfolds it, so the row you are on is
   // always one you can see.
   useEffect(() => {
-    if (selection?.kind !== 'connection' || current === 'all') return;
-    const c = connections.find((x) => x.id === selection.id);
-    if (c && c.env !== current) setEnv(c.env);
-    const t = ticketState.tickets.find((x) => x.connectionId === selection.id);
-    const src = t && connections.find((x) => x.id === t.sourceConnectionId);
-    if (src && src.env !== current) setEnv(src.env);
+    if (selection?.kind !== 'connection') return;
+    const branch = ticketState.tickets.find((x) => x.connectionId === selection.id);
+    const c = connections.find((x) => x.id === (branch ? branch.sourceConnectionId : selection.id));
+    if (c && collapsed[envKey(c.env)]) setCollapsed((p) => ({ ...p, [envKey(c.env)]: false }));
   }, [selection]);
 
   const q = query.trim().toLowerCase();
   const active = envSets.filter((e) => !e.archived);
   const starredSet = (c: Connection) => c.pinned || active.some((e) => e.pinned && e.memberIds.includes(c.id));
-  // A search looks everywhere: the tab is where you are, not a wall.
-  const inScope = (c: Connection) => (!!q || current === 'all' || c.env === current) && (!starred || starredSet(c));
+  // A connection matches on its own details, or on a branch made from it —
+  // then it shows with just the branches that matched.
+  const branchHits = useMemo(
+    () =>
+      q
+        ? new Set(ticketState.tickets.filter((t) => `${t.name} ${t.note}`.toLowerCase().includes(q)).map((t) => t.sourceConnectionId))
+        : new Set<string>(),
+    [ticketState.tickets, q],
+  );
+  const selfHit = (c: Connection) => !q || haystack(c).includes(q);
   const matches = useMemo(
-    () => connections.filter((c) => inScope(c) && (!q || haystack(c).includes(q))),
-    [connections, q, current, starred, active],
+    () => connections.filter((c) => (!starred || starredSet(c)) && (selfHit(c) || branchHits.has(c.id))),
+    [connections, q, starred, active, branchHits],
   );
   const matchIds = new Set(matches.map((c) => c.id));
   const byPin = (a: { pinned?: boolean }, b: { pinned?: boolean }) => Number(!!b.pinned) - Number(!!a.pinned);
+
+  // A row is one line; the host and database come back as a second line
+  // only for a name that is not enough on its own — two connections called
+  // the same thing.
+  const sharedNames = useMemo(() => {
+    const n = new Map<string, number>();
+    for (const c of connections) n.set(c.name, (n.get(c.name) ?? 0) + 1);
+    return new Set([...n].filter(([, k]) => k > 1).map(([name]) => name));
+  }, [connections]);
 
   // Sets are how you compare, not where a connection lives: every
   // connection is listed under its environment, and the sets sit in a dock
@@ -152,28 +149,45 @@ export function Sidebar(): JSX.Element {
   const looseByEnv = ENV_ORDER.map((e) => ({ env: e, items: loose.filter((c) => c.env === e) })).filter((b) => b.items.length > 0);
   // Branches whose connection was deleted still need a home.
   const orphans = ticketState.tickets.some((t) => !connections.some((c) => c.id === t.sourceConnectionId));
+  // Only watch what agents do while there is a connection — or a branch —
+  // they can reach.
+  const agentsReach = allConnections.some((c) => c.mcpExposed);
 
   const toggle = (key: string) => setCollapsed((prev) => ({ ...prev, [key]: !prev[key] }));
   // A filter that hides its results inside a folded section is broken, so
   // searching overrides the fold rather than fighting it.
   const isFolded = (key: string) => !q && Boolean(collapsed[key]);
+  // One environment on its own: fold the rest. Asked again of the one
+  // already alone, it brings the others back.
+  const alone = (e: EnvKind, from: Record<string, boolean>) => !from[envKey(e)] && envs.every((x) => x === e || from[envKey(x)]);
+  const solo = (e: EnvKind) =>
+    setCollapsed((prev) => {
+      const back = alone(e, prev);
+      const next = { ...prev };
+      for (const x of envs) next[envKey(x)] = back ? false : x !== e;
+      return next;
+    });
   const withBranches = (c: Connection, opts: { showEnv: boolean }) => (
     <div key={c.id}>
-      <ConnectionRow connection={c} showEnv={opts.showEnv} />
+      <ConnectionRow connection={c} showEnv={opts.showEnv} showDetail={sharedNames.has(c.name)} />
       <Branches
         sourceConnectionId={c.id}
-        query={q}
-        folded={isFolded(`branches:${c.id}`)}
-        onToggle={() => toggle(`branches:${c.id}`)}
+        query={selfHit(c) ? '' : q}
+        showAll={Boolean(collapsed[`branches-all:${c.id}`])}
+        onToggleAll={() => toggle(`branches-all:${c.id}`)}
       />
     </div>
   );
 
   const nothingMatched = (q.length > 0 || starred) && matches.length === 0 && sets.length === 0;
-  const nothingHere = !q && !starred && connections.length > 0 && matches.length === 0;
+  const go = (fn: () => void) => () => {
+    setPlusAt(null);
+    fn();
+  };
 
   return (
     <div className="h-full flex flex-col bg-surface-muted border-r border-card">
+      {agentsReach && <AgentWatch />}
       <div className="px-2.5 pt-2.5 pb-2 shrink-0 flex gap-1.5">
         <label className="group field flex-1 min-w-0 h-[26px] flex items-center gap-1.5 pl-2 pr-1.5 rounded-md cursor-text">
           <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true" className="shrink-0 text-ink-muted">
@@ -198,7 +212,7 @@ export function Sidebar(): JSX.Element {
               }
             }}
             placeholder="Find a connection"
-            aria-label="Find a connection or set"
+            aria-label="Find a connection, branch or set"
             className="flex-1 min-w-0 h-full bg-transparent outline-none text-[11.5px] text-ink placeholder:text-ink-faint"
           />
           {/* The shortcut is the hint; once you are in the field it has done
@@ -218,50 +232,39 @@ export function Sidebar(): JSX.Element {
         >
           <StarIcon filled={starred} size={12} />
         </button>
-      </div>
-
-      {showTabs && (
-        <div
-          role="tablist"
-          aria-label="Environment"
-          className={`mx-2.5 mb-2 shrink-0 flex gap-0.5 p-[2px] rounded-[7px] bg-card ${q ? 'opacity-50' : ''}`}
-          title={q ? 'Searching every environment' : undefined}
+        <button
+          // Its own toggle: kept from the menu's click-outside, which would
+          // close it on mousedown only for this click to open it again.
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            if (plusAt) return setPlusAt(null);
+            const r = e.currentTarget.getBoundingClientRect();
+            setPlusAt({ x: Math.max(8, r.right - 230), y: r.bottom + 4 });
+          }}
+          aria-haspopup="menu"
+          aria-expanded={!!plusAt}
+          title="New connection, set or branch"
+          aria-label="New"
+          className="shrink-0 w-[26px] h-[26px] rounded-md border border-transparent bg-card text-ink-muted hover:text-ink flex items-center justify-center"
         >
-          {(['all', ...envs] as const).map((e) => {
-            const on = current === e;
-            return (
-              <button
-                key={e}
-                role="tab"
-                aria-selected={on}
-                onClick={() => setEnv(e)}
-                // Raised rather than tinted, so the on state is one look
-                // whatever the environment — except prod, which is the one
-                // tab that should look different when you are in it.
-                className={`flex-auto min-w-0 h-[22px] px-1.5 rounded-[5px] flex items-center justify-center gap-[5px] text-[11px] whitespace-nowrap transition-colors ${
-                  on
-                    ? e === 'prod'
-                      ? 'font-semibold bg-bad/10 text-bad-strong'
-                      : 'font-semibold bg-surface-elevated text-ink shadow-[0_1px_2px_rgba(0,0,0,0.12)]'
-                    : 'font-medium text-ink-muted hover:text-ink'
-                }`}
-              >
-                {e !== 'all' && <span aria-hidden="true" className={`shrink-0 w-1.5 h-1.5 rounded-full ${ENV_DOT[e]}`} />}
-                {e === 'all' ? 'All' : ENV_NAME[e]}
-              </button>
-            );
-          })}
-        </div>
-      )}
-
-      {current === 'prod' && !q && (
-        <div className="mx-2.5 mb-1.5 shrink-0 flex items-center gap-1.5 px-2 py-[5px] rounded-md bg-bad/10 text-[10.5px] leading-[13px] text-bad-strong">
-          <svg width="11" height="11" viewBox="0 0 12 12" fill="none" aria-hidden="true" className="shrink-0">
-            <path d="M6 1.2 10 2.8v3c0 2.4-1.7 4.2-4 5-2.3-.8-4-2.6-4-5v-3L6 1.2Z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
+          <svg width="11" height="11" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+            <path d="M6 1.5v9M1.5 6h9" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
           </svg>
-          Production — take care what you run.
-        </div>
-      )}
+        </button>
+        <Dropdown open={!!plusAt} at={plusAt ?? undefined} onClose={() => setPlusAt(null)} label="New" width={230}>
+          <MenuItem label="New connection…" onSelect={go(() => setSheet({ kind: 'newConnection' }))} />
+          <MenuItem label="New environment set…" detail="One database, in each environment" onSelect={go(() => setSheet({ kind: 'newEnvSet' }))} />
+          {ticketState.baselines.length > 0 && (
+            <MenuItem label="New branch…" detail="A writable copy, made from a base" onSelect={go(() => setSheet({ kind: 'tickets' }))} />
+          )}
+          <MenuDivider />
+          <MenuItem
+            label="Import connections…"
+            detail="DataGrip, DataSpell, IntelliJ, DBeaver or ~/.pgpass"
+            onSelect={go(() => setSheet({ kind: 'importConnections' }))}
+          />
+        </Dropdown>
+      </div>
 
       <div className="flex-1 min-h-0 overflow-y-auto">
         {/* Only while something is open: with nothing selected the main
@@ -271,15 +274,14 @@ export function Sidebar(): JSX.Element {
 
         {nothingMatched && (
           <Empty>
-            {starred && !q ? 'Nothing starred here yet. Star a connection or set from its row.' : `Nothing matches “${query}”. Search names, hosts, databases and engines.`}
+            {starred && !q ? 'Nothing starred here yet. Star a connection or set from its row.' : `Nothing matches “${query}”. Search names, hosts, databases, environments and branches.`}
           </Empty>
         )}
-        {nothingHere && <Empty>No {current === 'all' ? '' : `${ENV_NAME[current]} `}connections yet.</Empty>}
 
-        {orphans && (current === 'all' || current === 'local') && (
-          <div className="py-1">
-            <Branches sourceConnectionId={null} query={q} folded={isFolded('branches:orphans')} onToggle={() => toggle('branches:orphans')} />
-          </div>
+        {orphans && (
+          <Section label="Branches without a connection" collapsed={isFolded('branches:orphans')} onToggle={() => toggle('branches:orphans')}>
+            <Branches sourceConnectionId={null} query={q} showAll onToggleAll={() => undefined} />
+          </Section>
         )}
 
         {groups.map((g) => {
@@ -300,20 +302,23 @@ export function Sidebar(): JSX.Element {
 
         {connections.length === 0 ? (
           <Section label="Connections">
-            <Empty>No connections yet. Add one below, or import from a tool you already use.</Empty>
+            <Empty>No connections yet. Add one with +, or import from a tool you already use.</Empty>
           </Section>
         ) : (
           looseByEnv.map(({ env: e, items }) => (
             <Section
               key={e}
-              // Under one environment's tab the tab already says which, and
-              // a heading repeating it is the third time on the screen.
-              bare={!q && current !== 'all'}
               label={ENV_NAME[e]}
               lead={<span aria-hidden="true" className={`w-1.5 h-1.5 rounded-full ${ENV_DOT[e]}`} />}
               count={items.length}
-              collapsed={isFolded(`env:${e}`)}
-              onToggle={() => toggle(`env:${e}`)}
+              tone={e === 'prod' ? 'prod' : undefined}
+              collapsed={isFolded(envKey(e))}
+              onToggle={() => toggle(envKey(e))}
+              solo={
+                envs.length > 1 && !q
+                  ? { label: alone(e, collapsed) ? 'Show every environment' : `Show only ${ENV_NAME[e]}`, run: () => solo(e) }
+                  : undefined
+              }
             >
               {items.map((c) => withBranches(c, { showEnv: false }))}
             </Section>
@@ -322,12 +327,7 @@ export function Sidebar(): JSX.Element {
       </div>
 
       {connections.length > 1 && (sets.length > 0 || (!q && !starred)) && (
-        <SetDock
-          sets={sets}
-          env={q ? 'all' : current}
-          folded={Boolean(collapsed['dock:sets'])}
-          onToggle={() => toggle('dock:sets')}
-        />
+        <SetDock sets={sets} folded={Boolean(collapsed['dock:sets'])} onToggle={() => toggle('dock:sets')} />
       )}
     </div>
   );
@@ -343,17 +343,13 @@ const ENV_DOT: Record<EnvKind, string> = {
 };
 
 /// The sets, below the list and always in view: one row each, the
-/// environments it spans as dots, and Compare. Under an environment tab the
-/// sets that have nothing there step back rather than disappear — they are
-/// still one click away, and a set that vanishes reads as deleted.
+/// environments it spans as dots on its tile. Clicking one compares it.
 function SetDock({
   sets,
-  env,
   folded,
   onToggle,
 }: {
   sets: EnvSet[];
-  env: EnvKind | 'all';
   folded: boolean;
   onToggle(): void;
 }): JSX.Element {
@@ -370,11 +366,11 @@ function SetDock({
           <svg width="8" height="8" viewBox="0 0 8 8" aria-hidden="true" className={`transition-transform ${folded ? '' : 'rotate-90'}`}>
             <path d="M2 1l4 3-4 3z" fill="currentColor" />
           </svg>
-          Compare
+          Environment sets
         </button>
         {sets.length > 0 && <span className="text-[10px] tabular-nums text-ink-muted">{sets.length}</span>}
         <div className="flex-1" />
-        <IconButton label="New set" onClick={() => setSheet({ kind: 'newEnvSet' })}>
+        <IconButton label="New environment set" onClick={() => setSheet({ kind: 'newEnvSet' })}>
           <svg width="11" height="11" viewBox="0 0 12 12" fill="none" aria-hidden="true">
             <path d="M6 2v8M2 6h8" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
           </svg>
@@ -385,9 +381,7 @@ function SetDock({
           {sets.length === 0 ? (
             <Empty>Make a set to compare the same database across local, staging and prod.</Empty>
           ) : (
-            sets.map((s) => (
-              <SetRow key={s.id} envSet={s} env={env} selected={selection?.kind === 'envSet' && selection.id === s.id} />
-            ))
+            sets.map((s) => <SetRow key={s.id} envSet={s} selected={selection?.kind === 'envSet' && selection.id === s.id} />)
           )}
         </div>
       )}
@@ -395,7 +389,7 @@ function SetDock({
   );
 }
 
-function SetRow({ envSet, env, selected }: { envSet: EnvSet; env: EnvKind | 'all'; selected: boolean }): JSX.Element {
+function SetRow({ envSet, selected }: { envSet: EnvSet; selected: boolean }): JSX.Element {
   const select = useStore((s) => s.select);
   const setSheet = useStore((s) => s.setSheet);
   const askConfirm = useStore((s) => s.askConfirm);
@@ -404,7 +398,6 @@ function SetRow({ envSet, env, selected }: { envSet: EnvSet; env: EnvKind | 'all
   const connections = useStore((s) => s.connections);
   const members = envSet.memberIds.map((id) => connections.find((c) => c.id === id)).filter((c): c is Connection => !!c);
   const envs = ENV_ORDER.filter((e) => members.some((c) => c.env === e));
-  const away = env !== 'all' && !envs.includes(env);
   const open = () => select({ kind: 'envSet', id: envSet.id });
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const remove = () =>
@@ -420,8 +413,11 @@ function SetRow({ envSet, env, selected }: { envSet: EnvSet; env: EnvKind | 'all
     <>
       <Row
         label={envSet.name}
-        title={members.length ? `${envSet.name}: ${members.map((c) => c.name).join(', ')}` : `${envSet.name} has no connections yet`}
-        detail={envs.length ? envs.map((e) => ENV_NAME[e].toLowerCase()).join(' · ') : 'empty'}
+        title={
+          members.length
+            ? `${envSet.name} — compare across ${envs.map((e) => ENV_NAME[e].toLowerCase()).join(', ')}\n${members.map((c) => c.name).join(', ')}`
+            : `${envSet.name} has no connections yet`
+        }
         // Where a connection's tile names its engine, a set's shows the
         // environments it spans — the thing that makes it a set.
         lead={
@@ -431,18 +427,9 @@ function SetRow({ envSet, env, selected }: { envSet: EnvSet; env: EnvKind | 'all
             ))}
           </span>
         }
-        chip={
-          <span
-            title={`Open ${envSet.name} across every environment: drift, and queries on all of them`}
-            className="px-1.5 py-0.5 rounded bg-accent/15 text-[10.5px] font-medium text-accent-strong"
-          >
-            Compare
-          </span>
-        }
         rest={envSet.pinned ? <StarMark /> : null}
         moreLabel={`More for ${envSet.name}`}
         onMore={setMenu}
-        dimmed={away && !selected}
         selected={selected}
         onClick={open}
         onContextMenu={(e) => {
@@ -462,9 +449,9 @@ function SetRow({ envSet, env, selected }: { envSet: EnvSet; env: EnvKind | 'all
   );
 }
 
-/// What the second line says. The env is deliberately absent — the section
-/// heading above already carries it — and this is empty when the name
-/// already tells you everything, rather than repeating it.
+/// Where a connection points: the database, and the host when the name is
+/// not already it. On hover always; as a second line only when two
+/// connections share a name.
 function detailFor(conn: Connection): string {
   const parts: string[] = [];
   if (conn.engine === 'sqlite') return conn.file ?? '';
@@ -475,18 +462,6 @@ function detailFor(conn: Connection): string {
     parts.push(conn.host);
   }
   return parts.join(' · ');
-}
-
-/// Shown only when something other than you can read the connection, so
-/// its presence is the news — see `agentReach`.
-function AgentMark({ connection }: { connection: Connection }): JSX.Element | null {
-  const reach = agentReach(connection);
-  if (!reach) return null;
-  return (
-    <span title={reach} aria-label={reach} role="img" className="shrink-0 w-[18px] flex justify-center text-accent">
-      <Agent className="w-3 h-3" />
-    </span>
-  );
 }
 
 /// Connected, or the last attempt failed, as a pip on the engine tile's
@@ -553,10 +528,13 @@ function IconButton({
 function ConnectionRow({
   connection,
   showEnv = true,
+  showDetail = false,
 }: {
   connection: Connection;
-  /// Suppressed when the section heading already says it.
+  /// In a group of your own, where no heading says the environment.
   showEnv?: boolean;
+  /// Another connection has the same name: say where this one points.
+  showDetail?: boolean;
 }): JSX.Element {
   const selection = useStore((s) => s.selection);
   const select = useStore((s) => s.select);
@@ -564,7 +542,17 @@ function ConnectionRow({
   const removeConnection = useStore((s) => s.removeConnection);
   const togglePin = useStore((s) => s.togglePin);
   const state = useStore((s) => s.connState[connection.id]);
+  const tickets = useTickets((s) => s.tickets);
+  const proxies = useTickets((s) => s.proxies);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  // One of its branches is open: the connection it came from says so, so
+  // you can see whose branch you are in without reading the title bar.
+  const branchOpen =
+    selection?.kind === 'connection' && tickets.some((t) => t.connectionId === selection.id && t.sourceConnectionId === connection.id);
+  // The ⇄ marks whichever row services reach, one per proxy: here when they
+  // reach the server itself, on the branch when they are switched to one.
+  const proxy = proxies.find((p) => p.source === connection.id);
+  const servicesHere = !!proxy?.running && proxy.config.target.kind === 'server';
 
   const requestDelete = () =>
     askConfirm({
@@ -578,28 +566,44 @@ function ConnectionRow({
     });
 
   const reach = agentReach(connection);
+  const where = detailFor(connection);
+  const detail = [showEnv ? ENV_NAME[connection.env] : null, showDetail ? where : null].filter(Boolean).join(' · ');
 
   return (
     <>
       <Row
         label={connection.name}
-        detail={showEnv ? [ENV_NAME[connection.env], detailFor(connection)].filter(Boolean).join(' · ') : detailFor(connection)}
+        title={[connection.name, [ENV_NAME[connection.env], where].filter(Boolean).join(' · ')].join('\n')}
+        detail={detail || undefined}
         lead={<EngineTile connection={connection} state={state} />}
-        rest={
-          connection.pinned || reach ? (
+        // The agent mark stays put on hover: whether agents can reach a
+        // connection is not something to lose the moment you point at it.
+        keep={
+          reach || servicesHere ? (
             <>
-              <AgentMark connection={connection} />
-              {connection.pinned && <StarMark />}
+              {reach && <AgentMark connection={connection} />}
+              {servicesHere && (
+                <span
+                  role="img"
+                  aria-label="Your services reach this server"
+                  title="Your services reach this server itself, not a branch"
+                  className="shrink-0 w-[18px] flex justify-center text-accent-strong"
+                >
+                  <RoutedIcon />
+                </span>
+              )}
             </>
           ) : null
         }
+        keepWidth={(reach ? 20 : 0) + (servicesHere ? 18 : 0)}
+        rest={connection.pinned ? <StarMark /> : null}
+        ancestor={branchOpen}
         pinned={connection.pinned}
         onPin={() => void togglePin('connection', connection.id)}
         moreLabel={`More for ${connection.name}`}
         onMore={setMenu}
-        // No PROD chip: the second line names the environment wherever the
-        // tab does not, and a chip on every row under the Prod tab teaches you
-        // to stop seeing it.
+        // No PROD chip: the heading says it, in red, and a chip on every
+        // row teaches you to stop seeing it.
         tone={connection.env === 'prod' ? 'warn' : 'normal'}
         selected={selection?.kind === 'connection' && selection.id === connection.id}
         onClick={() => select({ kind: 'connection', id: connection.id })}
@@ -614,8 +618,9 @@ function ConnectionRow({
 }
 
 /// Everything you can do to a connection, on a right click: open it, the
-/// work that starts from it, and managing it. Each item is offered only
-/// where it applies, so the menu never lists something that would refuse.
+/// work that starts from it — its base, branches and what services see —
+/// and managing it. Each item is offered only where it applies, so the menu
+/// never lists something that would refuse.
 function ConnectionMenu({
   connection: c,
   at,
@@ -632,10 +637,13 @@ function ConnectionMenu({
   const newBuffer = useStore((s) => s.newBuffer);
   const togglePin = useStore((s) => s.togglePin);
   const duplicateConnection = useStore((s) => s.duplicateConnection);
+  const connections = useStore((s) => s.connections);
   const baselines = useTickets((s) => s.baselines);
+  const proxies = useTickets((s) => s.proxies);
   const hasBase = baselines.some((b) => b.sourceConnectionId === c.id);
   const canBase = devInstanceRefusal(c) === null && c.engine !== 'dynamodb';
   const canSeed = c.env === 'local' && c.engine !== 'dynamodb';
+  const see = servicesView({ proxies }, connections, c.id);
   const go = (fn: () => void) => () => {
     onClose();
     fn();
@@ -651,8 +659,9 @@ function ConnectionMenu({
           newBuffer(c.id);
         })}
       />
-      {(canSeed || canBase || hasBase) && <MenuDivider />}
+      {(canSeed || canBase || hasBase || see) && <MenuDivider />}
       {canSeed && <MenuItem tone="ai" label="Seed for a ticket…" onSelect={go(() => setSheet({ kind: 'seed', connectionId: c.id }))} />}
+      {hasBase && <MenuItem label="New branch…" detail="A writable copy, made from its base" onSelect={go(() => setSheet({ kind: 'tickets' }))} />}
       {canBase && (
         <MenuItem
           label={c.env === 'local' ? (hasBase ? 'Rebuild its base…' : 'Create a base…') : hasBase ? 'Copy to this machine again…' : 'Copy to this machine…'}
@@ -660,7 +669,13 @@ function ConnectionMenu({
           onSelect={go(() => setSheet({ kind: 'baseline', connectionId: c.id }))}
         />
       )}
-      {hasBase && <MenuItem label="Branches…" onSelect={go(() => setSheet({ kind: 'tickets' }))} />}
+      {see && (
+        <MenuItem
+          label="What services see"
+          detail="Read-only, through the proxy"
+          onSelect={go(() => select({ kind: 'connection', id: see }))}
+        />
+      )}
       {c.engine !== 'dynamodb' && (
         <MenuItem
           label="Map"
@@ -686,36 +701,51 @@ function ConnectionMenu({
 function Section({
   label,
   lead,
-  action,
   count,
   collapsed,
   onToggle,
-  bare,
+  tone,
+  solo,
   children,
 }: {
   label: string;
-  /// The rows with no heading above them.
-  bare?: boolean;
   /// A mark before the label: an environment's colour.
   lead?: React.ReactNode;
-  action?: { title: string; onClick: () => void };
   /// Shown only when the section can be folded — a count on a section you
   /// can always see is telling you something you can count.
   count?: number;
   collapsed?: boolean;
   onToggle?: () => void;
+  /// Prod's heading is the one that should look different.
+  tone?: 'prod';
+  /// Show only this section: on ⌥-click, and on a right click as a menu.
+  solo?: { label: string; run: () => void };
   children: React.ReactNode;
 }): JSX.Element {
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const foldable = Boolean(onToggle);
-  if (bare) return <div className="pt-0.5 pb-1 flex flex-col gap-px">{children}</div>;
+  const color = tone === 'prod' ? 'text-bad-strong' : 'text-ink-muted hover:text-ink';
+  const hint = [tone === 'prod' ? 'Production — take care what you run' : null, solo ? '⌥-click to show only this' : null].filter(Boolean).join('\n');
   return (
     <div className="pb-1">
       <div className="flex items-center gap-1.5 pl-3.5 pr-2 pt-2.5 pb-1">
         {foldable ? (
           <button
-            onClick={onToggle}
+            onClick={(e) => {
+              if (e.altKey && solo) return solo.run();
+              onToggle?.();
+            }}
+            onContextMenu={
+              solo
+                ? (e) => {
+                    e.preventDefault();
+                    setMenu({ x: e.clientX, y: e.clientY });
+                  }
+                : undefined
+            }
             aria-expanded={!collapsed}
-            className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.06em] text-ink-muted hover:text-ink"
+            title={hint || undefined}
+            className={`flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.06em] ${color}`}
           >
             <svg
               width="8" height="8" viewBox="0 0 8 8" aria-hidden="true"
@@ -727,7 +757,7 @@ function Section({
             {label}
           </button>
         ) : (
-          <span className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.06em] text-ink-muted">
+          <span className={`flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.06em] ${color}`}>
             {lead}
             {label}
           </span>
@@ -735,18 +765,12 @@ function Section({
         {foldable && count !== undefined && (
           <span className="text-[10px] tabular-nums text-ink-muted">{count}</span>
         )}
-        <div className="flex-1" />
-        {action && (
-          <button
-            onClick={action.onClick}
-            title={action.title}
-            aria-label={action.title}
-            className="text-ink-faint hover:text-ink w-4 h-4 leading-none text-sm"
-          >
-            +
-          </button>
-        )}
       </div>
+      {solo && (
+        <Dropdown open={!!menu} at={menu ?? undefined} onClose={() => setMenu(null)} label={label} width={210}>
+          <MenuItem label={solo.label} kbd="⌥-click" onSelect={() => { setMenu(null); solo.run(); }} />
+        </Dropdown>
+      )}
       {!collapsed && <div className="flex flex-col gap-px">{children}</div>}
     </div>
   );
@@ -758,8 +782,11 @@ function Row({
   detail,
   lead,
   chip,
+  keep,
+  keepWidth = 20,
   rest,
   selected,
+  ancestor,
   dimmed,
   tone = 'normal',
   onClick,
@@ -772,9 +799,7 @@ function Row({
   label: string;
   /// The tooltip, when it should say more than the full name.
   title?: string;
-  /// Second line: host and database, the thing that actually tells five
-  /// connections called "localhost" apart. Omitted when there is nothing
-  /// to add.
+  /// A second line, only where the name alone does not tell rows apart.
   detail?: string;
   /// The 20px tile the row starts with.
   lead: React.ReactNode;
@@ -783,8 +808,14 @@ function Row({
   /// The row's end at rest — a star, an agent — swapped for the actions on
   /// hover.
   rest?: React.ReactNode;
+  /// Marks that show at rest and on hover alike, before the swapping slot.
+  keep?: React.ReactNode;
+  /// Room the kept marks take, for the name's budget.
+  keepWidth?: number;
   selected: boolean;
-  /// Present but not here: a set with nothing under the current tab.
+  /// Something under this row is the one open — a branch of it.
+  ancestor?: boolean;
+  /// Present but stepped back.
   dimmed?: boolean;
   tone?: 'normal' | 'warn';
   pinned?: boolean;
@@ -801,7 +832,7 @@ function Row({
   // renders as the same row. Budgeted for the hover actions, not the resting
   // slot: a name that is cut again the moment you point at it moves.
   const actionsWidth = (onPin ? 22 : 0) + (onMore ? 22 : 0);
-  const shown = middleTruncate(label, nameBudget(width, 20, Math.max(actionsWidth, rest ? 22 : 0)));
+  const shown = middleTruncate(label, nameBudget(width, 20, Math.max(actionsWidth, rest ? 22 : 0) + (keep ? keepWidth : 0)));
 
   return (
     // A div rather than a button: a button nested inside a button is
@@ -821,16 +852,17 @@ function Row({
           onClick();
         }
       }}
-      className={`group sidebar-row mx-1.5 rounded-md pl-[7px] pr-1 py-1.5 flex items-center gap-[9px] cursor-default outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60 ${
-        selected ? 'sidebar-row-selected' : ''
+      className={`group sidebar-row mx-1.5 rounded-md pl-[7px] pr-1 py-1 flex items-center gap-[9px] cursor-default outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60 ${
+        selected ? 'sidebar-row-selected' : ancestor ? 'sidebar-row-ancestor' : ''
       } ${dimmed ? 'opacity-40 hover:opacity-100 focus-within:opacity-100' : ''}`}
     >
       {lead}
       <div className="flex-1 min-w-0 flex flex-col gap-px">
-        <span className={`text-xs leading-[15px] text-ink truncate ${selected ? 'font-semibold' : ''}`}>{shown}</span>
+        <span className={`text-xs leading-[15px] text-ink truncate ${selected || ancestor ? 'font-semibold' : ''}`}>{shown}</span>
         {detail && <span className="text-[10.5px] leading-[13px] text-ink-muted truncate">{detail}</span>}
       </div>
       {chip && <span className="shrink-0 hidden group-hover:flex group-focus-within:flex">{chip}</span>}
+      {keep}
       {/* At rest the row ends in one slot, and pointing at the row or tabbing
         * into it swaps that slot for its actions, so the end of the row never
         * shifts under the name. Edit and delete are not among them: they are
@@ -869,4 +901,3 @@ function Row({
 function Empty({ children }: { children: React.ReactNode }): JSX.Element {
   return <p className="px-3.5 py-1 text-[11px] leading-snug text-ink-muted">{children}</p>;
 }
-

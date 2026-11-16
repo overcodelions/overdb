@@ -21,7 +21,6 @@ const MAIN_SLOT = 'bottom-rail-main';
 
 export function BottomRail(): JSX.Element {
   const settings = useStore((s) => s.settings);
-  const setSheet = useStore((s) => s.setSheet);
 
   return (
     <div className="h-7 shrink-0 border-t border-card bg-surface-muted flex items-stretch text-[11px] text-ink-faint">
@@ -33,26 +32,9 @@ export function BottomRail(): JSX.Element {
         // landed 5px right of the sidebar's own, so the long vertical line
         // down the window took a visible jog on its last 28px.
         <>
-          <div
-            style={{ width: settings.sidebarWidth }}
-            className="shrink-0 min-w-0 border-r border-card px-3 flex items-center gap-2"
-          >
-            <button
-              onClick={() => setSheet({ kind: 'newConnection' })}
-              className="text-ink-muted hover:text-accent flex items-center gap-1.5 whitespace-nowrap"
-            >
-              <span className="text-sm leading-none">+</span>
-              New connection
-            </button>
-            <div className="flex-1" />
-            <button
-              onClick={() => setSheet({ kind: 'importConnections' })}
-              title="Import from DataGrip, DataSpell, IntelliJ, DBeaver or ~/.pgpass"
-              className="hover:text-accent"
-            >
-              Import
-            </button>
-          </div>
+          {/* Empty: making a connection, or importing them, is the sidebar's
+              + menu now. The cell stays so the rail keeps the columns above it. */}
+          <div style={{ width: settings.sidebarWidth }} className="shrink-0 min-w-0 border-r border-card" />
           {/* The resizer's own column, continued. Nothing to drag down here
               — it exists so the main slot starts where the pane above it
               does. */}
