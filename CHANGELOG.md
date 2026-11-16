@@ -7,6 +7,8 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-15
+
 ### Added
 - **Row differences** in an environment set's comparison: which rows differ,
   not just whether they do. Rows are matched on the primary key or a unique
@@ -20,6 +22,24 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - The same rows returned in a different order are now the same rows. Without
   an `ORDER BY` two servers owe you no particular order, and the comparison
   used to call that "same number of rows, different values".
+- A calmer sidebar. Connection rows are one line, with host and database on
+  hover, or on a second line when two connections share a name. Branches
+  are one-line rows under their connection, joined by a guide line; the
+  routed and selected ones always show, then "+ N more". Branch management
+  moves to the connection's menu and the Services switch.
+- No environment tabs in the sidebar: headings fold, search matches
+  environments, and ⌥-click or a right click on a heading shows only that
+  environment. The Prod heading is red wherever it appears.
+- One + beside the search for new connections, sets, branches and import;
+  the bottom rail no longer carries them. The dock is "Environment sets",
+  as on the home page.
+- The agent mark stays visible on hover, and turns accent with a pulse
+  while an agent has queried the connection in the last 10 minutes. A
+  branch shows it when that branch itself is exposed to agents.
+- The Services popover shows each proxy's base, Rebuild, and What services
+  see, and exactly one row per proxy shows the ⇄ for where services go.
+- Green means connected in the sidebar, for branches as well as
+  connections.
 
 ### Security
 - Electron 41 → 44. Electron 41 is out of support, and nine advisories
@@ -754,7 +774,8 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - DynamoDB has no server-side read-only session. Use read-only IAM credentials
   for a durable production boundary.
 
-[Unreleased]: https://github.com/overcodelions/overdb/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/overcodelions/overdb/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/overcodelions/overdb/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/overcodelions/overdb/compare/v0.2.3...v0.3.0
 [0.2.3]: https://github.com/overcodelions/overdb/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/overcodelions/overdb/compare/v0.2.1...v0.2.2
