@@ -244,14 +244,21 @@ function CopyRow({ ticket, remote }: { ticket: TicketState; remote: boolean }): 
           </span>
         )}
         {/* Running is the usual state and carries no mark; stopped is the
-            exception, so it is the one that shows. */}
-        {!ticket.running && (
+            exception, so it is the one that shows — as a word, which needs
+            no legend. Amber when services are routed here and waiting on
+            it, as the Services switch says it; muted otherwise, because a
+            stopped branch is usually deliberate. Red stays for failures. */}
+        {!ticket.running && !busy && (
           <span
-            role="img"
-            aria-label="Stopped"
-            title="Stopped — start it from its menu"
-            className="w-[7px] h-[7px] rounded-full border-[1.5px] border-ink-faint"
-          />
+            title={
+              serving
+                ? 'Stopped — your services are routed here and will wait until it starts. Start it from its menu, or it starts when a service connects.'
+                : 'Stopped — its data is kept. Start it from its menu.'
+            }
+            className={`text-[10.5px] ${serving ? 'text-warn-strong' : 'text-ink-muted'}`}
+          >
+            stopped
+          </span>
         )}
       </span>
       <span className={`shrink-0 items-center ${menu ? 'flex' : 'hidden group-hover:flex group-focus-within:flex'}`}>
