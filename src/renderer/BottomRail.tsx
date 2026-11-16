@@ -32,8 +32,8 @@ export function BottomRail(): JSX.Element {
         // landed 5px right of the sidebar's own, so the long vertical line
         // down the window took a visible jog on its last 28px.
         <>
-          /* Empty: making a connection, or importing them, is the sidebar's
-             + menu now. The cell stays so the rail keeps the columns above it. */
+          {/* Empty: making a connection, or importing them, is the sidebar's
+              + menu now. The cell stays so the rail keeps the columns above it. */}
           <div style={{ width: settings.sidebarWidth }} className="shrink-0 min-w-0 border-r border-card" />
           {/* The resizer's own column, continued. Nothing to drag down here
               — it exists so the main slot starts where the pane above it

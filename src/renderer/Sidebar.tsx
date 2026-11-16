@@ -7,13 +7,12 @@ import { EnvSetSuggestion } from './Welcome';
 import { TAG_MONO, TAG_TEXT } from './engineTags';
 import { middleTruncate, nameBudget } from '@shared/truncate';
 import { useTickets } from './ticketsStore';
-import { Branches, servicesView } from './TicketSection';
+import { Branches, RoutedIcon, servicesView } from './TicketSection';
 import { devInstanceRefusal, isProxyConnectionId } from '@shared/instances';
 import { Dropdown, MenuDivider, MenuItem } from './Menu';
 import { MAP_TAB, openPane } from './queryStore';
-import { Agent } from './Icons';
 import { agentReach } from '@shared/hostedConnection';
-import { clockTime, useAgentActivity, useAgentActivityStore } from './agentActivity';
+import { AgentMark, AgentWatch } from './AgentMark';
 
 /// Which sections the user has folded away. Per-viewer convenience, so it
 /// lives in the browser rather than the app store — and every access is
@@ -150,8 +149,9 @@ export function Sidebar(): JSX.Element {
   const looseByEnv = ENV_ORDER.map((e) => ({ env: e, items: loose.filter((c) => c.env === e) })).filter((b) => b.items.length > 0);
   // Branches whose connection was deleted still need a home.
   const orphans = ticketState.tickets.some((t) => !connections.some((c) => c.id === t.sourceConnectionId));
-  // Only watch what agents do while there is a connection they can reach.
-  const agentsReach = connections.some((c) => c.mcpExposed);
+  // Only watch what agents do while there is a connection — or a branch —
+  // they can reach.
+  const agentsReach = allConnections.some((c) => c.mcpExposed);
 
   const toggle = (key: string) => setCollapsed((prev) => ({ ...prev, [key]: !prev[key] }));
   // A filter that hides its results inside a folded section is broken, so
@@ -464,39 +464,6 @@ function detailFor(conn: Connection): string {
   return parts.join(' · ');
 }
 
-/// Agent activity is polled only while this is mounted: the sidebar mounts
-/// it while some connection is open to agents, so a recent query lights up
-/// that connection's mark.
-function AgentWatch(): null {
-  useAgentActivity(30_000);
-  return null;
-}
-
-/// How recent an agent's query must be for the mark to say one is at work.
-const AGENT_RECENT_MS = 10 * 60_000;
-
-/// Shown only when something other than you can read the connection — see
-/// `agentReach`. Quiet while nothing is using that; in the accent colour,
-/// with a pulse, while an agent has queried it in the last few minutes, so
-/// the mark is news when there is news.
-function AgentMark({ connection }: { connection: Connection }): JSX.Element | null {
-  const activity = useAgentActivityStore((s) => s.activity);
-  const reach = agentReach(connection);
-  if (!reach) return null;
-  const cutoff = Date.now() - AGENT_RECENT_MS;
-  const recent = activity.filter((a) => a.connection === connection.name && Date.parse(a.at) >= cutoff);
-  const last = recent.reduce<string | null>((m, a) => (m === null || a.at > m ? a.at : m), null);
-  const label = last
-    ? `${reach} An agent ran ${recent.length} ${recent.length === 1 ? 'query' : 'queries'} here in the last 10 minutes, the last at ${clockTime(last)}.`
-    : reach;
-  return (
-    <span title={label} aria-label={label} role="img" className={`relative shrink-0 w-[20px] flex justify-center ${last ? 'text-accent' : 'text-ink-muted'}`}>
-      <Agent className="w-3.5 h-3.5" />
-      {last && <span aria-hidden="true" className="absolute -top-0.5 right-0.5 w-1.5 h-1.5 rounded-full bg-accent motion-safe:animate-pulse" />}
-    </span>
-  );
-}
-
 /// Connected, or the last attempt failed, as a pip on the engine tile's
 /// corner — status reads with the thing it is the status of, and the row's
 /// end is left to the row's actions. Not connected is the common case and
@@ -576,11 +543,16 @@ function ConnectionRow({
   const togglePin = useStore((s) => s.togglePin);
   const state = useStore((s) => s.connState[connection.id]);
   const tickets = useTickets((s) => s.tickets);
+  const proxies = useTickets((s) => s.proxies);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   // One of its branches is open: the connection it came from says so, so
   // you can see whose branch you are in without reading the title bar.
   const branchOpen =
     selection?.kind === 'connection' && tickets.some((t) => t.connectionId === selection.id && t.sourceConnectionId === connection.id);
+  // The ⇄ marks whichever row services reach, one per proxy: here when they
+  // reach the server itself, on the branch when they are switched to one.
+  const proxy = proxies.find((p) => p.source === connection.id);
+  const servicesHere = !!proxy?.running && proxy.config.target.kind === 'server';
 
   const requestDelete = () =>
     askConfirm({
@@ -606,7 +578,24 @@ function ConnectionRow({
         lead={<EngineTile connection={connection} state={state} />}
         // The agent mark stays put on hover: whether agents can reach a
         // connection is not something to lose the moment you point at it.
-        keep={reach ? <AgentMark connection={connection} /> : null}
+        keep={
+          reach || servicesHere ? (
+            <>
+              {reach && <AgentMark connection={connection} />}
+              {servicesHere && (
+                <span
+                  role="img"
+                  aria-label="Your services reach this server"
+                  title="Your services reach this server itself, not a branch"
+                  className="shrink-0 w-[18px] flex justify-center text-accent-strong"
+                >
+                  <RoutedIcon />
+                </span>
+              )}
+            </>
+          ) : null
+        }
+        keepWidth={(reach ? 20 : 0) + (servicesHere ? 18 : 0)}
         rest={connection.pinned ? <StarMark /> : null}
         ancestor={branchOpen}
         pinned={connection.pinned}
@@ -794,6 +783,7 @@ function Row({
   lead,
   chip,
   keep,
+  keepWidth = 20,
   rest,
   selected,
   ancestor,
@@ -820,6 +810,8 @@ function Row({
   rest?: React.ReactNode;
   /// Marks that show at rest and on hover alike, before the swapping slot.
   keep?: React.ReactNode;
+  /// Room the kept marks take, for the name's budget.
+  keepWidth?: number;
   selected: boolean;
   /// Something under this row is the one open — a branch of it.
   ancestor?: boolean;
@@ -840,7 +832,7 @@ function Row({
   // renders as the same row. Budgeted for the hover actions, not the resting
   // slot: a name that is cut again the moment you point at it moves.
   const actionsWidth = (onPin ? 22 : 0) + (onMore ? 22 : 0);
-  const shown = middleTruncate(label, nameBudget(width, 20, Math.max(actionsWidth, rest ? 22 : 0) + (keep ? 20 : 0)));
+  const shown = middleTruncate(label, nameBudget(width, 20, Math.max(actionsWidth, rest ? 22 : 0) + (keep ? keepWidth : 0)));
 
   return (
     // A div rather than a button: a button nested inside a button is

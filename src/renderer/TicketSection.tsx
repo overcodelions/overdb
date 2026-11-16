@@ -2,6 +2,7 @@ import { useState } from 'react';
 import type { BaselineRecord, ProxyState, TicketState } from '@shared/instances';
 import { baseIsNewer, baseOf, proxyConnectionId } from '@shared/instances';
 import { useStore } from './store';
+import { AgentMark } from './AgentMark';
 import { Dropdown, MenuDivider, MenuItem } from './Menu';
 import { isTarget, proxyFor, routeTo, targetItems, useTickets } from './ticketsStore';
 
@@ -155,7 +156,7 @@ export function Branches({
 }
 
 /// Services reach this: the Services switch's own mark.
-function RoutedIcon(): JSX.Element {
+export function RoutedIcon(): JSX.Element {
   return (
     <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <path d="M4 7h11" /><path d="M12 3l4 4-4 4" /><path d="M20 17H9" /><path d="M12 13l-4 4 4 4" />
@@ -180,6 +181,9 @@ function CopyRow({ ticket, remote }: { ticket: TicketState; remote: boolean }): 
   const setSheet = useStore((s) => s.setSheet);
   const askConfirm = useStore((s) => s.askConfirm);
   const selection = useStore((s) => s.selection);
+  // The branch's own connection: agents reach a branch only when it is
+  // exposed itself, never through the connection it was made from.
+  const conn = useStore((s) => s.connections.find((c) => c.id === ticket.connectionId));
   const [menu, setMenu] = useState(false);
   const selected = selection?.kind === 'connection' && selection.id === ticket.connectionId;
   const proxy = proxyFor(t, ticket.sourceConnectionId);
@@ -216,9 +220,11 @@ function CopyRow({ ticket, remote }: { ticket: TicketState; remote: boolean }): 
         <span className={`text-[12px] truncate ${selected ? 'font-semibold text-ink' : ticket.running ? 'text-ink' : 'text-ink-muted'}`}>{ticket.name}</span>
         {busy && <span className="shrink-0 text-[10.5px] text-ink-muted">{busy}</span>}
       </button>
-      {/* At rest: whether services reach it and whether it runs. On hover the
-          slot becomes ⋯, so the end of the row never shifts under the name. */}
-      <span className={`shrink-0 items-center gap-1.5 pr-1.5 ${menu ? 'hidden' : 'flex group-hover:hidden group-focus-within:hidden'}`}>
+      {/* Whether services reach it and whether it runs stay put on hover —
+          state is not something to lose the moment you point at it. The ⋯
+          appears beside them. */}
+      <span className="shrink-0 flex items-center gap-1.5 pr-1.5">
+        {conn && <AgentMark connection={conn} />}
         {serving && (
           <span role="img" aria-label="Your services reach this branch" title="Your services reach this branch" className="text-accent-strong flex">
             <RoutedIcon />
