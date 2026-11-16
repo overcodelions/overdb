@@ -184,6 +184,7 @@ function CopyRow({ ticket, remote }: { ticket: TicketState; remote: boolean }): 
   // The branch's own connection: agents reach a branch only when it is
   // exposed itself, never through the connection it was made from.
   const conn = useStore((s) => s.connections.find((c) => c.id === ticket.connectionId));
+  const connState = useStore((s) => s.connState[ticket.connectionId]);
   const [menu, setMenu] = useState(false);
   const selected = selection?.kind === 'connection' && selection.id === ticket.connectionId;
   const proxy = proxyFor(t, ticket.sourceConnectionId);
@@ -214,8 +215,18 @@ function CopyRow({ ticket, remote }: { ticket: TicketState; remote: boolean }): 
         title={tip}
         className="flex-1 min-w-0 h-full flex items-center gap-1.5 text-left rounded outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60"
       >
-        <span className="shrink-0 text-accent-strong">
+        {/* Green means connected, everywhere: the same pip on the same corner
+            as a connection's engine tile. */}
+        <span className="relative shrink-0 flex text-accent-strong">
           <BranchIcon />
+          {(connState === 'open' || connState === 'error') && (
+            <span
+              role="img"
+              aria-label={connState === 'open' ? 'Connected' : 'Last attempt failed'}
+              title={connState === 'open' ? 'Connected' : 'Last attempt failed'}
+              className={`status-pip ${connState === 'open' ? 'bg-good' : 'bg-bad'}`}
+            />
+          )}
         </span>
         <span className={`text-[12px] truncate ${selected ? 'font-semibold text-ink' : ticket.running ? 'text-ink' : 'text-ink-muted'}`}>{ticket.name}</span>
         {busy && <span className="shrink-0 text-[10.5px] text-ink-muted">{busy}</span>}
@@ -230,11 +241,16 @@ function CopyRow({ ticket, remote }: { ticket: TicketState; remote: boolean }): 
             <RoutedIcon />
           </span>
         )}
-        <span
-          role="img"
-          aria-label={ticket.running ? 'Running' : 'Stopped'}
-          className={`w-[7px] h-[7px] rounded-full ${ticket.running ? 'bg-good' : 'border-[1.5px] border-ink-faint'}`}
-        />
+        {/* Running is the usual state and carries no mark; stopped is the
+            exception, so it is the one that shows. */}
+        {!ticket.running && (
+          <span
+            role="img"
+            aria-label="Stopped"
+            title="Stopped — start it from its menu"
+            className="w-[7px] h-[7px] rounded-full border-[1.5px] border-ink-faint"
+          />
+        )}
       </span>
       <span className={`shrink-0 items-center ${menu ? 'flex' : 'hidden group-hover:flex group-focus-within:flex'}`}>
         <button
