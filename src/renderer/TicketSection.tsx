@@ -215,16 +215,18 @@ function CopyRow({ ticket, remote }: { ticket: TicketState; remote: boolean }): 
         title={tip}
         className="flex-1 min-w-0 h-full flex items-center gap-1.5 text-left rounded outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/60"
       >
-        {/* Green means connected, everywhere: the same pip on the same corner
-            as a connection's engine tile. */}
-        <span className="relative shrink-0 flex text-accent-strong">
+        {/* Green means connected, everywhere: the pip on the corner of a
+            tile, as on a connection's engine tile. A smaller tile and pip
+            than a connection's, so a branch still reads as under it — and
+            the tile keeps the pip off the glyph itself. */}
+        <span className="relative shrink-0 w-4 h-4 rounded-[4px] bg-accent/15 text-accent-strong flex items-center justify-center">
           <BranchIcon />
           {(connState === 'open' || connState === 'error') && (
             <span
               role="img"
               aria-label={connState === 'open' ? 'Connected' : 'Last attempt failed'}
               title={connState === 'open' ? 'Connected' : 'Last attempt failed'}
-              className={`status-pip ${connState === 'open' ? 'bg-good' : 'bg-bad'}`}
+              className={`status-pip !w-1.5 !h-1.5 ${connState === 'open' ? 'bg-good' : 'bg-bad'}`}
             />
           )}
         </span>
