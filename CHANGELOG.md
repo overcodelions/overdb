@@ -7,6 +7,8 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-18
+
 ### Added
 - **Publishing to your org's server has its own window.** The Agents popover keeps one row, which says whether the connection is on the org's server, plus **Publish to ‹org›…**. The window walks through three steps: overcli signed in to the org, how the server signs in (host and login), and the record, folded except for prod. It stays open while you go to overcli. (#191)
 
@@ -781,7 +783,8 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - DynamoDB has no server-side read-only session. Use read-only IAM credentials
   for a durable production boundary.
 
-[Unreleased]: https://github.com/overcodelions/overdb/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/overcodelions/overdb/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/overcodelions/overdb/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/overcodelions/overdb/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/overcodelions/overdb/compare/v0.2.3...v0.3.0
 [0.2.3]: https://github.com/overcodelions/overdb/compare/v0.2.2...v0.2.3
