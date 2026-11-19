@@ -389,6 +389,47 @@ export function connectionPushFileName(push: Pick<ConnectionPush, 'id' | 'create
   return `${push.createdAt.replace(/[:.]/g, '-')}-${push.id}.json`;
 }
 
+/// Where overcli would send a published connection, as it says in
+/// `.status.json` beside the pushes (overcli writes it; its
+/// src/shared/overdbConnection.ts owns the format). `null` from an overcli
+/// too old to write one: then overdb can't say, and says so.
+export const CONNECTIONS_STATUS_FILE = '.status.json';
+
+export type OvercliOrg =
+  | { signedIn: true; org?: string; url: string; waiting?: string }
+  | { signedIn: false; error: string; waiting?: string };
+
+export function parseOvercliOrg(raw: unknown): OvercliOrg | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const r = raw as Record<string, unknown>;
+  if (r.version !== 1) return null;
+  const waiting = typeof r.waiting === 'string' && r.waiting ? { waiting: r.waiting.slice(0, 500) } : {};
+  if (r.signedIn === true && typeof r.url === 'string' && r.url) {
+    return { signedIn: true, url: r.url, ...(typeof r.org === 'string' && r.org ? { org: r.org } : {}), ...waiting };
+  }
+  if (r.signedIn === false) {
+    return { signedIn: false, error: typeof r.error === 'string' && r.error ? r.error.slice(0, 500) : 'overcli isn’t signed in to an org.', ...waiting };
+  }
+  return null;
+}
+
+/// Where one push has got to, from the folder overcli has filed it under.
+export type PushState =
+  | { state: 'waiting' }
+  | { state: 'sent' }
+  | { state: 'rejected'; reason: string }
+  | { state: 'unknown' };
+
+/// The org a push goes to, by name if overcli knows it, else by address.
+export function orgLabel(org: Extract<OvercliOrg, { signedIn: true }>): string {
+  if (org.org) return org.org;
+  try {
+    return new URL(org.url).host;
+  } catch {
+    return org.url;
+  }
+}
+
 /// What the person has to arrange on the server for this connection to
 /// sign in, in a sentence — shown before publishing and after.
 export function hostedCredentialNote(h: HostedConnection): string {

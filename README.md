@@ -145,7 +145,9 @@ Same seven tools, same read-only rules (the code is shared), plain Node 22.12+, 
 
 Give it a database user made for agents, read-only by grant as well as by session, rather than a person's login.
 
-You don't write that file by hand for a connection you already have. **Publish to your org's server…** in a connection's Agents menu shows the exact record that would leave your machine, lets you name the agents' login, and hands it to overcli (into `~/.overcli/inbox/connections/`), which publishes it to your org's server. A `prod` connection asks for its name first. The option appears once your overcli can take connections.
+You don't write that file by hand for a connection you already have. **Publish to ‹your org›…** at the bottom of a connection's Agents menu opens a window that shows the exact record that would leave your machine, lets you name the agents' login, and hands it to overcli (into `~/.overcli/inbox/connections/`), which publishes it to your org's server. A `prod` connection asks for its name first. The option appears once your overcli can take connections.
+
+**overcli has to be signed in to your org first** — in overcli, Settings → Your orgs. That sign-in is what decides which org's server a connection goes to. The Publish window walks through it: it says which org the connection goes to, or asks you to sign overcli in first and ticks when you have (a push made before then waits in overcli). After Publish it follows the push until the server has it or turns it down, and lists what an admin still does there — set it up under Setup → Databases in the org's console, with its password if it needs one.
 
 ## Engines
 

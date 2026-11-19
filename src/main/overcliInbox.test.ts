@@ -4,7 +4,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import type { HandoffDraft } from '../shared/overcliHandoff';
-import { overcliAvailable, overcliTakesConnections, sendConnectionToOvercli, sendToOvercli } from './overcliInbox';
+import { connectionPushState, overcliAvailable, overcliOrg, overcliTakesConnections, sendConnectionToOvercli, sendToOvercli } from './overcliInbox';
 import type { HostedConnection } from '../shared/hostedConnection';
 
 let root: string;
@@ -94,12 +94,70 @@ describe('sendConnectionToOvercli', () => {
     const dir = path.join(inbox, 'connections');
     fs.mkdirSync(dir, { recursive: true });
     const res = sendConnectionToOvercli(hosted, { dir, id: 'p1', now: Date.UTC(2026, 0, 2, 3, 4, 5) });
-    expect(res).toEqual({ ok: true, id: 'p1' });
+    expect(res).toEqual({ ok: true, id: 'p1', file: '2026-01-02T03-04-05-000Z-p1.json' });
     expect(fs.readdirSync(inbox)).toEqual(['connections']);
     const files = fs.readdirSync(dir);
     expect(files).toEqual(['2026-01-02T03-04-05-000Z-p1.json']);
     expect(JSON.parse(fs.readFileSync(path.join(dir, files[0]), 'utf-8'))).toEqual({
       version: 1, kind: 'overdb-connection', id: 'p1', createdAt: '2026-01-02T03:04:05.000Z', connection: hosted,
     });
+  });
+});
+
+describe('overcliOrg', () => {
+  const at = () => path.join(inbox, 'connections');
+  const write = (body: unknown) => {
+    fs.mkdirSync(at(), { recursive: true });
+    fs.writeFileSync(path.join(at(), '.status.json'), typeof body === 'string' ? body : JSON.stringify(body));
+  };
+
+  it('is null from an overcli that writes no status', () => {
+    fs.mkdirSync(at(), { recursive: true });
+    expect(overcliOrg(at())).toBeNull();
+  });
+
+  it('names the org overcli is signed in to', () => {
+    write({ version: 1, updatedAt: '2026-01-01T00:00:00.000Z', signedIn: true, org: 'Acme', url: 'https://overgo.acme.dev' });
+    expect(overcliOrg(at())).toEqual({ signedIn: true, org: 'Acme', url: 'https://overgo.acme.dev' });
+  });
+
+  it('says when overcli is signed in to none, and what a push is waiting on', () => {
+    write({ version: 1, updatedAt: '2026-01-01T00:00:00.000Z', signedIn: false, error: 'Sign in first.', waiting: 'Sign in first.' });
+    expect(overcliOrg(at())).toEqual({ signedIn: false, error: 'Sign in first.', waiting: 'Sign in first.' });
+  });
+
+  it('is null for a file it cannot read or a version it does not know', () => {
+    write('{ not json');
+    expect(overcliOrg(at())).toBeNull();
+    write({ version: 2, signedIn: true, url: 'https://overgo.acme.dev' });
+    expect(overcliOrg(at())).toBeNull();
+  });
+});
+
+describe('connectionPushState', () => {
+  const file = '2026-01-02T03-04-05-000Z-p1.json';
+  let dir: string;
+  beforeEach(() => {
+    dir = path.join(inbox, 'connections');
+    for (const sub of ['done', 'rejected']) fs.mkdirSync(path.join(dir, sub), { recursive: true });
+  });
+
+  it('follows a push from waiting to sent', () => {
+    expect(connectionPushState(file, dir)).toEqual({ state: 'unknown' });
+    fs.writeFileSync(path.join(dir, file), '{}');
+    expect(connectionPushState(file, dir)).toEqual({ state: 'waiting' });
+    fs.renameSync(path.join(dir, file), path.join(dir, 'done', file));
+    expect(connectionPushState(file, dir)).toEqual({ state: 'sent' });
+  });
+
+  it('gives the reason a push was rejected', () => {
+    fs.writeFileSync(path.join(dir, 'rejected', file), '{}');
+    fs.writeFileSync(path.join(dir, 'rejected', `${file}.reason.txt`), 'not allowed\n');
+    expect(connectionPushState(file, dir)).toEqual({ state: 'rejected', reason: 'not allowed' });
+  });
+
+  it('never looks outside the folder', () => {
+    expect(connectionPushState('../org.json', dir)).toEqual({ state: 'unknown' });
+    expect(connectionPushState('.status.json', dir)).toEqual({ state: 'unknown' });
   });
 });

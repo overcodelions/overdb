@@ -7,6 +7,13 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+- **Publishing to your org's server has its own window.** The Agents popover keeps one row, which says whether the connection is on the org's server, plus **Publish to ‹org›…**. The window walks through three steps: overcli signed in to the org, how the server signs in (host and login), and the record, folded except for prod. It stays open while you go to overcli. (#191)
+
+### Fixed
+- **Publish says overcli has to be signed in to an org first.** The window names the org and server a connection goes to. If overcli isn't signed in, it says where to sign in and ticks itself when you do. Needs an overcli that writes its status, overcodelions/overcli#1210. With an older one, it says to check Settings → Your orgs. (#189)
+- **After Publish, the window follows the push** to where it really is: waiting for overcli's sign-in, on its way, on the org's server, or turned down with the server's reason. It replaces "Handed to overcli", which showed even when nothing arrived. It then lists what an admin still does: set the connection up under Setup → Databases in the org's console, with its password if it needs one. It links to the console and can copy the steps. (#190)
+
 ## [0.4.0] - 2026-11-15
 
 ### Added

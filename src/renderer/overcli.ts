@@ -8,6 +8,8 @@
 
 import { create } from 'zustand';
 
+import type { OvercliOrg } from '@shared/hostedConnection';
+
 import {
   linkedRepos,
   repoLinkOwner,
@@ -24,20 +26,26 @@ export const OVERCLI_SITE = 'https://overcli.app';
 /// One answer shared by every button — a slow-query list is many rows — and
 /// re-asked whenever the window comes back into focus: that is when overcli
 /// is most likely to have just been installed.
-const useStatus = create<{ available: boolean | null; takesConnections: boolean }>(() => ({
+const useStatus = create<{ available: boolean | null; takesConnections: boolean; org: OvercliOrg | null }>(() => ({
   available: null,
   takesConnections: false,
+  org: null,
 }));
+
+/// Ask overcli again now — the Publish panel does on opening, since a
+/// sign-in in overcli may be what the person just went off to do.
+export function refreshOvercliStatus(): Promise<void> {
+  return window.overdb
+    .invoke('overcli:status')
+    .then((s) => useStatus.setState({ available: s.available, takesConnections: s.takesConnections, org: s.org }))
+    .catch(() => {});
+}
 
 let watching = false;
 function watchStatus(): void {
   if (watching) return;
   watching = true;
-  const check = () =>
-    void window.overdb
-      .invoke('overcli:status')
-      .then((s) => useStatus.setState({ available: s.available, takesConnections: s.takesConnections }))
-      .catch(() => {});
+  const check = () => void refreshOvercliStatus();
   check();
   window.addEventListener('focus', check);
 }
@@ -47,6 +55,13 @@ function watchStatus(): void {
 export function useOvercliTakesConnections(): boolean {
   watchStatus();
   return useStatus((s) => s.takesConnections);
+}
+
+/// Which org overcli would publish to, or that it is signed in to none;
+/// `null` when this overcli doesn't say.
+export function useOvercliOrg(): OvercliOrg | null {
+  watchStatus();
+  return useStatus((s) => s.org);
 }
 
 export function useOvercliAvailable(): boolean | null {
