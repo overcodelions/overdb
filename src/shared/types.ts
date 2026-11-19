@@ -14,7 +14,7 @@ export type AiTool = 'claude' | 'codex' | 'gemini';
 
 export type { Engine, Variant } from './engines';
 import type { HandoffDraft } from './overcliHandoff';
-import type { HostedConnection } from './hostedConnection';
+import type { HostedConnection, OvercliOrg, PushState } from './hostedConnection';
 import type { AgentContext, AgentContextSetting, TenantRef } from './agentContext';
 import type { Engine, Variant } from './engines';
 import type { FormatStyle } from './formatSql';
@@ -629,7 +629,11 @@ export interface IPCInvokeMap {
   /// installing overcli mid-session should light the button up.
   /// `takesConnections`: its inbox has a connections folder, so it can
   /// publish a connection to the org's server — see hostedConnection.ts.
-  'overcli:status': () => { available: boolean; takesConnections: boolean };
+  /// `org`: which org overcli would publish to, or that it is signed in to
+  /// none — from the status file it keeps there; `null` from an older overcli.
+  'overcli:status': () => { available: boolean; takesConnections: boolean; org: OvercliOrg | null };
+  /// Where a published connection has got to, by the file it was handed in as.
+  'overcli:pushState': (args: { file: string }) => PushState;
   /// Write one handoff into overcli's inbox. Main stamps it and rebuilds it
   /// from the known fields; see src/shared/overcliHandoff.ts.
   'overcli:send': (draft: HandoffDraft) => { ok: true; id: string } | { ok: false; error: string };
@@ -810,7 +814,7 @@ export interface IPCInvokeMap {
   /// Publish it through overcli. A prod connection needs `confirm` to be
   /// its name, as for writes and agents.
   'conn:publishHosted': (args: { connectionId: string; user?: string; host?: string; confirm?: string }) =>
-    | { ok: true; value: HostedConnection; publishedAt: string }
+    | { ok: true; value: HostedConnection; publishedAt: string; pushFile: string }
     | { ok: false; error: string };
   /// What agents are told about this connection's database, worked out,
   /// and the setting behind it. `detect` reads the catalog (connecting if

@@ -5,7 +5,7 @@ import { Dropdown } from './Menu';
 import { Agent, Chevron } from './Icons';
 import { ProdConfirm, useAgentToggle } from './WriteControls';
 import { AgentContextEditor } from './AgentContextEditor';
-import { PublishToOvergo } from './PublishToOvergo';
+import { PublishToOrgModal, PublishToOrgRow } from './PublishToOvergo';
 import { activityOutcome, activityText, clientLabel, clockTime, shortPath, startOfToday, useAgentActivity } from './agentActivity';
 
 /// The header's answer to "can an agent see this, and is one looking".
@@ -24,6 +24,9 @@ export function AgentsChip({ conn }: { conn: Connection }): JSX.Element {
   const agents = useAgentToggle(conn);
   const setSheet = useStore((s) => s.setSheet);
   const [panel, setPanel] = useState(false);
+  // Publishing has its own modal, outside the popover, so closing the
+  // popover (or a click outside it) doesn't take the modal with it.
+  const [publishing, setPublishing] = useState(false);
   // Faster while open: the panel shows calls as they happen. Exposed, the
   // chip's count is worth keeping fresh; hidden, it only needs to know
   // whether anything is connected.
@@ -163,9 +166,16 @@ export function AgentsChip({ conn }: { conn: Connection }): JSX.Element {
 
           <div className="h-px bg-rule" />
           <AgentContextEditor conn={conn} onEdit={() => openSheet('briefing')} />
-          <PublishToOvergo conn={conn} />
+          <PublishToOrgRow
+            conn={conn}
+            onOpen={() => {
+              setPanel(false);
+              setPublishing(true);
+            }}
+          />
         </div>
       </Dropdown>
+      {publishing && <PublishToOrgModal key={conn.id} conn={conn} onClose={() => setPublishing(false)} />}
     </div>
   );
 }

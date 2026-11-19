@@ -48,7 +48,7 @@ import { classify } from '../shared/sqlGuard';
 import { bindFor } from '../shared/params';
 import * as writeGate from './writeGate';
 import { discoverLocal } from './discoverLocal';
-import { overcliAvailable, overcliTakesConnections, sendConnectionToOvercli, sendToOvercli } from './overcliInbox';
+import { connectionPushState, overcliAvailable, overcliOrg, overcliTakesConnections, sendConnectionToOvercli, sendToOvercli } from './overcliInbox';
 import { hostedContext, toHosted } from '../shared/hostedConnection';
 import type { HandoffDraft } from '../shared/overcliHandoff';
 import { installMenu } from './menu';
@@ -317,7 +317,11 @@ function registerIpc(): void {
     clipboard.writeText(text);
   });
 
-  ipcMain.handle('overcli:status', () => ({ available: overcliAvailable(), takesConnections: overcliTakesConnections() }));
+  ipcMain.handle('overcli:status', () => {
+    const takesConnections = overcliTakesConnections();
+    return { available: overcliAvailable(), takesConnections, org: takesConnections ? overcliOrg() : null };
+  });
+  ipcMain.handle('overcli:pushState', (_e, args: { file: string }) => connectionPushState(args.file));
   ipcMain.handle('overcli:send', (_e, draft: HandoffDraft) => sendToOvercli(draft));
   ipcMain.handle('overcli:pickRepo', async (_e, args: { name: string }) => {
     const res = await dialog.showOpenDialog({
@@ -2099,7 +2103,7 @@ function registerIpc(): void {
       Store.saveConnections(
         Store.load().connections.map((c) => (c.id === conn.id ? { ...c, orgPublishedAt: at } : c)),
       );
-      return { ...hosted, publishedAt: at };
+      return { ...hosted, publishedAt: at, pushFile: sent.file };
     },
   );
 
